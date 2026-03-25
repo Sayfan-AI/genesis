@@ -1,0 +1,52 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "genctl log --hook session-start"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "type": "command",
+        "command": "genctl log --hook session-end"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "genctl log --hook pre-tool-use"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "genctl log --hook post-tool-use"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "type": "command",
+        "command": "genctl log --hook post-tool-use-failure"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "type": "command",
+        "command": "genctl log --hook subagent-start"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "type": "command",
+        "command": "genctl log --hook subagent-stop"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "genctl log --hook user-prompt-submit"
+      }
+    ]
+  }
+}
