@@ -1,0 +1,23 @@
+# Onboarding: {{ project_name }}
+
+## Goal
+
+{{ goal }}
+
+{% if target_repos %}
+## Target Repositories
+
+{% for repo in target_repos %}
+- `{{ repo }}`
+{% endfor %}
+{% endif %}
+
+## Instructions
+
+This is the onboarding issue. The onboarding agent should:
+
+1. Review the goal above and ask the human clarifying questions
+2. Break the goal down into high-level milestones with done criteria
+3. Only detail the first milestone — future milestones stay high-level
+4. Begin execution on milestone 1
+5. Close this issue when onboarding is complete and milestone 1 is underway

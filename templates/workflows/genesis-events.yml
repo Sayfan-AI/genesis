@@ -1,0 +1,45 @@
+name: Genesis Orchestrator (Events)
+
+on:
+  issues:
+    types: [opened, closed, reopened, labeled]
+  pull_request:
+    types: [opened, closed, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    # Skip events from bots to prevent loops
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are the orchestrator for this genesis dev system. An event just occurred.
+
+            Event: ${{ github.event_name }} / ${{ github.event.action }}
+
+            Your job:
+            1. Read CLAUDE.md to understand the project goal and current state
+            2. Assess the event that triggered this run
+            3. Determine the appropriate response:
+               - New issue opened: assess priority, assign to appropriate agent
+               - Issue closed: check if milestone is complete, advance to next task
+               - Issue reopened: understand why, reassess and re-plan
+               - PR opened: review it
+               - PR merged: check if related issue can be closed, advance state
+               - Comment: parse for human feedback or instructions
+            4. Take action using the appropriate agent from .claude/agents/
+
+            Refer to .claude/agents/ for agent definitions and responsibilities.
+          claude_args: "--max-turns 10 --allowedTools Read,Edit,Bash,Glob,Grep,Agent"
