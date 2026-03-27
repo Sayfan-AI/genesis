@@ -1,8 +1,6 @@
 name: Genesis Orchestrator (Events)
 
 on:
-  push:
-    branches: [main]
   issues:
     types: [opened, closed, reopened, labeled]
   pull_request:
