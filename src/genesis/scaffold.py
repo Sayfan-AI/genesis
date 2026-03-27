@@ -19,6 +19,7 @@ SEED_AGENTS = [
 SEED_WORKFLOWS = [
     "genesis-orchestrator.yml",
     "genesis-events.yml",
+    "genesis-push-trigger.yml",
 ]
 
 SEED_SCRIPTS = [
