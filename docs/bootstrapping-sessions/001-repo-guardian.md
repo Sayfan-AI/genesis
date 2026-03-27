@@ -25,7 +25,7 @@ This runs a `gh` command as a different user without switching the active accoun
 
 **`id-token: write` permission missing.** The `claude-code-action` needs OIDC token exchange, which requires `id-token: write` in the workflow permissions block. Without it, the action fails with "Could not fetch an OIDC token."
 
-**No `push` trigger on events workflow.** The events workflow only had `issues`, `pull_request`, and `issue_comment` triggers. Direct pushes (e.g., fixing workflows) didn't trigger the orchestrator. Added `push: branches: [main]`.
+**`push` trigger doesn't work with claude-code-action.** Initially added `push: branches: [main]` to the events workflow so pushes would trigger the orchestrator. However, `claude-code-action` doesn't support the `push` event type — it only supports issue/PR/comment events and `workflow_dispatch`/`schedule`. Removed the push trigger. Pushes are picked up by the 10-minute cron instead.
 
 **Cron too infrequent.** Default was every 6 hours. Changed to every 10 minutes (`*/10 * * * *`) for faster feedback loops. Added "don't re-notify" guideline to the orchestrator so it doesn't spam the user on every cycle.
 
