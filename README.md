@@ -41,7 +41,7 @@ Every dev system gets a scaffold that it can evolve:
 - **Seed agents** — onboarding, project manager, human interaction, introspective, health
 - **Orchestrator workflows** — GitHub Actions (cron + event-triggered) launching Claude Agent SDK sessions
 - **Observability** — Claude Code hooks that automatically log all agent activity to Grafana Loki
-- **genctl** — a Rust CLI for human communication (A2H), issue management, logging, and config
+- **Scripts** — shell scripts for issue management and structured logging (zero binary distribution overhead)
 - **Meta-concepts** — principles the dev system operates by (see below)
 
 ## Meta-Concepts
@@ -94,7 +94,7 @@ The introspective agent can rewrite its own definition. The modification procedu
 │       ├──> Health (stuck detection, quality)        │
 │       └──> Worker Agents (designed by the system)   │
 │                                                     │
-│  CC Hooks ──genctl──> Grafana Loki (observability)  │
+│  CC Hooks ──scripts──> Grafana Loki (observability)  │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -106,16 +106,14 @@ The introspective agent can rewrite its own definition. The modification procedu
 
 The human's role is minimized by default. The system does everything it can autonomously, highlights what it can't (missing access, ambiguous requirements), and offers to do it if given access.
 
-## genctl
+## Genesis Scripts
 
-A Rust CLI that provides core capabilities to every dev system:
+Shell scripts (`.genesis/scripts/`) provide core capabilities to every dev system. No binary distribution needed — just bash, curl, and `gh` CLI.
 
 ```bash
-genctl a2h inform --message "Milestone 1 complete"    # Human communication
-genctl a2h authorize --action "merge PR #7" --risk low # Approval requests
-genctl issues create --title "Implement auth"          # Issue management
-genctl log --hook post-tool-use                        # Activity logging
-genctl config get ANTHROPIC_API_KEY                    # Config/secrets
+bash .genesis/scripts/log.sh post-tool-use              # Activity logging (called by CC hooks)
+bash .genesis/scripts/issues.sh create --title "Implement auth"  # Issue management
+bash .genesis/scripts/issues.sh list --status open       # List issues
 ```
 
 ## Project Structure
@@ -123,18 +121,15 @@ genctl config get ANTHROPIC_API_KEY                    # Config/secrets
 ```
 genesis/
 ├── src/genesis/          # Core scaffolding logic (Python)
-│   └── scaffold.py       # Create/augment repos with dev system scaffolding
-├── genctl/               # Dev system CLI (Rust)
-│   └── src/
-│       ├── main.rs       # CLI entry point (a2h, issues, log, config)
-│       ├── log_cmd.rs    # CC hooks → Loki logging
-│       └── config.rs     # Config file reader
+│   ├── scaffold.py       # Create/augment repos with dev system scaffolding
+│   └── github.py         # GitHub integration (repo creation, issue #1)
 ├── templates/            # Templates for scaffolded dev systems
 │   ├── agents/           # Seed agent definitions
+│   ├── scripts/          # log.sh, issues.sh
 │   ├── workflows/        # GitHub Actions orchestrator workflows
 │   ├── claude_md.md.j2   # CLAUDE.md template
 │   └── settings.json     # CC hooks configuration
-├── tests/e2e/            # End-to-end tests for all 3 topologies
+├── tests/e2e/            # End-to-end tests for all topologies
 ├── BRAINSTORMING.md      # Living design document
 └── CLAUDE.md             # Project instructions
 ```

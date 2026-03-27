@@ -227,7 +227,7 @@ Genesis seeds `.claude/settings.json` with HTTP hooks that POST structured log e
 | `SubagentStop` | Sub-agent finished (result) |
 | `UserPromptSubmit` | Human interaction (prompt text) |
 
-Each hook is `type: "http"` — fires a POST to the Loki push endpoint with structured JSON. Fully deterministic, no LLM in the logging loop.
+Each hook is `type: "command"` — calls `.genesis/scripts/log.sh` which reads the hook's stdin JSON, enriches it, and pushes to Loki via curl. Fully deterministic, no LLM in the logging loop. No binary distribution needed — just bash + curl.
 
 ### Why this approach
 - **Automatic** — every agent gets logging via hooks, no opt-in required
@@ -260,50 +260,175 @@ Full pricing: https://grafana.com/pricing/
 ### Aggregation
 The raw logs in Loki serve as the source of truth. If aggregated views are needed (weekly summaries, cross-project reports), a separate job can query Loki and produce them. This is not built into genesis — it's a goal you can feed to genesis if you want it.
 
-## genctl — Genesis Dev System CLI
+## Genesis Scripts (`.genesis/scripts/`)
 
-A Rust CLI tool that provides core capabilities to every dev system. Language-agnostic (any agent shells out to it), zero deployment (binary in the repo), works in GitHub Actions and CC hooks.
+Shell scripts that provide core capabilities to every dev system. No binary distribution needed — just bash, curl, and `gh` CLI (already available in GitHub Actions).
 
-### Commands
+### Scripts
+
+- **`log.sh`** — called by CC hooks. Reads hook stdin JSON, pushes structured logs to Loki via curl. Falls back to stderr if Loki is not configured.
+- **`issues.sh`** — thin wrapper around `gh` CLI. Provides `create`, `list`, `close`, `assign` subcommands.
+
+### Usage
 
 ```bash
-# A2H — human communication
-genctl a2h inform --message "Milestone 1 complete"
-genctl a2h authorize --action "merge PR #7" --risk low
-genctl a2h collect --question "Which auth provider?"
-genctl a2h escalate --issue 42 --reason "blocked on cloud credentials"
-genctl a2h result --milestone 1 --status complete
+# Logging (called automatically by CC hooks, or manually)
+bash .genesis/scripts/log.sh post-tool-use
 
-# Issues — abstract over GitHub Issues (pluggable: Linear, Jira)
-genctl issues create --title "Implement auth" --labels "milestone:1"
-genctl issues list --status open --milestone 1
-genctl issues close --id 5 --reason completed
-genctl issues assign --id 5 --to worker-1
-
-# Logging — structured logs to Loki
-genctl log --agent project-manager --action drilled_down_milestone --issue 42 --outcome success
-
-# Config/secrets — read credentials from GH Actions secrets or environment
-genctl config get ANTHROPIC_API_KEY
-genctl config get github-token
+# Issues
+bash .genesis/scripts/issues.sh create --title "Implement auth" --labels "milestone:1"
+bash .genesis/scripts/issues.sh list --status open --milestone 1
+bash .genesis/scripts/issues.sh close --id 5 --reason completed
+bash .genesis/scripts/issues.sh assign --id 5 --to worker-1
 ```
 
 ### Configuration
 
-Reads from `.genesis/config.toml`:
-- Loki endpoint + auth
-- A2H gateway URL
-- Issue backend (github, linear) + credentials
-- Project name
+Scripts read from `.genesis/config.toml` and environment variables:
+- `GENCTL_LOKI_URL`, `GENCTL_LOKI_USER`, `GENCTL_LOKI_TOKEN` — Loki credentials
+- `gh` CLI uses standard GitHub auth (GITHUB_TOKEN or `gh auth`)
 
-Genesis seeds this file at scaffold time.
+### Design Decision: Scripts over genctl CLI
 
-### Design
+We initially designed a Rust CLI (`genctl`) but chose shell scripts instead:
+- **Zero distribution overhead** — no binary to build, cache, or install
+- **Works everywhere** — bash + curl + gh are available on all GitHub Actions runners
+- **Simpler to evolve** — the introspective agent can modify scripts directly
+- **Good enough** — these are thin wrappers, not complex logic
+- **genctl can come later** — if scripts become unwieldy, the introspective agent can build a proper CLI
 
-- **Rust** — single static binary, fast startup (called frequently from hooks/agents)
-- **Pluggable backends** — issue manager wraps `gh` CLI for GitHub, swappable to Linear via config
-- **No deployment** — it's a binary, not a service. No gRPC, no sidecar.
-- **CC hooks call it** — the HTTP hooks can be replaced with command hooks calling `genctl log` directly
+## Memory System
+
+The dev system uses Claude Code's native memory mechanisms — CLAUDE.md files and `.claude/memory/` — as its persistent memory. Memory is how the system gets smarter across sessions. GitHub Actions runners are ephemeral; without committed memory, the system starts from scratch every time.
+
+### Memory is shared, not per-agent
+
+All agents read and write to the same memory system. No silos. Agents tag their memories with author context so you can filter by source. The introspective agent curates the memory: decides what's worth persisting, prunes stale entries, prevents duplication.
+
+### Where memory lives
+
+- **Project-level `CLAUDE.md`** — evolving understanding of the project: conventions, architecture decisions, human preferences
+- **Directory-level `CLAUDE.md` files** — context specific to subsystems (e.g., `src/auth/CLAUDE.md` for auth-related learnings)
+- **`.claude/memory/`** — structured memories with frontmatter (type, description, indexed in `MEMORY.md`)
+
+### What gets remembered
+
+- Patterns learned from failures ("this API paginates, always handle it")
+- Operational insights ("CI takes ~8 min, don't wait synchronously")
+- Human preferences ("prefers small PRs over large ones")
+- Risk areas ("module X has no tests, be careful")
+- Architecture decisions and their rationale
+- Cross-agent learnings (health agent flags something, introspective agent persists the insight)
+
+### What does NOT get remembered
+
+- Things derivable from code or git history
+- Ephemeral task state (use GitHub issues for that)
+- Debugging specifics (the fix is in the code, the commit message has context)
+
+### Curation
+
+The introspective agent is responsible for memory curation:
+- Watches agent activity (via Loki logs) for insights worth persisting
+- Writes memories to the appropriate level (project-wide vs directory-specific)
+- Prunes stale or outdated memories
+- Resolves conflicts when new learnings contradict old memories
+- Keeps `MEMORY.md` index concise
+
+## Seed Agents (Minimal Bootstrap Set)
+
+Genesis seeds only the minimum viable agent set. The dev system designs the rest.
+
+### Seeded at bootstrap
+
+- **Orchestrator agent** — the brain. Runs on every cron/event trigger via GitHub Actions. Assesses project state (via `issues.sh summary`), breaks down milestones into tasks, prioritizes, manages dependencies, dispatches work to other agents.
+- **Human interaction agent** — all communication with the human, both interactive and async. Onboarding is its first task (not a separate agent). See "Human Interaction" section below.
+- **Introspective agent** — must exist from day one. Watches how the system operates and evolves it. Creates new agents, tools, scripts. Curates the memory system.
+
+### Created by the introspective agent as needed
+
+- **Health / quality agent** — created when there are enough moving parts to monitor. Watches for stuck/looping agents, reviews PR quality, verifies done criteria.
+- **Worker agents** — created as specific task patterns emerge from the project's work.
+
+### Agent Responsibilities Breakdown
+
+| Responsibility | Agent |
+|---|---|
+| Assess state, delegate work | Orchestrator |
+| Break down milestones into tasks | Orchestrator |
+| Prioritization | Orchestrator |
+| Dependency management | Orchestrator |
+| Communicate with human | Human interaction |
+| Onboarding (goal refinement) | Human interaction (first task) |
+| Improve the system | Introspective |
+| Curate memory | Introspective |
+| Detect stuck/spinning | Health (created later) |
+| Quality control / PR review | Health (created later) |
+
+## Human Interaction (Detailed)
+
+The human interaction agent operates in two modes:
+
+### Interactive mode (human starts CC session)
+When a human opens a Claude Code session in the dev repo, the human interaction agent responds. This is achieved via CLAUDE.md instructions + skills. The agent:
+- Knows the project state (reads issues, milestones, recent activity)
+- Can answer questions about progress
+- Takes feedback and translates it into issue updates
+- Runs onboarding (its first interactive task)
+
+### Async mode (system reaches out to human)
+When the system needs something from the human (approval, access, clarification, or just reporting progress):
+- **Baseline:** opens a GitHub issue tagged `needs:human`. Always works, no setup needed.
+- **Optional channels** (configured during onboarding):
+  - Slack webhook notifications
+  - Email via GitHub notifications (free, already works)
+  - Daily digest committed as `.genesis/reports/daily-YYYY-MM-DD.md`
+  - A2H gateway (full protocol, when configured)
+
+### Onboarding configures comms
+During onboarding, the human interaction agent asks:
+
+> How do you want me to communicate with you?
+> - GitHub issues + email notifications (default, works out of the box)
+> - Slack notifications (I'll need a webhook URL)
+> - Daily digest file in the repo
+> - Something else?
+>
+> You can change this anytime.
+
+Then it **builds the comms infrastructure** based on the answer — creates notification scripts, cron workflows for digests, etc. No hard choices. Sensible defaults. Always overridable.
+
+### Principles
+- Don't bother the human with hard choices — offer options with clear defaults
+- The human can always override by opening issues, commenting, or starting a CC session
+- Batch communications when possible — don't spam
+- The human interaction agent builds its own tooling based on the human's preferences
+
+## Future: Head-to-Head Evaluation — Genesis vs ECC
+
+[Everything Claude Code (ECC)](https://github.com/affaan-m/everything-claude-code) takes the opposite approach to genesis: 28 pre-defined agents, 65+ skills, 24 commands, all hand-crafted over 10+ months. It's a static, kitchen-sink configuration optimized for a human developer working interactively with Claude Code. No autonomous operation, no self-improvement, no orchestrator loop.
+
+**Proposed experiment:** Create two identical test repos with the same goal. Install ECC into one, bootstrap genesis into the other. Let them both work toward the goal. Evaluate:
+
+- Time to completion
+- Code quality
+- Test coverage
+- How much human intervention was needed
+- How the systems adapted to obstacles
+- Final architecture decisions
+
+Key difference: ECC requires a human driving it, genesis runs autonomously. So the real comparison is **human + ECC vs genesis autonomous**. This is the more meaningful real-world question: can an autonomous self-improving system match or beat a human-directed one with pre-built tooling?
+
+**ECC → Genesis is like AlphaGo → AlphaZero.** ECC encodes human expert knowledge (hand-crafted agents, skills, rules refined over 10+ months). Genesis learns from scratch — starts with 3 agents and evolves what it needs. AlphaZero surpassed AlphaGo by discovering strategies humans never considered. The question is whether genesis dev systems will do the same.
+
+The comparison is aspirational — we don't know if genesis even works yet. But once we've bootstrapped a few real projects and the systems have had time to evolve, the head-to-head becomes meaningful.
+
+**Why we don't feed ECC to genesis dev systems:** It would bias the introspective agent toward recreating ECC's structure rather than discovering what the project actually needs. Most of ECC is language-specific and designed for human interaction patterns. Genesis dev systems should evolve from a clean slate.
+
+**Patterns worth noting** (the introspective agent may independently discover these):
+- Language-specific rules directories (instead of one big CLAUDE.md)
+- Verification loops (iterative checks until passing)
+- Hooks for memory persistence across sessions
 
 ## Related Work
 

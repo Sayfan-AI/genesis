@@ -91,7 +91,7 @@ def test_new_repo_has_settings_with_hooks(tmp_dir: Path) -> None:
     for hook in expected_hooks:
         assert hook in hooks, f"Missing hook: {hook}"
         assert len(hooks[hook]) > 0
-        assert "genctl log" in hooks[hook][0]["command"]
+        assert "log.sh" in hooks[hook][0]["command"]
 
 
 def test_new_repo_has_genesis_config(tmp_dir: Path) -> None:
@@ -104,6 +104,19 @@ def test_new_repo_has_genesis_config(tmp_dir: Path) -> None:
     assert "[loki]" in config
     assert "[issues]" in config
     assert "[a2h]" in config
+
+
+def test_new_repo_has_scripts(tmp_dir: Path) -> None:
+    repo = tmp_dir / PROJECT
+    scaffold_new_repo(repo, GOAL, PROJECT)
+
+    scripts_dir = repo / ".genesis" / "scripts"
+    assert (scripts_dir / "log.sh").exists()
+    assert (scripts_dir / "issues.sh").exists()
+    # Scripts should be executable
+    import os
+    assert os.access(scripts_dir / "log.sh", os.X_OK)
+    assert os.access(scripts_dir / "issues.sh", os.X_OK)
 
 
 def test_new_repo_has_onboarding_issue(tmp_dir: Path) -> None:

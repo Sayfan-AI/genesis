@@ -2,14 +2,15 @@ name: Genesis Orchestrator (Scheduled)
 
 on:
   schedule:
-    # Run every 6 hours
-    - cron: '0 */6 * * *'
+    # Run every 10 minutes
+    - cron: '*/10 * * * *'
   workflow_dispatch: {}
 
 permissions:
   contents: write
   issues: write
   pull-requests: write
+  id-token: write
 
 jobs:
   orchestrate:
@@ -21,18 +22,6 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
-            You are the orchestrator for this genesis dev system. This is a scheduled run.
-
-            Your job:
-            1. Read CLAUDE.md to understand the project goal and current state
-            2. Review open issues and milestones (use `gh issue list`)
-            3. Check recent activity (use `gh pr list`, `git log --oneline -10`)
-            4. Determine what needs to happen next:
-               - If onboarding is not complete, run the onboarding agent
-               - If there are tasks ready for work, launch worker agents
-               - If anything is stuck, investigate and unblock or escalate
-            5. Run the health agent to check system status
-            6. Update project state as needed
-
-            Refer to .claude/agents/ for agent definitions and responsibilities.
+            Run the orchestrator agent defined in .claude/agents/orchestrator.md.
+            This is a scheduled run — assess project state and advance work.
           claude_args: "--max-turns 20 --allowedTools Read,Edit,Bash,Glob,Grep,Agent"
