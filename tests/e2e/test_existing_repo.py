@@ -89,7 +89,7 @@ def test_existing_repo_has_settings_with_hooks(
     settings = json.loads((repo / ".claude" / "settings.json").read_text())
     assert "hooks" in settings
     assert "PostToolUse" in settings["hooks"]
-    assert "genctl log" in settings["hooks"]["PostToolUse"][0]["command"]
+    assert "log.sh" in settings["hooks"]["PostToolUse"][0]["command"]
 
 
 def test_existing_repo_has_genesis_config(
@@ -101,6 +101,16 @@ def test_existing_repo_has_genesis_config(
     config = (repo / ".genesis" / "config.toml").read_text()
     assert PROJECT in config
     assert GOAL in config
+
+
+def test_existing_repo_has_scripts(
+    init_test_repo: Callable[[str, dict[str, str]], Path],
+) -> None:
+    repo = init_test_repo(PROJECT, EXISTING_FILES)
+    scaffold_existing_repo(repo, GOAL, PROJECT)
+
+    assert (repo / ".genesis" / "scripts" / "log.sh").exists()
+    assert (repo / ".genesis" / "scripts" / "issues.sh").exists()
 
 
 def test_existing_repo_has_onboarding_issue(

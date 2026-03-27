@@ -3,49 +3,49 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "genctl log --hook session-start"
+        "command": "bash .genesis/scripts/log.sh session-start"
       }
     ],
     "SessionEnd": [
       {
         "type": "command",
-        "command": "genctl log --hook session-end"
+        "command": "bash .genesis/scripts/log.sh session-end"
       }
     ],
     "PreToolUse": [
       {
         "type": "command",
-        "command": "genctl log --hook pre-tool-use"
+        "command": "bash .genesis/scripts/log.sh pre-tool-use"
       }
     ],
     "PostToolUse": [
       {
         "type": "command",
-        "command": "genctl log --hook post-tool-use"
+        "command": "bash .genesis/scripts/log.sh post-tool-use"
       }
     ],
     "PostToolUseFailure": [
       {
         "type": "command",
-        "command": "genctl log --hook post-tool-use-failure"
+        "command": "bash .genesis/scripts/log.sh post-tool-use-failure"
       }
     ],
     "SubagentStart": [
       {
         "type": "command",
-        "command": "genctl log --hook subagent-start"
+        "command": "bash .genesis/scripts/log.sh subagent-start"
       }
     ],
     "SubagentStop": [
       {
         "type": "command",
-        "command": "genctl log --hook subagent-stop"
+        "command": "bash .genesis/scripts/log.sh subagent-stop"
       }
     ],
     "UserPromptSubmit": [
       {
         "type": "command",
-        "command": "genctl log --hook user-prompt-submit"
+        "command": "bash .genesis/scripts/log.sh user-prompt-submit"
       }
     ]
   }

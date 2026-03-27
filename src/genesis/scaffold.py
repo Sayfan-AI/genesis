@@ -11,16 +11,19 @@ from jinja2 import Environment, FileSystemLoader
 TEMPLATES_DIR = Path(__file__).parent.parent.parent / "templates"
 
 SEED_AGENTS = [
-    "onboarding",
-    "project_manager",
+    "orchestrator",
     "human_interaction",
     "introspective",
-    "health",
 ]
 
 SEED_WORKFLOWS = [
     "genesis-orchestrator.yml",
     "genesis-events.yml",
+]
+
+SEED_SCRIPTS = [
+    "log.sh",
+    "issues.sh",
 ]
 
 
@@ -62,6 +65,16 @@ def _write_seed_workflows(base: Path) -> None:
         src = TEMPLATES_DIR / "workflows" / workflow
         dst = workflows_dir / workflow
         dst.write_text(src.read_text())
+
+
+def _write_seed_scripts(base: Path) -> None:
+    scripts_dir = base / ".genesis" / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    for script in SEED_SCRIPTS:
+        src = TEMPLATES_DIR / "scripts" / script
+        dst = scripts_dir / script
+        dst.write_text(src.read_text())
+        dst.chmod(0o755)
 
 
 def _write_settings(base: Path) -> None:
@@ -137,6 +150,7 @@ def scaffold_new_repo(
     _write_seed_workflows(path)
     _write_settings(path)
     _write_genesis_config(path, project_name, goal)
+    _write_seed_scripts(path)
 
     # Onboarding issue
     _write_onboarding_issue(path, project_name, goal)
@@ -177,6 +191,7 @@ def scaffold_existing_repo(
     _write_seed_workflows(path)
     _write_settings(path)
     _write_genesis_config(path, project_name, goal)
+    _write_seed_scripts(path)
 
     # Onboarding issue
     _write_onboarding_issue(path, project_name, goal)
@@ -223,6 +238,7 @@ def scaffold_external_dev_repo(
     _write_seed_workflows(dev_path)
     _write_settings(dev_path)
     _write_genesis_config(dev_path, project_name, goal, target_repos)
+    _write_seed_scripts(dev_path)
 
     # Onboarding issue with target repo references
     _write_onboarding_issue(dev_path, project_name, goal, target_repos)
