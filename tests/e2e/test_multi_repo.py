@@ -78,6 +78,7 @@ def test_multi_repo_has_full_scaffold(
         assert (dev_repo / ".claude" / "agents" / f"{agent}.md").exists()
     assert (dev_repo / ".github" / "workflows" / "genesis-orchestrator.yml").exists()
     assert (dev_repo / ".github" / "workflows" / "genesis-events.yml").exists()
+    assert (dev_repo / ".github" / "workflows" / "genesis-evolver.yml").exists()
     assert (dev_repo / ".claude" / "settings.json").exists()
     assert (dev_repo / "README.md").exists()
 

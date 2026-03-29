@@ -67,6 +67,7 @@ def test_new_repo_has_workflows(tmp_dir: Path) -> None:
     workflows_dir = repo / ".github" / "workflows"
     assert (workflows_dir / "genesis-orchestrator.yml").exists()
     assert (workflows_dir / "genesis-events.yml").exists()
+    assert (workflows_dir / "genesis-evolver.yml").exists()
 
 
 def test_new_repo_has_settings_with_hooks(tmp_dir: Path) -> None:

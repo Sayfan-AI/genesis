@@ -76,6 +76,7 @@ def test_existing_repo_has_workflows(
 
     assert (repo / ".github" / "workflows" / "genesis-orchestrator.yml").exists()
     assert (repo / ".github" / "workflows" / "genesis-events.yml").exists()
+    assert (repo / ".github" / "workflows" / "genesis-evolver.yml").exists()
 
 
 def test_existing_repo_has_settings_with_hooks(
