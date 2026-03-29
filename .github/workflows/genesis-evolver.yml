@@ -1,0 +1,40 @@
+name: Genesis Evolver
+
+on:
+  issues:
+    types: [opened, labeled]
+  issue_comment:
+    types: [created]
+  schedule:
+    # Weekly sweep for unprocessed issues
+    - cron: '0 6 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  evolve:
+    runs-on: ubuntu-latest
+    # Only run for needs:evolver issues, scheduled sweeps, or manual triggers
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'needs:evolver')) ||
+      (github.event_name == 'issue_comment' && contains(github.event.issue.labels.*.name, 'needs:evolver'))
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Run the evolver agent defined in .claude/agents/evolver.md.
+
+            Trigger: ${{ github.event_name }} / ${{ github.event.action }}
+
+            Review needs:evolver issues and improve genesis scaffolding where warranted.
+          claude_args: "--max-turns 15 --allowedTools Read,Edit,Bash,Glob,Grep,Agent"
