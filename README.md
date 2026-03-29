@@ -38,7 +38,7 @@ Dev System (takes over from here):
 
 Every dev system gets a scaffold that it can evolve:
 
-- **Seed agents** — onboarding, project manager, human interaction, introspective, health
+- **Seed agents** — onboarding, project manager, human interaction, evolver, health
 - **Orchestrator workflows** — GitHub Actions (cron + event-triggered) launching Claude Agent SDK sessions
 - **Observability** — Claude Code hooks that automatically log all agent activity to Grafana Loki
 - **Scripts** — shell scripts for issue management and structured logging (zero binary distribution overhead)
@@ -56,17 +56,19 @@ These are seeded into every dev system as starting principles. The dev system ev
 - **Minimal human-in-the-loop** — do everything possible autonomously. Escalate what you can't.
 - **Self-monitoring** — detect stuck/looping states, try to self-heal, escalate when stuck.
 
-## The Introspective Agent
+## The Evolver Agent
 
 The most important agent in the roster. It doesn't do the work — it watches *how the system works* and makes it better:
 
+- Reviews failures, human interventions, and stuck states to identify improvements
 - Designs specialized worker agents for recurring task patterns
 - Builds deterministic tools to replace agentic work where possible
 - Refines the memory system (CLAUDE.md, settings, hooks)
 - Refactors the agent roster as the project evolves
-- Learns from failures and adapts the system's approach
 
-The introspective agent can rewrite its own definition. The modification procedure itself is modifiable — a property formalized in the [Hyperagents](https://arxiv.org/abs/2603.19461) paper (Zhang et al., 2026) as metacognitive self-improvement.
+**Two-tier evolution:** Project evolvers fix project-specific issues directly. When the root cause is in genesis scaffolding, they open issues on the genesis repo with a `needs:evolver` label. Genesis's own evolver watches for these issues, evaluates them, and either implements the improvement or rejects it with a rationale.
+
+The evolver agent can rewrite its own definition. The modification procedure itself is modifiable — a property formalized in the [Hyperagents](https://arxiv.org/abs/2603.19461) paper (Zhang et al., 2026) as metacognitive self-improvement.
 
 ## Architecture
 
@@ -90,7 +92,7 @@ The introspective agent can rewrite its own definition. The modification procedu
 │       ├──> Onboarding Agent (goal → milestones)     │
 │       ├──> Project Manager (roadmap, tasks)         │
 │       ├──> Human Interaction (A2H protocol)         │
-│       ├──> Introspective (evolve the system)        │
+│       ├──> Evolver (evolve the system)               │
 │       ├──> Health (stuck detection, quality)        │
 │       └──> Worker Agents (designed by the system)   │
 │                                                     │
@@ -140,7 +142,7 @@ Early development. The scaffolding engine and genctl CLI are functional with pas
 
 ## Related Work
 
-- **[Hyperagents](https://arxiv.org/abs/2603.19461)** (Zhang et al., 2026) — formalizes self-referential agents with modifiable modification procedures. Genesis's introspective agent is a practical implementation of this concept. The paper was publicly announced exactly one day after the genesis repo was created — independent convergence on the same idea.
+- **[Hyperagents](https://arxiv.org/abs/2603.19461)** (Zhang et al., 2026) — formalizes self-referential agents with modifiable modification procedures. Genesis's evolver agent is a practical implementation of this concept. The paper was publicly announced exactly one day after the genesis repo was created — independent convergence on the same idea.
 - **[A2H Protocol](https://github.com/twilio-labs/Agent2Human)** (Twilio) — open-source agent-to-human communication protocol used by genesis dev systems.
 
 ## License

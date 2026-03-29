@@ -93,7 +93,7 @@ Genesis seeds these as a starting pattern. The dev system can rename, merge, spl
 - **Project manager agent** — owns the roadmap. Tracks progress, detects stuck work, drills down milestones into tasks as they become current.
 - **Human interaction agent** — all communications with the user: daily reports, escalations, access requests, milestone sign-offs.
 - **Worker agents** — do the actual work (code, tests, infra, etc.). These are the ones the dev system designs for itself based on the goal.
-- **Introspective agent** — responsible for evolving the dev system itself. Observes how the system operates, designs specialized worker agents for recurring task patterns, creates tools and skills, designs and refines the memory system (CLAUDE.md files at different levels, settings.json, hooks). Refactors the agent roster as the project evolves. Learns from failures and adapts the system's approach.
+- **Evolver agent** — responsible for evolving the dev system itself. Observes how the system operates, designs specialized worker agents for recurring task patterns, creates tools and skills, designs and refines the memory system (CLAUDE.md files at different levels, settings.json, hooks). Refactors the agent roster as the project evolves. Learns from failures and adapts the system's approach.
 - **Self-review / health agent** — monitors system health, catches loops, audits quality.
 
 ## Execution Model
@@ -102,7 +102,7 @@ GitHub Actions serve as the trigger layer:
 - **Scheduled workflows** (cron) — periodic advancement of project state
 - **Event-triggered workflows** — new issue opened/closed, PR merged, human feedback, comments, etc.
 
-Each workflow trigger launches a **Claude Agent SDK session** as the orchestrator. The orchestrator assesses the current state of the project and launches sub-agents to perform tasks and advance progress. The dev system's introspective agent evolves these workflows and triggers as the project matures.
+Each workflow trigger launches a **Claude Agent SDK session** as the orchestrator. The orchestrator assesses the current state of the project and launches sub-agents to perform tasks and advance progress. The dev system's evolver agent evolves these workflows and triggers as the project matures.
 
 ## Milestones and Completion
 
@@ -235,7 +235,7 @@ Each hook is `type: "command"` — calls `.genesis/scripts/log.sh` which reads t
 - **Zero-cost to agents** — agents don't know about logging, hooks handle it transparently
 - **Deterministic** — HTTP POST, no LLM involved in logging (follows the "deterministic over agentic" principle)
 - **Concurrent-safe** — Loki handles concurrent writes natively, unlike git branches
-- **Queryable** — LogQL for health agent, introspective agent, and dashboards
+- **Queryable** — LogQL for health agent, evolver agent, and dashboards
 
 ### Loki labels and fields
 
@@ -293,9 +293,9 @@ Scripts read from `.genesis/config.toml` and environment variables:
 We initially designed a Rust CLI (`genctl`) but chose shell scripts instead:
 - **Zero distribution overhead** — no binary to build, cache, or install
 - **Works everywhere** — bash + curl + gh are available on all GitHub Actions runners
-- **Simpler to evolve** — the introspective agent can modify scripts directly
+- **Simpler to evolve** — the evolver agent can modify scripts directly
 - **Good enough** — these are thin wrappers, not complex logic
-- **genctl can come later** — if scripts become unwieldy, the introspective agent can build a proper CLI
+- **genctl can come later** — if scripts become unwieldy, the evolver agent can build a proper CLI
 
 ## Memory System
 
@@ -303,7 +303,7 @@ The dev system uses Claude Code's native memory mechanisms — CLAUDE.md files a
 
 ### Memory is shared, not per-agent
 
-All agents read and write to the same memory system. No silos. Agents tag their memories with author context so you can filter by source. The introspective agent curates the memory: decides what's worth persisting, prunes stale entries, prevents duplication.
+All agents read and write to the same memory system. No silos. Agents tag their memories with author context so you can filter by source. The evolver agent curates the memory: decides what's worth persisting, prunes stale entries, prevents duplication.
 
 ### Where memory lives
 
@@ -318,7 +318,7 @@ All agents read and write to the same memory system. No silos. Agents tag their 
 - Human preferences ("prefers small PRs over large ones")
 - Risk areas ("module X has no tests, be careful")
 - Architecture decisions and their rationale
-- Cross-agent learnings (health agent flags something, introspective agent persists the insight)
+- Cross-agent learnings (health agent flags something, evolver agent persists the insight)
 
 ### What does NOT get remembered
 
@@ -328,7 +328,7 @@ All agents read and write to the same memory system. No silos. Agents tag their 
 
 ### Curation
 
-The introspective agent is responsible for memory curation:
+The evolver agent is responsible for memory curation:
 - Watches agent activity (via Loki logs) for insights worth persisting
 - Writes memories to the appropriate level (project-wide vs directory-specific)
 - Prunes stale or outdated memories
@@ -343,9 +343,9 @@ Genesis seeds only the minimum viable agent set. The dev system designs the rest
 
 - **Orchestrator agent** — the brain. Runs on every cron/event trigger via GitHub Actions. Assesses project state (via `issues.sh summary`), breaks down milestones into tasks, prioritizes, manages dependencies, dispatches work to other agents.
 - **Human interaction agent** — all communication with the human, both interactive and async. Onboarding is its first task (not a separate agent). See "Human Interaction" section below.
-- **Introspective agent** — must exist from day one. Watches how the system operates and evolves it. Creates new agents, tools, scripts. Curates the memory system.
+- **Evolver agent** — must exist from day one. Watches how the system operates and evolves it. Creates new agents, tools, scripts. Curates the memory system.
 
-### Created by the introspective agent as needed
+### Created by the evolver agent as needed
 
 - **Health / quality agent** — created when there are enough moving parts to monitor. Watches for stuck/looping agents, reviews PR quality, verifies done criteria.
 - **Worker agents** — created as specific task patterns emerge from the project's work.
@@ -360,8 +360,8 @@ Genesis seeds only the minimum viable agent set. The dev system designs the rest
 | Dependency management | Orchestrator |
 | Communicate with human | Human interaction |
 | Onboarding (goal refinement) | Human interaction (first task) |
-| Improve the system | Introspective |
-| Curate memory | Introspective |
+| Improve the system | Evolver |
+| Curate memory | Evolver |
 | Detect stuck/spinning | Health (created later) |
 | Quality control / PR review | Health (created later) |
 
@@ -423,16 +423,16 @@ Key difference: ECC requires a human driving it, genesis runs autonomously. So t
 
 The comparison is aspirational — we don't know if genesis even works yet. But once we've bootstrapped a few real projects and the systems have had time to evolve, the head-to-head becomes meaningful.
 
-**Why we don't feed ECC to genesis dev systems:** It would bias the introspective agent toward recreating ECC's structure rather than discovering what the project actually needs. Most of ECC is language-specific and designed for human interaction patterns. Genesis dev systems should evolve from a clean slate.
+**Why we don't feed ECC to genesis dev systems:** It would bias the evolver agent toward recreating ECC's structure rather than discovering what the project actually needs. Most of ECC is language-specific and designed for human interaction patterns. Genesis dev systems should evolve from a clean slate.
 
-**Patterns worth noting** (the introspective agent may independently discover these):
+**Patterns worth noting** (the evolver agent may independently discover these):
 - Language-specific rules directories (instead of one big CLAUDE.md)
 - Verification loops (iterative checks until passing)
 - Hooks for memory persistence across sessions
 
 ## Related Work
 
-- **[Hyperagents](https://arxiv.org/abs/2603.19461)** (Zhang et al., 2026) — formalizes "self-referential agents" where the modification procedure itself is modifiable, enabling metacognitive self-improvement. Directly validates genesis's introspective agent design: the dev system doesn't just improve at its task, it improves *how it improves*. Key finding: meta-level improvements (memory persistence, performance tracking) transfer across problem domains — supports our approach of seeding standard meta-concepts across all dev systems. The paper was publicly announced on March 23, 2026 — exactly one day after the genesis repo was created (March 22, 2026). Independent convergence.
+- **[Hyperagents](https://arxiv.org/abs/2603.19461)** (Zhang et al., 2026) — formalizes "self-referential agents" where the modification procedure itself is modifiable, enabling metacognitive self-improvement. Directly validates genesis's evolver agent design: the dev system doesn't just improve at its task, it improves *how it improves*. Key finding: meta-level improvements (memory persistence, performance tracking) transfer across problem domains — supports our approach of seeding standard meta-concepts across all dev systems. The paper was publicly announced on March 23, 2026 — exactly one day after the genesis repo was created (March 22, 2026). Independent convergence.
 
 ## Open Questions
 
