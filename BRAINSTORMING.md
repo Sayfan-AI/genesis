@@ -145,6 +145,7 @@ GitHub issues remain the coordination layer for tracking work, but A2H handles t
 - Agents should have their own GitHub machine users for clear audit trails and per-agent access control.
 - If an issue is blocked on a human action, an issue can be opened and assigned to the human.
 - The system highlights what it could do autonomously if given access, letting the human decide.
+- See **Permission Architecture** below for the layered token management model.
 
 ## Dev System Topology
 
@@ -434,9 +435,57 @@ The comparison is aspirational — we don't know if genesis even works yet. But 
 
 - **[Hyperagents](https://arxiv.org/abs/2603.19461)** (Zhang et al., 2026) — formalizes "self-referential agents" where the modification procedure itself is modifiable, enabling metacognitive self-improvement. Directly validates genesis's evolver agent design: the dev system doesn't just improve at its task, it improves *how it improves*. Key finding: meta-level improvements (memory persistence, performance tracking) transfer across problem domains — supports our approach of seeding standard meta-concepts across all dev systems. The paper was publicly announced on March 23, 2026 — exactly one day after the genesis repo was created (March 22, 2026). Independent convergence.
 
+## Permission Architecture
+
+Access management follows a three-layer model. Each layer has a clear purpose and scope.
+
+### Layer 1: Genesis GitHub App (shared scaffolding)
+- Installed on **all orgs** that genesis manages
+- **Minimal permissions**: contents:read, issues:write, metadata:read
+- Used for: scaffolding new projects, creating cross-org issues, reading code
+- Each project repo gets it installed during genesis bootstrap
+
+### Layer 2: Per-project GitHub Apps (scoped to need)
+- Each dev system gets its **own GitHub App** with permissions scoped to its goal
+- Example: repo-guardian needs contents:write, pull_requests:write, security_events:read, dependabot_secrets:read — installed on target orgs
+- Follows **least-privilege per project** — repo-guardian's broad access doesn't leak to other genesis projects
+- Apps generate **short-lived installation tokens** automatically and show up in audit logs as distinct actors
+
+### Layer 3: Bootstrap PAT (human-held, minimal use)
+- One admin PAT stored as an **org-level secret**
+- Used **only** for operations that Apps can't do (creating other Apps, managing App installations)
+- Rotated periodically by the human
+- Never used for day-to-day operations
+
+### Why GitHub Apps over PATs for day-to-day
+- PATs are tied to a **person** — if the person leaves or revokes, everything breaks
+- PATs can't be scoped per-repo (fine-grained PATs can, but they expire and need manual renewal)
+- GitHub Apps generate short-lived tokens automatically and produce clean audit trails
+- Apps appear as distinct actors in git history and GitHub UI
+
+### Programmatic token creation
+- **PATs cannot be created programmatically** — they require interactive user authentication
+- **GitHub Apps cannot be fully created programmatically** — initial creation and org installation require admin consent (browser flow)
+- **Installation tokens can be generated programmatically** — once an App is installed, it can mint scoped tokens via `POST /app/installations/{id}/access_tokens`
+- **Implication:** the bootstrap always requires human involvement; ongoing token management is fully automated
+
+### Bootstrapping flow
+1. Human creates the genesis GitHub App (once, manual)
+2. Human installs it on target orgs (once per org, manual)
+3. Genesis bootstraps a new dev system and opens an issue requesting a project-specific App
+4. Human creates the project App and installs it (manual, but guided by the issue)
+5. Dev system uses its own App for all subsequent operations — no PAT needed
+
+### Migration path (existing projects)
+Projects currently using PATs should migrate to dedicated GitHub Apps:
+1. Create a project-specific App with the required permissions
+2. Install it on the target orgs
+3. Store App credentials as repo secrets
+4. Update workflows to generate installation tokens
+5. Remove the PAT secret
+
 ## Open Questions
 
 - Machine user provisioning: how does genesis set up GitHub machine users for agents?
 - Cost management: autonomous agents can burn through API credits. Should there be budget awareness?
-- Security boundaries: how to safely scope access for multi-repo goals?
 - State management: where does the orchestrator keep its state between runs? GitHub issues alone, or a lightweight state file in the repo?
