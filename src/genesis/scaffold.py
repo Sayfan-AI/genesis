@@ -13,12 +13,13 @@ TEMPLATES_DIR = Path(__file__).parent.parent.parent / "templates"
 SEED_AGENTS = [
     "orchestrator",
     "human_interaction",
-    "introspective",
+    "evolver",
 ]
 
 SEED_WORKFLOWS = [
     "genesis-orchestrator.yml",
     "genesis-events.yml",
+    "genesis-evolver.yml",
     "genesis-push-trigger.yml",
 ]
 

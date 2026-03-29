@@ -31,7 +31,7 @@ These are seeded as starting patterns. The dev system evolves them:
 - **Onboarding** — refines goal with human, produces milestones
 - **Project manager** — owns roadmap, tracks progress, drills down current milestone into tasks
 - **Human interaction** — comms with user (reports, escalations, access requests)
-- **Introspective** — evolves the dev system itself (new agents, tools, skills, memory design)
+- **Evolver** — evolves the dev system itself (new agents, tools, skills, memory design). Escalates framework-level improvements to genesis.
 - **Health / self-review** — monitors for stuck/looping, audits quality
 - **Workers** — designed by the dev system for the specific goal
 
