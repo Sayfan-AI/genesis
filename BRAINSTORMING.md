@@ -437,52 +437,76 @@ The comparison is aspirational — we don't know if genesis even works yet. But 
 
 ## Permission Architecture
 
-Access management follows a three-layer model. Each layer has a clear purpose and scope.
+One GitHub App, scoped tokens per project. This avoids the 100-App registration limit (per user/org) while maintaining least-privilege per project.
 
-### Layer 1: Genesis GitHub App (shared scaffolding)
-- Installed on **all orgs** that genesis manages
-- **Minimal permissions**: contents:read, issues:write, metadata:read
-- Used for: scaffolding new projects, creating cross-org issues, reading code
-- Each project repo gets it installed during genesis bootstrap
+### Design: Single App, scoped installation tokens
 
-### Layer 2: Per-project GitHub Apps (scoped to need)
-- Each dev system gets its **own GitHub App** with permissions scoped to its goal
-- Example: repo-guardian needs contents:write, pull_requests:write, security_events:read, dependabot_secrets:read — installed on target orgs
-- Follows **least-privilege per project** — repo-guardian's broad access doesn't leak to other genesis projects
-- Apps generate **short-lived installation tokens** automatically and show up in audit logs as distinct actors
+GitHub's `POST /app/installations/{id}/access_tokens` endpoint accepts both `repositories` and `permissions` parameters. The token's permissions must be **equal to or less than** the App's registered permissions. So we register one App with the union of all permissions any project could need, and each project mints a narrowly scoped 1-hour token at runtime.
 
-### Layer 3: Bootstrap PAT (human-held, minimal use)
-- One admin PAT stored as an **org-level secret**
-- Used **only** for operations that Apps can't do (creating other Apps, managing App installations)
-- Rotated periodically by the human
-- Never used for day-to-day operations
+**Genesis App registration (broad — the ceiling):**
+- Installed on **all orgs** and **all repos** that genesis manages
+- Registered with the union of all permissions: `contents:write`, `pull_requests:write`, `issues:write`, `security_events:read`, `actions:read`, `metadata:read`, etc.
+- Private key stored as an **org-level encrypted secret**
 
-### Why GitHub Apps over PATs for day-to-day
+**Per-project token (narrow — what each project actually gets):**
+```yaml
+# repo-guardian example — needs cross-org write + security access
+- uses: actions/create-github-app-token@v1
+  with:
+    app-id: ${{ secrets.GENESIS_APP_ID }}
+    private-key: ${{ secrets.GENESIS_APP_PRIVATE_KEY }}
+    permission-contents: write
+    permission-pull-requests: write
+    permission-security-events: read
+    permission-issues: write
+
+# read-only auditor example — minimal access
+- uses: actions/create-github-app-token@v1
+  with:
+    app-id: ${{ secrets.GENESIS_APP_ID }}
+    private-key: ${{ secrets.GENESIS_APP_PRIVATE_KEY }}
+    permission-contents: read
+    permission-metadata: read
+```
+
+### Why this works
+- **1 App, unlimited projects** — no scaling limit, no per-project App ceremony
+- **Least-privilege per project** — each project declares exactly what it needs in its workflow
+- **1-hour token lifetime** — no long-lived credentials
+- **Single install per org** — install once, all projects use it
+- **Clean audit trail** — all actions appear as `genesis-dev-bot[bot]`
+
+### Why not per-project Apps
+- GitHub limits App **registrations** to 100 per user/org — genesis can easily exceed this
+- App registrations cannot be created or deleted programmatically (no API, UI only)
+- The manifest flow (`POST /app-manifests/{code}/conversions`) still requires a browser redirect
+- Per-token scoping gives the same least-privilege benefit without burning registrations
+
+### Why GitHub Apps over PATs
 - PATs are tied to a **person** — if the person leaves or revokes, everything breaks
-- PATs can't be scoped per-repo (fine-grained PATs can, but they expire and need manual renewal)
+- PATs can't be cleanly scoped per-project (fine-grained PATs can, but they expire max 1 year and need manual renewal)
 - GitHub Apps generate short-lived tokens automatically and produce clean audit trails
 - Apps appear as distinct actors in git history and GitHub UI
 
-### Programmatic token creation
-- **PATs cannot be created programmatically** — they require interactive user authentication
-- **GitHub Apps cannot be fully created programmatically** — initial creation and org installation require admin consent (browser flow)
-- **Installation tokens can be generated programmatically** — once an App is installed, it can mint scoped tokens via `POST /app/installations/{id}/access_tokens`
-- **Implication:** the bootstrap always requires human involvement; ongoing token management is fully automated
+### Risk: private key leak
+If the genesis App's private key leaks, an attacker could mint a max-permission token across all installed repos. Mitigations:
+- Store private key as **org-level encrypted secret** (not copied per-repo)
+- Rotate the key periodically (GitHub UI: generate new key, revoke old)
+- App installation acts as a second gate — must be installed on target repo/org
+- Same trust model used by all major GitHub Actions (e.g., `actions/create-github-app-token`)
 
-### Bootstrapping flow
-1. Human creates the genesis GitHub App (once, manual)
-2. Human installs it on target orgs (once per org, manual)
-3. Genesis bootstraps a new dev system and opens an issue requesting a project-specific App
-4. Human creates the project App and installs it (manual, but guided by the issue)
-5. Dev system uses its own App for all subsequent operations — no PAT needed
+### Setup flow
+1. Human creates the genesis GitHub App with broad permissions (once, manual)
+2. Human installs it on all target orgs (once per org, manual)
+3. Genesis bootstrapping generates workflows with scoped `permission-*` inputs per project
+4. Each project declares its required permissions in `.genesis/config.toml`
+5. No per-project setup needed — just deploy and go
 
-### Migration path (existing projects)
-Projects currently using PATs should migrate to dedicated GitHub Apps:
-1. Create a project-specific App with the required permissions
-2. Install it on the target orgs
-3. Store App credentials as repo secrets
-4. Update workflows to generate installation tokens
-5. Remove the PAT secret
+### Migration path (existing projects using PATs)
+1. Ensure genesis App has all needed permissions registered
+2. Ensure genesis App is installed on all target repos/orgs
+3. Update workflows to use `actions/create-github-app-token` with scoped permissions
+4. Remove PAT secrets
 
 ## Open Questions
 
