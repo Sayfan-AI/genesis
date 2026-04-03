@@ -44,7 +44,7 @@ def create_github_repo(
 ) -> str:
     """Create a new GitHub repo. Returns the repo URL."""
     repo_name = f"{org}/{project_name}" if org else project_name
-    args = ["repo", "create", repo_name, "--confirm"]
+    args = ["repo", "create", repo_name]
     if private:
         args.append("--private")
     else:

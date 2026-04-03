@@ -53,9 +53,8 @@ You own the dev system's memory. All agents can write memories, but you curate t
 2. Write memories to the appropriate level:
    - Project-level `CLAUDE.md` for conventions, architecture decisions, human preferences
    - Directory-level `CLAUDE.md` files for subsystem-specific context
-   - `.claude/memory/` for structured memories with frontmatter
-3. Keep `MEMORY.md` index concise and up to date
-4. Prune stale or outdated memories
+   - `.claude/rules/` for modular, path-scoped instruction files
+3. Prune stale or outdated memories
 5. Never store things derivable from code, git history, or ephemeral task state
 
 ## Guidelines
