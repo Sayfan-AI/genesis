@@ -91,7 +91,7 @@ Genesis seeds these as a starting pattern. The dev system can rename, merge, spl
 
 - **Onboarding agent** — runs once at project start. Interacts with human to refine the goal into high-level milestones. Produces an executable roadmap.
 - **Project manager agent** — owns the roadmap. Tracks progress, detects stuck work, drills down milestones into tasks as they become current.
-- **Human interaction agent** — all communications with the user: daily reports, escalations, access requests, milestone sign-offs.
+- **Human interaction agent** — all communications with the user via CC sessions, Claude Code Channels (Telegram/Discord/iMessage), GitHub issues, and custom notification layers. Handles onboarding, reports, escalations, access requests, milestone sign-offs. Owns and evolves the comms infrastructure.
 - **Worker agents** — do the actual work (code, tests, infra, etc.). These are the ones the dev system designs for itself based on the goal.
 - **Evolver agent** — responsible for evolving the dev system itself. Observes how the system operates, designs specialized worker agents for recurring task patterns, creates tools and skills, designs and refines the memory system (CLAUDE.md files at different levels, settings.json, hooks). Refactors the agent roster as the project evolves. Learns from failures and adapts the system's approach.
 - **Self-review / health agent** — monitors system health, catches loops, audits quality.
@@ -119,24 +119,55 @@ Each workflow trigger launches a **Claude Agent SDK session** as the orchestrato
 - Fast path: `/genesis new` skill that walks through structured onboarding (goal → topology → audit → preview → create)
 - Free-form chat for brainstorming and less structured work
 
-### With Dev Systems
-- Daily/periodic reports on project status (email or Slack — human's choice)
-- Human opening GitHub issues (the system normally opens issues to itself, but humans can too)
-- Human starting ad-hoc sessions (CC in the dev repo)
-- Human interacting directly through issues, PR reviews, comments
+### With Dev Systems — Two Primitives
 
-### A2H Protocol (Agent-to-Human)
-Dev systems use the [A2H protocol](https://github.com/twilio-labs/Agent2Human) as the standard communication layer with humans. A2H is an open-source, channel-agnostic protocol with five intent types:
+Human-system interaction rests on two primitives. Everything else is built on top.
 
-- **INFORM** — one-way notifications (status updates, daily reports, milestone completions)
-- **COLLECT** — request structured input (onboarding questions, goal refinement, clarifications)
-- **AUTHORIZE** — approval requests with cryptographic proof (access requests, merge approvals, deployment gates)
-- **ESCALATE** — handoff when the system is stuck and needs human help
-- **RESULT** — task/milestone/goal completion reports
+**1. GitHub Issues (async coordination)**
+- The dev system opens issues to the human (tagged `needs:human`) for access requests, approvals, clarifications, and progress reports
+- The human opens issues to the dev system for new tasks, direction changes, feedback
+- Issues are the shared language — both sides read and write them
+- Labels, assignments, and milestones provide structure without ceremony
+- Email notifications are built in — the human gets pinged without any setup
 
-The human interaction agent speaks A2H. An A2H gateway handles channel routing (Slack, email, SMS, etc.) — the dev system doesn't need to know the human's preferred channel. All interactions produce signed audit artifacts.
+**2. Ad-hoc Claude Code sessions (interactive steering)**
+- The human opens a CC session in the dev repo whenever they want
+- The human interaction agent responds — knows project state, can answer questions, takes direction
+- Session outcomes become GitHub issues: new tasks for agents, action items for the human, updated milestones
+- This is the "steering wheel" — the human can course-correct at any time
 
-GitHub issues remain the coordination layer for tracking work, but A2H handles the real-time human communication. Access requests that were previously ad-hoc (`blocked:human-action` labels) now go through A2H AUTHORIZE intents with proper audit trails.
+### Claude Code Channels (real-time communication)
+
+[Claude Code Channels](https://code.claude.com/docs/en/channels) (v2.1.80+, March 2026) are MCP servers that push events into a running CC session. They give the human interaction agent a real-time, bidirectional communication layer without building custom infrastructure.
+
+**How it works:**
+1. An external message arrives (Telegram DM, Discord mention, iMessage, webhook, etc.)
+2. The channel plugin injects it into the active CC session as a `<channel source="...">` event
+3. The human interaction agent reads the event, processes it with full project context
+4. The agent calls the channel's `reply` tool
+5. The reply appears on the human's phone/desktop
+
+**Built-in channel plugins:** Telegram, Discord, iMessage, plus a `fakechat` plugin for testing.
+
+**Custom channels:** Any MCP server can implement the channel protocol. This means the dev system can build custom channel plugins for any platform — Slack, email, SMS, web dashboard with live chat, etc.
+
+**How genesis uses channels:**
+
+The human interaction agent is the channel endpoint. When channels are configured:
+
+- **Proactive notifications** — milestone completions, blockers, access requests arrive on the human's phone via Telegram/Discord/iMessage instead of (or in addition to) GitHub issue emails
+- **Remote steering** — the human sends instructions from their phone ("pause security scanning, focus on dependency updates"); the agent executes with full project context
+- **Permission relay** — when the system needs approval for a tool call, the prompt is forwarded to the human's device; they approve/deny remotely
+- **Escalation with context** — when the system is stuck, the human interaction agent sends a rich message explaining the situation, not just a GitHub issue title
+
+**Key constraint:** Channels require an active CC session. For genesis dev systems running via GitHub Actions, this means either:
+- The orchestrator workflow keeps a session alive with channels enabled (consumes a runner)
+- Channels are used only during ad-hoc human sessions (human opens CC with `--channels`)
+- A lightweight always-on session runs on the human's machine or a persistent server, receiving channel events and managing issues
+
+The right approach depends on the project. The human interaction agent configures this during onboarding based on the human's preferences.
+
+**Relation to GitHub Issues:** Channels don't replace issues. Issues remain the persistent, searchable, structured coordination layer. Channels provide the real-time notification and conversational layer on top. The human interaction agent uses both — issues for tracking, channels for communication.
 
 ## Access and Permissions
 
@@ -300,7 +331,7 @@ We initially designed a Rust CLI (`genctl`) but chose shell scripts instead:
 
 ## Memory System
 
-The dev system uses Claude Code's native memory mechanisms — CLAUDE.md files and `.claude/memory/` — as its persistent memory. Memory is how the system gets smarter across sessions. GitHub Actions runners are ephemeral; without committed memory, the system starts from scratch every time.
+The dev system uses Claude Code's native memory mechanisms — CLAUDE.md files and `.claude/rules/` — as its persistent memory. Memory is how the system gets smarter across sessions. GitHub Actions runners are ephemeral; without committed memory, the system starts from scratch every time.
 
 ### Memory is shared, not per-agent
 
@@ -310,7 +341,7 @@ All agents read and write to the same memory system. No silos. Agents tag their 
 
 - **Project-level `CLAUDE.md`** — evolving understanding of the project: conventions, architecture decisions, human preferences
 - **Directory-level `CLAUDE.md` files** — context specific to subsystems (e.g., `src/auth/CLAUDE.md` for auth-related learnings)
-- **`.claude/memory/`** — structured memories with frontmatter (type, description, indexed in `MEMORY.md`)
+- **`.claude/rules/`** — modular, path-scoped instruction files for specific subsystems or concerns
 
 ### What gets remembered
 
@@ -343,7 +374,7 @@ Genesis seeds only the minimum viable agent set. The dev system designs the rest
 ### Seeded at bootstrap
 
 - **Orchestrator agent** — the brain. Runs on every cron/event trigger via GitHub Actions. Assesses project state (via `issues.sh summary`), breaks down milestones into tasks, prioritizes, manages dependencies, dispatches work to other agents.
-- **Human interaction agent** — all communication with the human, both interactive and async. Onboarding is its first task (not a separate agent). See "Human Interaction" section below.
+- **Human interaction agent** — all communication with the human: interactive CC sessions, Claude Code Channels (Telegram/Discord/iMessage), GitHub issues, and any custom notification layer. Onboarding is its first task. Owns and evolves the comms infrastructure. See "Human Interaction" section below.
 - **Evolver agent** — must exist from day one. Watches how the system operates and evolves it. Creates new agents, tools, scripts. Curates the memory system.
 
 ### Created by the evolver agent as needed
@@ -361,6 +392,8 @@ Genesis seeds only the minimum viable agent set. The dev system designs the rest
 | Dependency management | Orchestrator |
 | Communicate with human | Human interaction |
 | Onboarding (goal refinement) | Human interaction (first task) |
+| Claude Code Channels | Human interaction |
+| Build/evolve comms infra | Human interaction |
 | Improve the system | Evolver |
 | Curate memory | Evolver |
 | Detect stuck/spinning | Health (created later) |
@@ -368,42 +401,66 @@ Genesis seeds only the minimum viable agent set. The dev system designs the rest
 
 ## Human Interaction (Detailed)
 
-The human interaction agent operates in two modes:
+The human interaction agent is the dev system's voice. All communication with the human — in any direction, through any medium — goes through it. The orchestrator dispatches it as a sub-agent when the system needs to communicate, and it responds directly when the human initiates contact.
 
-### Interactive mode (human starts CC session)
-When a human opens a Claude Code session in the dev repo, the human interaction agent responds. This is achieved via CLAUDE.md instructions + skills. The agent:
-- Knows the project state (reads issues, milestones, recent activity)
-- Can answer questions about progress
+### When the human interaction agent runs
+
+| Trigger | How | What happens |
+|---|---|---|
+| Onboarding (issue #1 open) | Orchestrator dispatches it | Runs interactive onboarding flow |
+| Human opens CC session | CLAUDE.md routes to it | Answers questions, takes feedback, opens issues |
+| Human sends a channel message | Channel event injected into session | Processes request with project context, replies |
+| Milestone completed | Orchestrator dispatches it | Reports completion via configured channels + issue update |
+| System blocked on human | Orchestrator dispatches it | Opens `needs:human` issue, sends channel notification |
+| Escalation (stuck >2 cycles) | Orchestrator dispatches it | Rich escalation via channels with context |
+
+### Interactive mode (human starts CC session or sends channel message)
+The human interaction agent responds with full project awareness:
+- Summarizes current state, recent progress, blockers
+- Answers questions about decisions, progress, architecture
 - Takes feedback and translates it into issue updates
+- Accepts direction changes and re-prioritizes via new issues
 - Runs onboarding (its first interactive task)
 
+This works the same whether the human opens a terminal CC session or sends a Telegram/Discord message via channels — the agent has the same context and tools either way.
+
 ### Async mode (system reaches out to human)
-When the system needs something from the human (approval, access, clarification, or just reporting progress):
-- **Baseline:** opens a GitHub issue tagged `needs:human`. Always works, no setup needed.
-- **Optional channels** (configured during onboarding):
-  - Slack webhook notifications
-  - Email via GitHub notifications (free, already works)
-  - Daily digest committed as `.genesis/reports/daily-YYYY-MM-DD.md`
-  - A2H gateway (full protocol, when configured)
+When the system needs something from the human:
+- **Always:** opens a GitHub issue tagged `needs:human` with clear context
+- **If channels configured:** sends a notification via Telegram/Discord/iMessage with a summary and link to the issue
+- **If digest configured:** includes it in the next daily digest
 
 ### Onboarding configures comms
 During onboarding, the human interaction agent asks:
 
 > How do you want me to communicate with you?
 > - GitHub issues + email notifications (default, works out of the box)
-> - Slack notifications (I'll need a webhook URL)
-> - Daily digest file in the repo
-> - Something else?
+> - Claude Code Channels — I'll send notifications to your phone via Telegram, Discord, or iMessage. You can also send me instructions from your phone.
+> - Daily digest file committed to the repo
+> - Something custom? I can build any notification system you want (Slack webhook, email via SMTP, web dashboard, CLI tool, etc.)
 >
 > You can change this anytime.
 
-Then it **builds the comms infrastructure** based on the answer — creates notification scripts, cron workflows for digests, etc. No hard choices. Sensible defaults. Always overridable.
+Then it **builds the comms infrastructure** based on the answer:
+- For channels: configures the channel plugin, sets up pairing, tests the connection
+- For digests: creates the generation script and cron workflow
+- For custom: treats it as a task — designs, builds, and deploys the integration
+
+### The human interaction agent builds its own tools
+
+This is what distinguishes it from the orchestrator just opening issues. The human interaction agent owns the communication layer and evolves it:
+- Starts with whatever the human chose during onboarding
+- If the human later says "actually, add Slack too" — the agent builds it
+- If notifications are too noisy — the agent adjusts batching and filtering
+- If the human wants a status dashboard — the agent builds one
+- Custom communication tools are just tasks the system executes, committed to the repo like any other code
 
 ### Principles
 - Don't bother the human with hard choices — offer options with clear defaults
-- The human can always override by opening issues, commenting, or starting a CC session
+- The human can always override by opening issues, commenting, starting a CC session, or sending a channel message
 - Batch communications when possible — don't spam
-- The human interaction agent builds its own tooling based on the human's preferences
+- One reminder for blocking requests. Don't nag.
+- Issues are for tracking, channels are for talking. Use both.
 
 ## Future: Head-to-Head Evaluation — Genesis vs ECC
 
@@ -434,6 +491,14 @@ The comparison is aspirational — we don't know if genesis even works yet. But 
 ## Related Work
 
 - **[Hyperagents](https://arxiv.org/abs/2603.19461)** (Zhang et al., 2026) — formalizes "self-referential agents" where the modification procedure itself is modifiable, enabling metacognitive self-improvement. Directly validates genesis's evolver agent design: the dev system doesn't just improve at its task, it improves *how it improves*. Key finding: meta-level improvements (memory persistence, performance tracking) transfer across problem domains — supports our approach of seeding standard meta-concepts across all dev systems. The paper was publicly announced on March 23, 2026 — exactly one day after the genesis repo was created (March 22, 2026). Independent convergence.
+
+- **[Harness Design for Long-Running Application Development](https://www.anthropic.com/engineering/harness-design-long-running-apps)** (Anthropic Engineering) — demonstrates that multi-agent architectures with separated evaluation dramatically improve performance on complex, long-running coding tasks. Key patterns directly relevant to genesis:
+  - **Generator-evaluator separation** — separating code generation from evaluation (using Playwright to test running apps) catches stubbed-out features and quality issues that self-evaluation misses. Genesis's health/self-review agent fills the evaluator role, while worker agents are generators.
+  - **Context degradation** — long sessions cause coherence loss and "context anxiety" (premature task completion as models approach perceived limits). Genesis mitigates this by design: each GitHub Actions trigger spawns a fresh session, and state persists in issues/memory rather than in-context.
+  - **Structured handoffs via files** — agents communicate through file-based artifacts rather than shared context. Genesis uses the same pattern: committed files (digests, data, CLAUDE.md) and GitHub issues as the handoff medium between ephemeral sessions.
+  - **Contract negotiation** — before implementation, evaluator and generator agree on sprint success criteria. Parallels how genesis's orchestrator creates issues with done criteria before dispatching workers.
+  - **Continuous harness optimization** — the harness itself should evolve as models improve. This is exactly the evolver agent's job in genesis.
+  - Results: solo agent ($9, 20 min) produced broken output; full harness ($200, 6 hours) produced functional full-stack apps. Validates that orchestration overhead pays for itself on complex goals.
 
 ## Permission Architecture
 
