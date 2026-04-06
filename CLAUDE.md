@@ -2,7 +2,9 @@
 
 Genesis is a minimal meta-factory that bootstraps autonomous agentic AI dev systems. Given a goal, it creates a new GitHub "dev repo" — a self-improving AI system that works toward the goal autonomously. Genesis is fire-and-forget: once the dev repo is seeded, genesis's job is done.
 
-See BRAINSTORMING.md for full design notes and open questions.
+See `docs/` for full design notes:
+- [docs/design.md](docs/design.md) — architecture, agents, execution model, permissions, memory
+- [docs/evaluations.md](docs/evaluations.md) — technology evaluations and decisions
 
 ## Project Principles
 
@@ -38,7 +40,7 @@ These are seeded as starting patterns. The dev system evolves them:
 ## Development Guidelines
 
 - This repo is the genesis bootstrapper itself — keep it lean
-- All brainstorming and design evolution goes in BRAINSTORMING.md
+- Design docs live in `docs/` — `design.md` for architecture, `evaluations.md` for tech decisions
 - When building templates for dev repos, put them under `templates/`
 - Test genesis by actually bootstrapping a dev repo and verifying the onboarding flow works end-to-end
 - The dev repo templates should be opinionated about process (GitHub issues, quality gates, self-monitoring) but unopinionated about implementation
@@ -51,4 +53,4 @@ These are seeded as starting patterns. The dev system evolves them:
 
 ## Self-Improvement
 
-This project opts in to self-improvement. Update this CLAUDE.md and project workflows as the design evolves. Keep BRAINSTORMING.md as the living design document.
+This project opts in to self-improvement. Update this CLAUDE.md and project workflows as the design evolves. Keep `docs/` as the living design documents.
