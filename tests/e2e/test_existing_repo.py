@@ -90,7 +90,7 @@ def test_existing_repo_has_settings_with_hooks(
     settings = json.loads((repo / ".claude" / "settings.json").read_text())
     assert "hooks" in settings
     assert "PostToolUse" in settings["hooks"]
-    assert "log.sh" in settings["hooks"]["PostToolUse"][0]["command"]
+    assert "log.sh" in settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
 
 
 def test_existing_repo_has_genesis_config(

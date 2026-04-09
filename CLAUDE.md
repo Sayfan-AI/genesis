@@ -51,6 +51,16 @@ These are seeded as starting patterns. The dev system evolves them:
 - **Orchestrator:** Claude Agent SDK sessions launched by GitHub Actions. Each trigger spawns an orchestrator that assesses project state and launches sub-agents.
 - **Genesis itself:** TBD — CLI tool, Claude Code skill, or both
 
+## Claude Code Hooks Format
+
+The correct hooks format in `.claude/settings.json` requires a `matcher` + `hooks` array structure. Each hook event entry must look like:
+
+```json
+{"matcher": "", "hooks": [{"type": "command", "command": "..."}]}
+```
+
+NOT the flat format `{"type": "command", "command": "..."}` — that is invalid and causes Claude Code settings errors. The template at `templates/settings.json` must always use the correct format.
+
 ## Self-Improvement
 
 This project opts in to self-improvement. Update this CLAUDE.md and project workflows as the design evolves. Keep `docs/` as the living design documents.
