@@ -118,11 +118,43 @@ bash .genesis/scripts/issues.sh create --title "Implement auth"  # Issue managem
 bash .genesis/scripts/issues.sh list --status open       # List issues
 ```
 
+## Local Control Plane
+
+By default, every dev system runs its orchestrator on GitHub Actions (zero setup, always on). For long sessions, interactive steering, local resource access, or to avoid burning GHA minutes, the orchestrator can also run locally via the `genesis` CLI.
+
+```bash
+# From inside any dev repo:
+genesis serve              # Run orchestrator locally; auto-disables GHA workflows
+genesis workflows disable  # Manually disable all active workflows
+genesis workflows enable   # Re-enable manually-disabled workflows
+```
+
+`genesis serve`:
+- Disables all active GHA workflows on start (re-enables on graceful shutdown — Ctrl+C). Prevents the "two cooks in the kitchen" problem.
+- Polls the GitHub repo events API (`/repos/{owner}/{repo}/events`) with ETags. One call covers issues, comments, PRs, pushes — no rate-limit cost when nothing changed.
+- Launches `claude -p` against the orchestrator agent on each relevant event. Same agent definition as GHA mode.
+- PID lock at `.genesis/.orchestrator.lock` prevents concurrent local instances. State (ETag, high-water event id) persists in `.genesis/`.
+
+Config (env vars or CLI flags):
+
+| Var | Flag | Default |
+|---|---|---|
+| `GENESIS_REPO` | `--repo` | detected from git remote |
+| `GENESIS_POLL_INTERVAL` | `--poll-interval` | 60 (seconds) |
+| `GENESIS_SESSION_TIMEOUT` | `--session-timeout` | 3600 (seconds) |
+
+Auth uses the user's existing `gh` CLI (`gh auth token`) and `ANTHROPIC_API_KEY` from the environment.
+
+If `genesis serve` exits non-gracefully, GHA workflows stay disabled. Recover with `genesis workflows enable` or by re-running `genesis serve`.
+
 ## Project Structure
 
 ```
 genesis/
-├── src/genesis/          # Core scaffolding logic (Python)
+├── src/genesis/          # Core Python package
+│   ├── cli.py            # `genesis` CLI entry point (serve, workflows)
+│   ├── server.py         # Local control plane (poll loop, orchestrator launch)
+│   ├── workflows.py      # Enable/disable GHA workflows via `gh`
 │   ├── scaffold.py       # Create/augment repos with dev system scaffolding
 │   └── github.py         # GitHub integration (repo creation, issue #1)
 ├── templates/            # Templates for scaffolded dev systems
@@ -131,14 +163,16 @@ genesis/
 │   ├── workflows/        # GitHub Actions orchestrator workflows
 │   ├── claude_md.md.j2   # CLAUDE.md template
 │   └── settings.json     # CC hooks configuration
-├── tests/e2e/            # End-to-end tests for all topologies
-├── BRAINSTORMING.md      # Living design document
+├── tests/
+│   ├── unit/             # Unit tests for cli/server/workflows
+│   └── e2e/              # End-to-end tests for all topologies
+├── docs/                 # design.md, evaluations.md
 └── CLAUDE.md             # Project instructions
 ```
 
 ## Status
 
-Early development. The scaffolding engine and genctl CLI are functional with passing tests. See [BRAINSTORMING.md](BRAINSTORMING.md) for the full design and open questions.
+Early development. Scaffolding engine, `genesis-new` skill, and local control plane (`genesis serve`) are functional with passing unit and e2e tests. See [docs/design.md](docs/design.md) for architecture and [docs/evaluations.md](docs/evaluations.md) for technology decisions.
 
 ## Related Work
 
