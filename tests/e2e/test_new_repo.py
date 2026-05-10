@@ -92,7 +92,9 @@ def test_new_repo_has_settings_with_hooks(tmp_dir: Path) -> None:
     for hook in expected_hooks:
         assert hook in hooks, f"Missing hook: {hook}"
         assert len(hooks[hook]) > 0
-        assert "log.sh" in hooks[hook][0]["command"]
+        # Format: [{"matcher": "", "hooks": [{"type": "command", "command": "..."}]}]
+        inner = hooks[hook][0]["hooks"]
+        assert "log.sh" in inner[0]["command"]
 
 
 def test_new_repo_has_genesis_config(tmp_dir: Path) -> None:

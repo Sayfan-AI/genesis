@@ -47,8 +47,10 @@ These are seeded as starting patterns. The dev system evolves them:
 
 ## Tech Stack
 
-- **Trigger layer:** GitHub Actions — scheduled workflows (cron) + event-triggered workflows (issues, PRs, comments)
-- **Orchestrator:** Claude Agent SDK sessions launched by GitHub Actions. Each trigger spawns an orchestrator that assesses project state and launches sub-agents.
+- **Orchestrator:** Trigger-agnostic. Reads GitHub issues, assesses state, dispatches sub-agents, exits. Doesn't know how it was triggered.
+- **Trigger layer (default):** GitHub Actions — scheduled workflows (cron) + event-triggered workflows (issues, PRs, comments). Zero setup, always on, self-contained.
+- **Trigger layer (opt-in):** Local control plane — polls GitHub events, launches orchestrator sessions locally in a sandbox. For long sessions, interactive steering, or local resource access. Requires running a local process.
+- **Both modes** can run together, coordinated via GitHub issues with a cross-mode concurrency guard.
 - **Genesis itself:** TBD — CLI tool, Claude Code skill, or both
 
 ## Claude Code Hooks Format

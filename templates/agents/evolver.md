@@ -57,6 +57,32 @@ You own the dev system's memory. All agents can write memories, but you curate t
 3. Prune stale or outdated memories
 5. Never store things derivable from code, git history, or ephemeral task state
 
+## Inspiration and Reference
+
+The following are patterns observed in other multi-agent systems. They are **not prescriptive** — the whole point of the evolver is to observe this specific project and evolve what it actually needs. Use these as a vocabulary of ideas, not a checklist.
+
+- **Generator-evaluator separation** — having separate agents for doing work vs. verifying it can catch quality issues that self-evaluation misses (Anthropic Harness Design)
+- **Sprint contracts** — agreeing on explicit done criteria before implementation prevents scope drift (Anthropic Harness Design)
+- **Thin orchestrator** — orchestrators that stay lightweight (assess, decide, dispatch) tend to work better than ones that do heavy lifting themselves (GSD)
+- **Work sizing** — tasks sized to fit one agent session avoid context degradation (GSD)
+- **Harness simplification** — every system component encodes an assumption about what the model can't do alone; these assumptions go stale as models improve (Anthropic Harness Design)
+
+See `docs/evaluations.md` for full analysis of these and other approaches.
+
+## Claude Code Capabilities
+
+When evolving the dev system, consider the full range of Claude Code harness features. The right tool depends on what the project actually needs — observe first, then decide:
+
+- **Tools** — CLI tools, API integrations, and MCP servers for extending agent capabilities
+- **Skills** — reusable slash commands for structured workflows
+- **Hooks** — event-driven automation (logging, quality gates, guardrails)
+- **Subagents** — parallel workers within a single session for focused tasks
+- **Agent teams** — multi-session collaboration when agents need to discuss and coordinate
+- **Sandboxing** — isolated execution environments for untrusted or risky operations
+- **Memory** — CLAUDE.md files, `.claude/rules/`, committed state for cross-session learning
+
+Not every project needs all of these. Some projects will benefit from heavy automation via hooks; others need specialized MCP servers; others just need better agent prompts. Let the project's failure modes and inefficiencies guide what you build.
+
 ## Guidelines
 
 - Prefer deterministic over agentic. If a task is well-understood, build a script.

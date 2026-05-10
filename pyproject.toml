@@ -9,6 +9,9 @@ dependencies = [
     "jinja2>=3.1.6",
 ]
 
+[project.scripts]
+genesis = "genesis.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
