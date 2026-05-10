@@ -71,6 +71,50 @@ def test_disable_persists_tracking_file(monkeypatch) -> None:
     assert tracked == [{"id": 1, "name": "events"}]
 
 
+def test_disable_persists_incrementally_on_partial_failure(monkeypatch) -> None:
+    """If the 2nd disable call fails, the 1st must already be on disk for recovery."""
+
+    list_payload = [
+        {"id": 1, "name": "events", "state": "active"},
+        {"id": 2, "name": "scheduled", "state": "active"},
+    ]
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["gh", "workflow", "list", "--all"]:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=json.dumps(list_payload), stderr=""
+            )
+        if cmd[:4] == ["gh", "workflow", "disable", "1"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+        if cmd[:4] == ["gh", "workflow", "disable", "2"]:
+            raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        workflows.disable_workflows()
+    # Workflow 1 was disabled before the failure — must be tracked on disk
+    tracked = json.loads(workflows.DISABLED_LIST_PATH.read_text())
+    assert tracked == [{"id": 1, "name": "events"}]
+
+
+def test_disable_merges_with_existing_tracked_state(monkeypatch) -> None:
+    """A second disable_workflows call must not erase prior tracked disables."""
+    workflows._persist_disabled([{"id": 99, "name": "old-from-prior-run"}])
+    fake = FakeRun(
+        [[{"id": 1, "name": "events", "state": "active"}]]
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    workflows.disable_workflows()
+    tracked = json.loads(workflows.DISABLED_LIST_PATH.read_text())
+    assert tracked == [
+        {"id": 99, "name": "old-from-prior-run"},
+        {"id": 1, "name": "events"},
+    ]
+
+
 def test_disable_no_active_does_not_create_tracking_file(monkeypatch) -> None:
     fake = FakeRun(
         [[{"id": 1, "name": "old", "state": "disabled_manually"}]]

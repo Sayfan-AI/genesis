@@ -51,19 +51,29 @@ def disable_workflows(repo: str | None = None) -> list[str]:
     """Disable all currently-active workflows in the target repo.
 
     Persists the set of disabled workflow IDs to `.genesis/.disabled-by-genesis`
-    so a later `enable_workflows()` call can restore only what genesis disabled.
+    after each successful disable so a partial failure (e.g. one of N gh calls
+    raises) still leaves a recoverable record of what was disabled. If the
+    tracking file already exists from a prior session, new disables are
+    appended to it.
+
     Returns the names of newly-disabled workflows.
     """
-    disabled: list[dict] = []
+    existing = _load_disabled() or []
+    tracked_ids = {wf["id"] for wf in existing}
+    disabled = list(existing)
+    new_names: list[str] = []
     for wf in list_workflows(repo):
-        if wf["state"] == "active":
-            print(f"Disabling workflow: {wf['name']}")
-            cmd = ["gh", "workflow", "disable", str(wf["id"])] + _gh_repo_args(repo)
-            subprocess.run(cmd, check=True)
+        if wf["state"] != "active":
+            continue
+        print(f"Disabling workflow: {wf['name']}")
+        cmd = ["gh", "workflow", "disable", str(wf["id"])] + _gh_repo_args(repo)
+        subprocess.run(cmd, check=True)
+        if wf["id"] not in tracked_ids:
             disabled.append({"id": wf["id"], "name": wf["name"]})
-    if disabled:
+            tracked_ids.add(wf["id"])
+        new_names.append(wf["name"])
         _persist_disabled(disabled)
-    return [wf["name"] for wf in disabled]
+    return new_names
 
 
 def enable_workflows(repo: str | None = None) -> list[str]:

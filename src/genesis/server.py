@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -106,9 +107,15 @@ class PollResult:
 
 
 def fetch_events(repo: str, etag: str | None, token: str) -> PollResult:
-    """Fetch repo events. Returns 304 (not_modified=True) when ETag matches."""
+    """Fetch repo events. Returns 304 (not_modified=True) when ETag matches.
+
+    Single page (max 100 events). If more than 100 events arrive between polls,
+    older events on subsequent pages are missed. `poll_once` logs a warning when
+    the previous high-water mark isn't visible in the returned page so the user
+    can shorten `--poll-interval`.
+    """
     req = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}/events?per_page=30",
+        f"https://api.github.com/repos/{repo}/events?per_page=100",
         headers={
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
@@ -281,6 +288,18 @@ class LocalControlPlane:
         events = result.events
         if not events:
             return []
+        # If the previous high-water mark is set but isn't on this page, more
+        # than 100 events arrived since the last poll and older ones may have
+        # been pushed to page 2+. We don't paginate (ETag invariant), but warn.
+        if (
+            self.last_event_id is not None
+            and not any(e.get("id") == self.last_event_id for e in events)
+        ):
+            log(
+                f"Warning: previous high-water event id={self.last_event_id} "
+                "not found on returned page; some events may have been missed. "
+                "Consider lowering --poll-interval."
+            )
         new_events = filter_relevant_events(events, self.last_event_id)
         # Always advance high-water to newest event seen, even if filtered out
         self.last_event_id = events[0].get("id")
@@ -317,10 +336,19 @@ class LocalControlPlane:
             log("Another local control plane instance is running. Exiting.")
             return 1
 
+        # Verify claude is on PATH before disabling workflows. Otherwise we'd
+        # leave GHA off with no working orchestrator running.
+        if shutil.which("claude") is None:
+            log("Error: 'claude' command not found. Install Claude Code and ensure it's on PATH.")
+            self.release_lock()
+            return 127
+
         try:
             disable_workflows(repo=self.repo)
         except subprocess.CalledProcessError as e:
             log(f"Failed to disable workflows: {e}")
+            # disable_workflows persists incrementally, so any partial-disable
+            # state is on disk and can be recovered with `genesis workflows enable`.
             self.release_lock()
             return 1
 
@@ -338,9 +366,13 @@ class LocalControlPlane:
         # replay every relevant historical event on the events page.
         self._prime_high_water_if_needed(token)
 
-        # Initial run
-        self.run_orchestrator(None)
+        # Initial run. If it fails because claude is broken (rc=127), abort
+        # rather than entering the poll loop with workflows off.
+        rc = self.run_orchestrator(None)
         self.save_state()
+        if rc == 127:
+            log("Initial orchestrator run failed (claude not callable). Aborting.")
+            return self._shutdown(token_ok=True)
         if self.shutdown:
             return self._shutdown(token_ok=True)
 
