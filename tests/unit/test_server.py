@@ -279,3 +279,32 @@ def test_prime_high_water_swallows_http_error(plane) -> None:
     with patch.object(server, "fetch_events", side_effect=err):
         plane._prime_high_water_if_needed("token")  # must not raise
     assert plane.last_event_id is None
+
+
+# ---------- poll_once: page-coverage warning ----------
+
+
+def test_poll_once_warns_when_high_water_not_on_page(plane, capsys) -> None:
+    """If the previous high-water id isn't in the returned page, events were missed."""
+    plane.last_event_id = "5"  # known-missing from this page
+    raw = [
+        {"id": "20", "type": "IssuesEvent", "actor": {"login": "alice"}, "payload": {"action": "opened"}},
+        {"id": "19", "type": "IssuesEvent", "actor": {"login": "alice"}, "payload": {"action": "opened"}},
+    ]
+    poll = server.PollResult(events=raw, etag='"e"', not_modified=False)
+    with patch.object(server, "fetch_events", return_value=poll):
+        plane.poll_once("token")
+    out = capsys.readouterr().out
+    assert "Warning" in out and "not found on returned page" in out
+
+
+def test_poll_once_no_warning_when_high_water_on_page(plane, capsys) -> None:
+    plane.last_event_id = "9"
+    raw = [
+        {"id": "10", "type": "IssuesEvent", "actor": {"login": "alice"}, "payload": {"action": "opened"}},
+        {"id": "9", "type": "IssuesEvent", "actor": {"login": "alice"}, "payload": {"action": "opened"}},
+    ]
+    poll = server.PollResult(events=raw, etag='"e"', not_modified=False)
+    with patch.object(server, "fetch_events", return_value=poll):
+        plane.poll_once("token")
+    assert "not found on returned page" not in capsys.readouterr().out
