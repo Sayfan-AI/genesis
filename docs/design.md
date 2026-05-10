@@ -98,11 +98,77 @@ Genesis seeds these as a starting pattern. The dev system can rename, merge, spl
 
 ## Execution Model
 
+The orchestrator is **trigger-agnostic**. It reads GitHub issues, assesses project state, dispatches sub-agents, and exits. It doesn't know or care how it was triggered. Genesis supports two execution modes that can run independently or together.
+
+### GitHub Actions Mode (Default)
+
 GitHub Actions serve as the trigger layer:
 - **Scheduled workflows** (cron) — periodic advancement of project state
 - **Event-triggered workflows** — new issue opened/closed, PR merged, human feedback, comments, etc.
 
-Each workflow trigger launches a **Claude Agent SDK session** as the orchestrator. The orchestrator assesses the current state of the project and launches sub-agents to perform tasks and advance progress. The dev system's evolver agent evolves these workflows and triggers as the project matures.
+Each trigger launches the orchestrator as a Claude Agent SDK session on a GHA runner. The runner is ephemeral — state persists in GitHub issues and committed files, not on the runner.
+
+**Why it's the default:**
+- **Zero setup** — works out of the box with any GitHub repo
+- **Always on** — runs when the user's machine is off, on vacation, at 3am
+- **Self-contained** — no daemon to manage, no "did I leave it running?"
+- **Event-driven natively** — GitHub triggers workflows on issue/PR/comment events directly
+- **Clean environment** — every run starts fresh, no state leaks, no zombie processes
+- **Built-in secrets management** — encrypted secrets, no local credential files
+- **Audit trail** — every run logged in the Actions tab
+- **Scales to many projects** — 50 dev repos all running on GHA without 50 local processes
+
+**Limitations:** Runner time limits (6 hours max per job on free tier), limited free minutes (2000/month), cold start latency, concurrency caps, no access to local resources.
+
+In practice, the time limit is rarely a constraint — the orchestrator is a thin coordinator that should assess, dispatch, and exit quickly. Sub-agents doing implementation work should also be scoped to fit within reasonable windows.
+
+### Local Mode (Opt-in)
+
+For users who need longer sessions, interactive steering, or access to local resources, genesis supports a local control plane that runs the same orchestrator on the user's machine.
+
+The local control plane is the `genesis serve` subcommand of the genesis CLI. The user installs genesis once and runs `genesis serve` from inside any dev repo. Structurally parallel to the GHA workflow — GHA is "on event, run claude with orchestrator prompt", `genesis serve` is the same thing in a poll loop:
+
+1. **Disable GHA** — on start, `genesis serve` disables all currently-active GitHub Actions workflows in the repo so we don't have "two cooks in the kitchen". On graceful shutdown, it re-enables them. `genesis workflows enable|disable` lets the user manage this manually if a non-graceful exit leaves them disabled.
+2. **Poll** — queries the GitHub repo events API (`/repos/{owner}/{repo}/events`) with ETags. One API call covers all repo activity (issues, comments, PRs, pushes, labels). Returns `304 Not Modified` when nothing changed — doesn't count against rate limit.
+3. **Launch** — on first start (initial assessment) and whenever new activity is detected, launches `claude -p` with the orchestrator prompt. Same agent definition, same logic as GHA mode. The orchestrator reads full issue state when it runs.
+4. **Concurrency guard** — `.genesis/.orchestrator.lock` (PID-based) prevents multiple `genesis serve` instances on the same repo. If a session exceeds its timeout, the entire process tree is killed. Intermediate work is already in GitHub issues or committed files — the next run picks up.
+
+**Secrets:** Needs `ANTHROPIC_API_KEY` (for Claude) and `gh` CLI authentication (for GitHub API). The user already has both if they're running Claude Code locally. No additional secrets infrastructure needed — the user's machine is a trusted environment.
+
+**Sandboxing:** The orchestrator session can run with Claude Code's built-in sandboxing. For stronger isolation, the user can run `genesis serve` inside Docker.
+
+**Configuration** (environment variables):
+- `GENESIS_POLL_INTERVAL` — seconds between polls (default: 60)
+- `GENESIS_SESSION_TIMEOUT` — max seconds per orchestrator session (default: 3600)
+- `GENESIS_REPO` — owner/repo (default: detected from git remote)
+
+**When to use local mode:**
+- Sessions that need to exceed GHA's 6-hour limit
+- Work that requires access to local services, databases, or hardware
+- The user wants to steer the system interactively alongside the orchestrator
+- Cost optimization — no GHA minutes consumed, only API tokens
+
+**Limitations:** Requires a machine running (user's laptop, a server, a container). The user must run the local control plane process. System stops when the machine sleeps or shuts down.
+
+**Interactive steering:** The user can always start an interactive Claude Code session in the dev repo while the orchestrator is running. The interactive session is aware of running orchestrator sessions via the lock file at `.genesis/.orchestrator.lock`, so the user can check status, pause, or redirect work.
+
+### Running Both Modes
+
+GHA and local mode coordinate through the same GitHub issues — no conflict. A cross-mode concurrency guard prevents both from running the orchestrator simultaneously (GHA checks if a local session is active, and vice versa).
+
+A natural pattern for active projects: GHA handles event triggers around the clock (PR merged at 3am, external contributor opens an issue), while local mode runs when the user wants faster iteration or interactive steering. The onboarding agent configures the initial mode; the evolver can adjust the mix as the project's needs change.
+
+### Orchestrator Behavior
+
+Regardless of mode, the orchestrator:
+- Reads GitHub issues to assess project state
+- Breaks down current milestone work into tasks (issues)
+- Dispatches sub-agents for execution
+- May spawn sub-agents that spawn their own sub-agents
+- Should be aware of its time budget (passed as env var) to avoid starting large tasks near a deadline
+- Captures all intermediate state in GitHub issues or committed files — never relies on in-memory state surviving across runs
+
+The orchestrator is a **thin coordinator**: assess, decide, dispatch. It does not do implementation work itself. If its context window is filling up, something is wrong.
 
 ## Milestones and Completion
 
@@ -301,6 +367,8 @@ Shell scripts that provide core capabilities to every dev system. No binary dist
 - **`log.sh`** — called by CC hooks. Reads hook stdin JSON, pushes structured logs to Loki via curl. Falls back to stderr if Loki is not configured.
 - **`issues.sh`** — thin wrapper around `gh` CLI. Provides `create`, `list`, `close`, `assign` subcommands.
 
+Local mode (`genesis serve`) is a subcommand of the genesis CLI itself, not a script seeded into the dev repo. See **Execution Model > Local Mode**.
+
 ### Usage
 
 ```bash
@@ -497,8 +565,18 @@ The comparison is aspirational — we don't know if genesis even works yet. But 
   - **Context degradation** — long sessions cause coherence loss and "context anxiety" (premature task completion as models approach perceived limits). Genesis mitigates this by design: each GitHub Actions trigger spawns a fresh session, and state persists in issues/memory rather than in-context.
   - **Structured handoffs via files** — agents communicate through file-based artifacts rather than shared context. Genesis uses the same pattern: committed files (digests, data, CLAUDE.md) and GitHub issues as the handoff medium between ephemeral sessions.
   - **Contract negotiation** — before implementation, evaluator and generator agree on sprint success criteria. Parallels how genesis's orchestrator creates issues with done criteria before dispatching workers.
-  - **Continuous harness optimization** — the harness itself should evolve as models improve. This is exactly the evolver agent's job in genesis.
-  - Results: solo agent ($9, 20 min) produced broken output; full harness ($200, 6 hours) produced functional full-stack apps. Validates that orchestration overhead pays for itself on complex goals.
+  - **Continuous harness optimization** — the harness itself should evolve as models improve. This is exactly the evolver agent's job in genesis. Key principle: "every component in a harness encodes an assumption about what the model can't do on its own, and those assumptions are worth stress testing because they can quickly go stale as models improve."
+  - **Evaluator training** — out-of-the-box evaluators exhibit positive bias (praising mediocre work). Effective evaluation requires iterative prompt tuning against observed judgment failures. Genesis's health agent should undergo the same calibration.
+  - Results: solo agent ($9, 20 min) produced broken output; full harness ($200, 6 hours) produced functional full-stack apps. With Opus 4.6, simplified harness (dropped sprint decomposition, end-of-cycle evaluation only): $125, 3h50m. Validates both that orchestration pays for itself and that harness components should be regularly stress-tested for continued necessity.
+
+- **[GSD (Get Shit Done)](https://github.com/gsd-build/get-shit-done)** (TACHES, ~48K stars) — a spec-driven development framework for AI coding agents. Two versions: v1 is prompt-only (markdown skills/slash commands), v2 is a TypeScript CLI on the Pi SDK with programmatic control over sessions. Key patterns relevant to genesis:
+  - **Thin orchestrator** — orchestrator stays at 10-15% context usage, passes file paths (not contents) to sub-agents. Each worker gets a fresh ~200K token context window. Genesis's orchestrator should follow the same discipline: assess state, dispatch, don't do heavy lifting.
+  - **Three-level work hierarchy** — milestone (shippable version) → slice (demoable vertical capability) → task (one context-window-sized unit). Genesis uses GitHub milestones and issues but doesn't enforce a strict hierarchy — the evolver agent should consider whether more structure helps.
+  - **File-driven state machine** — `.gsd/` directory is the sole source of truth. No in-memory state survives across sessions. Auto mode reads disk, determines next work unit, spawns fresh agent, repeats. Directly analogous to genesis using GitHub issues as the state machine, though genesis chose issues over files for human visibility.
+  - **Crash recovery** — if a session dies, next run reads surviving state from disk and synthesizes a recovery briefing. Genesis gets this for free from GitHub issues (persistent, external to runner).
+  - **Plan → execute → verify loop** — each slice goes through planning, per-task execution in fresh context, verification, then roadmap reassessment. Genesis should ensure the orchestrator follows a similar discipline rather than jumping straight to execution.
+  - **Context rot as first-class concern** — GSD's entire architecture is motivated by quality degradation in long sessions. Genesis mitigates this by design (ephemeral GHA sessions), but the evolver should watch for signs of context degradation in long-running sub-agent work.
+  - Key difference from genesis: GSD is human-interactive (user drives phases), genesis is autonomous. GSD externalizes state to local files, genesis to GitHub issues. GSD's v1 "prompt-and-hope" approach vs v2 programmatic control parallels the distinction between genesis seeding good patterns vs having a harness that enforces them.
 
 ## Permission Architecture
 
