@@ -154,9 +154,9 @@ The local control plane is the `genesis serve` subcommand of the genesis CLI. Th
 
 ### Running Both Modes
 
-GHA and local mode coordinate through the same GitHub issues — no conflict. A cross-mode concurrency guard prevents both from running the orchestrator simultaneously (GHA checks if a local session is active, and vice versa).
+GHA and local mode coordinate through the same GitHub issues — no conflict. The two modes are mutually exclusive in practice: when the user runs `genesis serve`, it disables all active GHA workflows on start and re-enables them on graceful shutdown. This is the cross-mode concurrency guard — there's no need for GHA to check whether a local session is running, because if one is, GHA workflows are already disabled. If `genesis serve` exits non-gracefully, workflows stay disabled until the user re-runs `genesis serve` or runs `genesis workflows enable`.
 
-A natural pattern for active projects: GHA handles event triggers around the clock (PR merged at 3am, external contributor opens an issue), while local mode runs when the user wants faster iteration or interactive steering. The onboarding agent configures the initial mode; the evolver can adjust the mix as the project's needs change.
+A natural pattern for active projects: GHA handles event triggers around the clock (PR merged at 3am, external contributor opens an issue) most of the time, and the user temporarily switches to local mode (`genesis serve`) for sessions that need faster iteration, interactive steering, or local resource access. The onboarding agent configures the initial mode; the evolver can adjust the mix as the project's needs change.
 
 ### Orchestrator Behavior
 
