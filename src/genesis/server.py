@@ -286,6 +286,27 @@ class LocalControlPlane:
         self.last_event_id = events[0].get("id")
         return new_events
 
+    def _prime_high_water_if_needed(self, token: str) -> None:
+        """Record the current newest event id as the high-water mark.
+
+        Avoids replaying every relevant historical event on the events page
+        after the initial orchestrator run. No-op if state was loaded from a
+        prior session.
+        """
+        if self.last_event_id is not None:
+            return
+        try:
+            result = fetch_events(self.repo, etag=None, token=token)
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            log(f"Failed to prime high-water mark ({e}); proceeding without")
+            return
+        if result.events:
+            self.last_event_id = result.events[0].get("id")
+            log(f"Primed high-water mark at event id={self.last_event_id}")
+        if result.etag:
+            self.etag = result.etag
+        self.save_state()
+
     def serve(self) -> int:
         log(f"Genesis local control plane starting (repo: {self.repo})")
         log(
@@ -297,7 +318,7 @@ class LocalControlPlane:
             return 1
 
         try:
-            disable_workflows()
+            disable_workflows(repo=self.repo)
         except subprocess.CalledProcessError as e:
             log(f"Failed to disable workflows: {e}")
             self.release_lock()
@@ -312,6 +333,10 @@ class LocalControlPlane:
             self._reenable_workflows_safe()
             self.release_lock()
             return 1
+
+        # Prime high-water mark on first run so the post-initial poll doesn't
+        # replay every relevant historical event on the events page.
+        self._prime_high_water_if_needed(token)
 
         # Initial run
         self.run_orchestrator(None)
@@ -353,7 +378,7 @@ class LocalControlPlane:
 
     def _reenable_workflows_safe(self) -> None:
         try:
-            enable_workflows()
+            enable_workflows(repo=self.repo)
         except subprocess.CalledProcessError as e:
             log(f"Failed to re-enable workflows: {e}. Run `genesis workflows enable` to retry.")
 

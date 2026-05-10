@@ -56,7 +56,7 @@ def test_workflows_enable_dispatches() -> None:
     ) as disable:
         rc = cli.main(["workflows", "enable"])
     assert rc == 0
-    enable.assert_called_once_with()
+    enable.assert_called_once_with(repo=None)
     disable.assert_not_called()
 
 
@@ -66,8 +66,20 @@ def test_workflows_disable_dispatches() -> None:
     ) as enable:
         rc = cli.main(["workflows", "disable"])
     assert rc == 0
-    disable.assert_called_once_with()
+    disable.assert_called_once_with(repo=None)
     enable.assert_not_called()
+
+
+def test_workflows_enable_threads_repo_arg() -> None:
+    with patch("genesis.cli.enable_workflows") as enable:
+        cli.main(["workflows", "enable", "--repo", "alice/foo"])
+    enable.assert_called_once_with(repo="alice/foo")
+
+
+def test_workflows_disable_threads_repo_arg() -> None:
+    with patch("genesis.cli.disable_workflows") as disable:
+        cli.main(["workflows", "disable", "--repo", "alice/foo"])
+    disable.assert_called_once_with(repo="alice/foo")
 
 
 def test_no_command_exits_with_error() -> None:

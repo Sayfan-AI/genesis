@@ -48,11 +48,19 @@ def main(argv: list[str] | None = None) -> int:
     workflows_subparsers = workflows_parser.add_subparsers(
         dest="workflows_command", required=True
     )
-    workflows_subparsers.add_parser(
-        "enable", help="Enable all manually-disabled workflows."
+    enable_parser = workflows_subparsers.add_parser(
+        "enable", help="Enable manually-disabled workflows."
     )
-    workflows_subparsers.add_parser(
+    enable_parser.add_argument(
+        "--repo",
+        help="owner/repo to manage (default: detected from cwd's git remote)",
+    )
+    disable_parser = workflows_subparsers.add_parser(
         "disable", help="Disable all currently-active workflows."
+    )
+    disable_parser.add_argument(
+        "--repo",
+        help="owner/repo to manage (default: detected from cwd's git remote)",
     )
 
     args = parser.parse_args(argv)
@@ -68,10 +76,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "workflows":
         if args.workflows_command == "enable":
-            enable_workflows()
+            enable_workflows(repo=args.repo)
             return 0
         if args.workflows_command == "disable":
-            disable_workflows()
+            disable_workflows(repo=args.repo)
             return 0
 
     return 0
