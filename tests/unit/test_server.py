@@ -240,3 +240,42 @@ def test_interruptible_sleep_wakes_on_shutdown(plane) -> None:
     plane._interruptible_sleep(60)
     elapsed = time.time() - start
     assert elapsed < 1, f"should return immediately when shutdown set, took {elapsed}s"
+
+
+# ---------- _prime_high_water_if_needed ----------
+
+
+def test_prime_high_water_records_newest_event_id(plane) -> None:
+    """Without priming, the post-initial poll would replay all historical events."""
+    raw = [
+        {"id": "100", "type": "IssuesEvent", "actor": {"login": "alice"}, "payload": {"action": "opened"}},
+        {"id": "99", "type": "IssueCommentEvent", "actor": {"login": "alice"}, "payload": {"action": "created"}},
+    ]
+    poll = server.PollResult(events=raw, etag='"e"', not_modified=False)
+    with patch.object(server, "fetch_events", return_value=poll):
+        plane._prime_high_water_if_needed("token")
+    assert plane.last_event_id == "100"
+    assert plane.etag == '"e"'
+
+
+def test_prime_high_water_skips_when_already_primed(plane) -> None:
+    plane.last_event_id = "55"
+    with patch.object(server, "fetch_events") as fetch:
+        plane._prime_high_water_if_needed("token")
+    fetch.assert_not_called()
+    assert plane.last_event_id == "55"
+
+
+def test_prime_high_water_handles_empty_events(plane) -> None:
+    poll = server.PollResult(events=[], etag='"e"', not_modified=False)
+    with patch.object(server, "fetch_events", return_value=poll):
+        plane._prime_high_water_if_needed("token")
+    assert plane.last_event_id is None  # still unset, no events to mark
+    assert plane.etag == '"e"'
+
+
+def test_prime_high_water_swallows_http_error(plane) -> None:
+    err = urllib.error.HTTPError(url="x", code=500, msg="Internal", hdrs=None, fp=None)
+    with patch.object(server, "fetch_events", side_effect=err):
+        plane._prime_high_water_if_needed("token")  # must not raise
+    assert plane.last_event_id is None
