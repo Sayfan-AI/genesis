@@ -130,8 +130,9 @@ genesis workflows enable   # Re-enable manually-disabled workflows
 ```
 
 `genesis serve`:
-- Disables all active GHA workflows on start (re-enables on graceful shutdown — Ctrl+C). Prevents the "two cooks in the kitchen" problem.
-- Polls the GitHub repo events API (`/repos/{owner}/{repo}/events`) with ETags. One call covers issues, comments, PRs, pushes — no rate-limit cost when nothing changed.
+- Preflight-checks that `claude` is on PATH before touching workflows, so the repo never ends up with GHA disabled and no working local orchestrator.
+- Disables all active GHA workflows on start (re-enables on graceful shutdown — Ctrl+C). Prevents the "two cooks in the kitchen" problem. Tracks the set it disabled in `.genesis/.disabled-by-genesis` and only re-enables that set, so workflows the user had paused before `genesis serve` stay paused.
+- Polls the GitHub repo events API (`/repos/{owner}/{repo}/events`) with ETags. One call covers issues, comments, PRs, pushes — no rate-limit cost when nothing changed. The events endpoint returns at most 100 events per page; if a poll sees more activity than that, genesis logs a warning suggesting a shorter `--poll-interval`.
 - Launches `claude -p` against the orchestrator agent on each relevant event. Same agent definition as GHA mode.
 - PID lock at `.genesis/.orchestrator.lock` prevents concurrent local instances. State (ETag, high-water event id) persists in `.genesis/`.
 

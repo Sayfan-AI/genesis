@@ -22,6 +22,7 @@ packages = ["src/genesis"]
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "playwright>=1.49",
 ]
 
 [tool.pytest.ini_options]
