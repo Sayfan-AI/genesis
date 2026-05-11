@@ -580,16 +580,16 @@ The comparison is aspirational — we don't know if genesis even works yet. But 
 
 ## Permission Architecture
 
-One GitHub App, scoped tokens per project. This avoids the 100-App registration limit (per user/org) while maintaining least-privilege per project.
+**One GitHub App per user or org**, scoped tokens per project. Each genesis adopter creates their own App (the App's private key cannot be safely shared between humans — it's a single root credential that signs JWTs for every installation). Within an adopter's scope, one App backs unlimited projects, avoiding GitHub's 100-App-registration limit per user/org while maintaining least-privilege per project.
 
 ### Design: Single App, scoped installation tokens
 
-GitHub's `POST /app/installations/{id}/access_tokens` endpoint accepts both `repositories` and `permissions` parameters. The token's permissions must be **equal to or less than** the App's registered permissions. So we register one App with the union of all permissions any project could need, and each project mints a narrowly scoped 1-hour token at runtime.
+GitHub's `POST /app/installations/{id}/access_tokens` endpoint accepts both `repositories` and `permissions` parameters. The token's permissions must be **equal to or less than** the App's registered permissions. So each adopter registers one App with the union of all permissions any of their projects could need, and each project mints a narrowly scoped 1-hour token at runtime.
 
 **Genesis App registration (broad — the ceiling):**
-- Installed on **all orgs** and **all repos** that genesis manages
-- Registered with the union of all permissions: `contents:write`, `pull_requests:write`, `issues:write`, `security_events:read`, `actions:read`, `metadata:read`, etc.
-- Private key stored as an **org-level encrypted secret**
+- Installed on **all orgs and repos** the adopter wants genesis to manage (can be "all repositories" or "selected repositories" — the adopter's call).
+- Registered with the union of all permissions: `contents:write`, `pull_requests:write`, `issues:write`, `actions:write`, `workflows:write`, `metadata:read`, plus `secrets:write` (needed only by the seeding workflow on the adopter's source repo — see below).
+- Private key + App ID are seeded onto each genesis-managed dev repo as encrypted **repo secrets** (`GENESIS_APP_ID`, `GENESIS_APP_PRIVATE_KEY`). Per-repo storage rather than org-level because dev repos may span multiple orgs (including the adopter's personal account), and org-level secrets don't propagate across orgs.
 
 **Per-project token (narrow — what each project actually gets):**
 ```yaml
@@ -631,19 +631,29 @@ GitHub's `POST /app/installations/{id}/access_tokens` endpoint accepts both `rep
 - GitHub Apps generate short-lived tokens automatically and produce clean audit trails
 - Apps appear as distinct actors in git history and GitHub UI
 
+### Secret seeding
+Each new dev repo needs `GENESIS_APP_ID`, `GENESIS_APP_PRIVATE_KEY`, and `ANTHROPIC_API_KEY` set as repo secrets before its orchestrator workflows can run. The canonical pattern:
+
+- The adopter's local genesis install (`~/.config/genesis/` or equivalent) holds the source-of-truth values for their App and Anthropic key.
+- Their genesis "source" repo (e.g., `<org>/genesis`) holds the same values as repo secrets — enabling cross-repo seeding from inside Actions.
+- A `genesis-seed-secrets.yml` workflow on the source repo, triggered with a `target_repo` input, mints an App token with `permission-secrets: write` scoped to the target repo, then `gh secret set`s the three values onto it. This means `genesis-new` (and equivalents) can call the seeding workflow as the last step of repo creation and the new dev system is immediately operational.
+- Same workflow handles **rotation**: regenerate the App's private key once in GitHub, update the source repo's secret, re-run the seeding workflow across all managed dev repos.
+
 ### Risk: private key leak
-If the genesis App's private key leaks, an attacker could mint a max-permission token across all installed repos. Mitigations:
-- Store private key as **org-level encrypted secret** (not copied per-repo)
-- Rotate the key periodically (GitHub UI: generate new key, revoke old)
-- App installation acts as a second gate — must be installed on target repo/org
-- Same trust model used by all major GitHub Actions (e.g., `actions/create-github-app-token`)
+If the App's private key leaks, an attacker could mint a max-permission token across all installed repos. Mitigations:
+- Private key is held in the adopter's local secret store and replicated to dev repos as encrypted GitHub secrets — never stored in plaintext, never committed.
+- Rotate the key periodically (GitHub UI: generate new key, revoke old; then re-run the seeding workflow to propagate).
+- App installation acts as a second gate — must be installed on target repo/org.
+- The rotation cost is real: an N-repo blast radius rather than a single org-level secret. The seeding workflow makes this a one-command batch update rather than per-repo manual work.
+- Same trust model used by all major GitHub Actions (e.g., `actions/create-github-app-token`).
 
 ### Setup flow
-1. Human creates the genesis GitHub App with broad permissions (once, manual)
-2. Human installs it on all target orgs (once per org, manual)
-3. Genesis bootstrapping generates workflows with scoped `permission-*` inputs per project
-4. Each project declares its required permissions in `.genesis/config.toml`
-5. No per-project setup needed — just deploy and go
+1. Adopter creates **their own** genesis GitHub App with the broad permission set (once, manual via App-manifest flow ideally). Generates a private key and notes the App ID.
+2. Adopter installs the App on the orgs/accounts they want genesis to manage (once per org, manual).
+3. Adopter stores `GENESIS_APP_ID`, `GENESIS_APP_PRIVATE_KEY`, and `ANTHROPIC_API_KEY` locally and on their genesis source repo.
+4. Adopter runs `genesis-new` / equivalent. Genesis scaffolds the dev repo and triggers the seeding workflow on the source repo, which propagates the three secrets onto the new dev repo.
+5. Generated workflows use `actions/create-github-app-token` with scoped `permission-*` inputs per workflow (least-privilege at use-time).
+6. No per-project App setup — just per-project secret seeding, automated by the seeding workflow.
 
 ### Migration path (existing projects using PATs)
 1. Ensure genesis App has all needed permissions registered
