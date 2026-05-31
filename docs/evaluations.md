@@ -312,3 +312,16 @@ Genesis's orchestrator agent collapses 3, 4, 5, and 6 into a single Claude sessi
 **For the evolver.** When a dev system hits scale problems (concurrent issues, lost workspace state, retry storms, reconciliation bugs), the evolver should reach for Symphony's spec rather than reinventing — lift the relevant component (Workspace Manager, retry queue, reconciliation loop) and adapt it to the dev system's runtime.
 
 **Validates "harness engineering as prerequisite."** Symphony's own caveat ("works best in codebases that have adopted harness engineering") reinforces the discipline section above: orchestration is the cap on the harness pyramid, not a substitute for it. Onboarding should resist the temptation to seed Symphony-style orchestration into projects that don't yet have a working harness — it'll just orchestrate broken work faster.
+
+
+
+# TODO
+
+Eval these. Are they useful as tools for Genesis?
+
+
+https://github.com/colbymchenry/codegraph
+
+https://github.com/Light-Heart-Labs/DreamServer
+
+https://github.com/MinishLab/semble?utm_source=tldrdevops
