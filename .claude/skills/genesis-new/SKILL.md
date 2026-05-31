@@ -118,6 +118,5 @@ Tell the user what was created:
 - What happens next: the orchestrator workflows will trigger, the onboarding agent will start refining the goal
 
 Remind them:
-- Set `ANTHROPIC_API_KEY` as a GitHub Actions secret for the orchestrator to work
-- Configure `.genesis/config.toml` with Loki credentials for observability
-- The dev system will communicate via A2H — configure the gateway if they want Slack/email notifications
+- **The repo and issue #1 are created, but the autonomous loop is inert until secrets are set.** Read the **Setup** section in the new repo's `README.md` and follow it — it lists the three required GitHub Actions secrets (`ANTHROPIC_API_KEY`, `GENESIS_APP_ID`, `GENESIS_APP_PRIVATE_KEY`) and the Genesis GitHub App install step.
+- Optional: configure `.genesis/config.toml` with Loki credentials for observability, and the A2H gateway if they want Slack/email notifications.

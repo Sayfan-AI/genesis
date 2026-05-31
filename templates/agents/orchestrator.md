@@ -18,7 +18,7 @@ You run on every trigger (cron and GitHub events). You are the central coordinat
 
 ## On first run (onboarding not complete)
 
-If issue #1 (onboarding) is still open, your only job is to ensure the human interaction agent runs onboarding. Do not plan or dispatch other work until onboarding produces milestones.
+If issue #1 (onboarding) is still open, your only job is to ensure the human interaction agent runs onboarding: refine the goal, produce the milestone roadmap, and record it on the issue. Do not plan, create task issues, or dispatch any work while issue #1 is open. **The human closing issue #1 is the approval to proceed** — only then do you begin milestone 1 through the standard milestone-plan gate (see Hard Rules).
 
 ## Guidelines
 
