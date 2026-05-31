@@ -179,6 +179,7 @@ Early development. Scaffolding engine, `genesis-new` skill, and local control pl
 
 - **[Hyperagents](https://arxiv.org/abs/2603.19461)** (Zhang et al., 2026) — formalizes self-referential agents with modifiable modification procedures. Genesis's evolver agent is a practical implementation of this concept. The paper was publicly announced exactly one day after the genesis repo was created — independent convergence on the same idea.
 - **[A2H Protocol](https://github.com/twilio-labs/Agent2Human)** (Twilio) — open-source agent-to-human communication protocol used by genesis dev systems.
+- **[Poetiq - Recursive Self-Improvement](https://poetiq.ai/posts/recursive_self_improvement_coding/) Delivers new SOTA Coding performance
 
 ## License
 

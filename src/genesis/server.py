@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from genesis.workflows import disable_workflows, enable_workflows
+from genesis.workflows import DISABLED_LIST_PATH, disable_workflows, enable_workflows
 
 LOCK_PATH = Path(".genesis/.orchestrator.lock")
 ETAG_PATH = Path(".genesis/.poll-etag")
@@ -342,6 +342,26 @@ class LocalControlPlane:
             log("Error: 'claude' command not found. Install Claude Code and ensure it's on PATH.")
             self.release_lock()
             return 127
+
+        # Self-heal: if a prior serve session exited non-gracefully (SIGKILL,
+        # crash, supervisor restart), `.disabled-by-genesis` is on disk and
+        # workflows are still disabled. Re-enable them first so this session
+        # starts from a known clean state; the subsequent disable_workflows
+        # below will disable them again under fresh tracking.
+        if DISABLED_LIST_PATH.exists():
+            log(
+                f"Found stale {DISABLED_LIST_PATH} from a prior session — "
+                "re-enabling workflows before disabling them again"
+            )
+            try:
+                enable_workflows(repo=self.repo)
+            except subprocess.CalledProcessError as e:
+                log(
+                    f"Self-heal failed ({e}). Run `genesis workflows enable` "
+                    "manually, then re-run `genesis serve`."
+                )
+                self.release_lock()
+                return 1
 
         try:
             disable_workflows(repo=self.repo)

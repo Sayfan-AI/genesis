@@ -308,3 +308,53 @@ def test_poll_once_no_warning_when_high_water_on_page(plane, capsys) -> None:
     with patch.object(server, "fetch_events", return_value=poll):
         plane.poll_once("token")
     assert "not found on returned page" not in capsys.readouterr().out
+
+
+# ---------- self-heal on startup ----------
+
+
+def test_serve_self_heals_stale_disabled_list(plane, monkeypatch, capsys) -> None:
+    """If `.disabled-by-genesis` exists at startup, serve re-enables workflows
+    before proceeding so the new session starts from a known clean state."""
+    # Simulate a prior session that exited non-gracefully.
+    server.DISABLED_LIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    server.DISABLED_LIST_PATH.write_text('[{"id": 42, "name": "Foo"}]')
+
+    enable_called = MagicMock()
+    disable_called = MagicMock()
+    monkeypatch.setattr(server, "enable_workflows", enable_called)
+    monkeypatch.setattr(server, "disable_workflows", disable_called)
+    monkeypatch.setattr(server.shutil, "which", lambda _: "/usr/local/bin/claude")
+    # Make the test exit early after self-heal + disable by failing _gh_token.
+    monkeypatch.setattr(server, "_gh_token", MagicMock(side_effect=subprocess.CalledProcessError(1, "gh")))
+
+    rc = plane.serve()
+
+    # Self-heal ran (enable) BEFORE disable.
+    assert enable_called.called, "expected enable_workflows to be called for self-heal"
+    assert disable_called.called, "expected disable_workflows to be called after self-heal"
+    # And the user got a clear message about it.
+    assert "stale" in capsys.readouterr().out.lower()
+    # Exits non-zero because the simulated _gh_token failure aborts the rest.
+    assert rc == 1
+
+
+def test_serve_skips_self_heal_when_no_stale_file(plane, monkeypatch) -> None:
+    """No `.disabled-by-genesis` file → no preemptive enable call."""
+    assert not server.DISABLED_LIST_PATH.exists()
+
+    enable_called = MagicMock()
+    disable_called = MagicMock()
+    monkeypatch.setattr(server, "enable_workflows", enable_called)
+    monkeypatch.setattr(server, "disable_workflows", disable_called)
+    monkeypatch.setattr(server.shutil, "which", lambda _: "/usr/local/bin/claude")
+    monkeypatch.setattr(server, "_gh_token", MagicMock(side_effect=subprocess.CalledProcessError(1, "gh")))
+
+    plane.serve()
+
+    # enable_workflows is still called once (by the _reenable_workflows_safe
+    # cleanup after the _gh_token failure), but NOT for self-heal at startup.
+    # We assert disable was called and that the call order has disable first.
+    assert disable_called.called
+    # If self-heal had run, enable would be called >= 2 times (heal + cleanup).
+    assert enable_called.call_count == 1
