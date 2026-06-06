@@ -26,6 +26,7 @@ SEED_WORKFLOWS = [
 SEED_SCRIPTS = [
     "log.sh",
     "issues.sh",
+    "activate.sh",
 ]
 
 

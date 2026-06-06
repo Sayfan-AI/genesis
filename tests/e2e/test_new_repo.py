@@ -116,10 +116,12 @@ def test_new_repo_has_scripts(tmp_dir: Path) -> None:
     scripts_dir = repo / ".genesis" / "scripts"
     assert (scripts_dir / "log.sh").exists()
     assert (scripts_dir / "issues.sh").exists()
+    assert (scripts_dir / "activate.sh").exists()
     # Scripts should be executable
     import os
     assert os.access(scripts_dir / "log.sh", os.X_OK)
     assert os.access(scripts_dir / "issues.sh", os.X_OK)
+    assert os.access(scripts_dir / "activate.sh", os.X_OK)
 
 
 def test_new_repo_has_onboarding_issue(tmp_dir: Path) -> None:

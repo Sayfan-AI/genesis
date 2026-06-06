@@ -8,13 +8,17 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+import json
+
 from genesis.github import (
     GitHubError,
     create_github_repo,
+    disable_seed_workflows,
     open_onboarding_issue,
     publish_to_github,
     push_to_github,
 )
+from genesis.scaffold import SEED_WORKFLOWS
 
 
 @patch("genesis.github.subprocess.run")
@@ -151,6 +155,16 @@ def test_publish_to_github_full_flow(mock_run: MagicMock, tmp_path: Path) -> Non
             result.stdout = ""
         elif "label" in args_list and "create" in args_list:
             result.stdout = ""
+        elif "workflow" in args_list and "list" in args_list:
+            # All seed workflows registered and active right after push.
+            result.stdout = json.dumps(
+                [
+                    {"id": i, "name": wf, "state": "active"}
+                    for i, wf in enumerate(SEED_WORKFLOWS)
+                ]
+            )
+        elif "workflow" in args_list and "disable" in args_list:
+            result.stdout = ""
         elif "issue" in args_list and "create" in args_list:
             result.stdout = "https://github.com/testuser/test/issues/1"
         else:
@@ -162,3 +176,48 @@ def test_publish_to_github_full_flow(mock_run: MagicMock, tmp_path: Path) -> Non
 
     url = publish_to_github(tmp_path, "test", "Build something", private=True)
     assert url == "https://github.com/testuser/test"
+
+    # Every seed workflow should have been disabled during publish.
+    disable_calls = [
+        c for c in mock_run.call_args_list
+        if "workflow" in c[0][0] and "disable" in c[0][0]
+    ]
+    assert len(disable_calls) == len(SEED_WORKFLOWS)
+
+
+@patch("genesis.github.time.sleep")
+@patch("genesis.github.subprocess.run")
+def test_disable_seed_workflows_disables_only_active(
+    mock_run: MagicMock, mock_sleep: MagicMock, tmp_path: Path
+) -> None:
+    listing = json.dumps(
+        [
+            {"id": 10, "name": "orchestrator", "state": "active"},
+            {"id": 11, "name": "events", "state": "active"},
+            {"id": 12, "name": "evolver", "state": "active"},
+            {"id": 13, "name": "push", "state": "disabled_manually"},
+        ]
+    )
+
+    def side_effect(args: list[str], **kwargs: object) -> MagicMock:
+        result = MagicMock(returncode=0, stderr="")
+        args_list = list(args)
+        if "workflow" in args_list and "list" in args_list:
+            result.stdout = listing
+        else:
+            result.stdout = ""
+        return result
+
+    mock_run.side_effect = side_effect
+
+    disabled = disable_seed_workflows(tmp_path)
+
+    # The already-disabled one is left alone; the three active ones get disabled.
+    assert disabled == ["orchestrator", "events", "evolver"]
+    disable_ids = [
+        c[0][0][c[0][0].index("disable") + 1]
+        for c in mock_run.call_args_list
+        if "workflow" in c[0][0] and "disable" in c[0][0]
+    ]
+    assert disable_ids == ["10", "11", "12"]
+    mock_sleep.assert_not_called()  # listing was complete on first poll
