@@ -5,7 +5,10 @@ Handles repo creation, pushing, and issue management via the gh CLI.
 
 import json
 import subprocess
+import time
 from pathlib import Path
+
+from genesis.scaffold import SEED_WORKFLOWS
 
 
 class GitHubError(Exception):
@@ -96,6 +99,43 @@ def open_onboarding_issue(repo_path: Path) -> str:
     return result  # gh issue create prints the issue URL
 
 
+def disable_seed_workflows(repo_path: Path, timeout: float = 30.0) -> list[str]:
+    """Disable the freshly-seeded workflows so they don't run before secrets exist.
+
+    A dev system's workflows authenticate as the Genesis App and call the Anthropic
+    API. Until the human installs the App and sets the secrets, every trigger would
+    just fail. So genesis disables them at publish time; the human re-enables them
+    with `.genesis/scripts/activate.sh` once the credentials are in place.
+
+    Right after the first push GitHub needs a moment to register the workflow files,
+    so we poll (inferring the repo from the clone's origin remote via ``cwd``) until
+    all seed workflows are visible or ``timeout`` elapses, then disable each active
+    one by ID. Returns the names of the workflows that were disabled.
+    """
+    deadline = time.monotonic() + timeout
+    workflows = _list_workflows(repo_path)
+    while len(workflows) < len(SEED_WORKFLOWS) and time.monotonic() < deadline:
+        time.sleep(2)
+        workflows = _list_workflows(repo_path)
+
+    disabled: list[str] = []
+    for wf in workflows:
+        if wf.get("state") != "active":
+            continue
+        _run_gh(["workflow", "disable", str(wf["id"])], cwd=repo_path)
+        disabled.append(wf["name"])
+    return disabled
+
+
+def _list_workflows(repo_path: Path) -> list[dict]:
+    """List all workflows in the repo backing ``repo_path`` (via its origin remote)."""
+    out = _run_gh(
+        ["workflow", "list", "--all", "--json", "id,name,state"],
+        cwd=repo_path,
+    )
+    return json.loads(out) if out else []
+
+
 def publish_to_github(
     path: Path,
     project_name: str,
@@ -103,7 +143,10 @@ def publish_to_github(
     org: str | None = None,
     private: bool = True,
 ) -> str:
-    """Full publish flow: create repo, push, open issue #1. Returns repo URL."""
+    """Full publish flow: create repo, push, disable workflows, open issue #1.
+
+    Returns the repo URL.
+    """
     # Ensure the branch is named main
     try:
         _run_git(path, "branch", "-M", "main")
@@ -112,6 +155,9 @@ def publish_to_github(
 
     repo_url = create_github_repo(project_name, org=org, private=private)
     push_to_github(path, repo_url)
+
+    # Disable the seed workflows until the human supplies credentials (see above).
+    disable_seed_workflows(path)
 
     # Create the onboarding label first (ignore if it already exists)
     try:
