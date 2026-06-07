@@ -210,3 +210,5 @@ __marimo__/
 
 # manual e2e test runtime state
 scripts/.manual_e2e_state.json
+
+genesis-dev-bot.private-key.pem
