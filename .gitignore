@@ -211,4 +211,7 @@ __marimo__/
 # manual e2e test runtime state
 scripts/.manual_e2e_state.json
 
+# Defensive: never commit an App private key if one ever lands in the repo tree.
+# Canonical location is ~/.config/genesis/ (see scripts/seed-secrets.sh).
 genesis-dev-bot.private-key.pem
+*.pem

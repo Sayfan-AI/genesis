@@ -7,6 +7,12 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolate_genesis_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ensure_local_env() out of the real ~/.config/genesis during tests."""
+    monkeypatch.setenv("GENESIS_CONFIG_DIR", str(tmp_path / "genesis-config"))
+
+
 @pytest.fixture
 def tmp_dir(tmp_path: Path) -> Path:
     """Provide a temporary directory for test repos."""
