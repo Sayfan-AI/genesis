@@ -3,12 +3,60 @@
 Creates and augments repositories with autonomous dev system scaffolding.
 """
 
+import os
 import subprocess
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
 TEMPLATES_DIR = Path(__file__).parent.parent.parent / "templates"
+
+# Placeholder for the adopter-local secrets file. Written once to
+# ~/.config/genesis/.env (never into a dev repo) and shared across every
+# project the adopter bootstraps. A dev repo's activate.sh sources it.
+LOCAL_ENV_TEMPLATE = """\
+# Genesis adopter-local secrets — ONE set, SHARED across ALL your genesis projects.
+# A single GitHub App backs every project you bootstrap, so you fill these in once,
+# here. A dev repo's `.genesis/scripts/activate.sh` then copies them into that
+# repo's GitHub Actions secrets
+# (ANTHROPIC_API_KEY / GENESIS_APP_ID / GENESIS_APP_PRIVATE_KEY) and enables it.
+#
+#   ANTHROPIC_API_KEY          your Anthropic API key (console.anthropic.com)
+#   GENESIS_GITHUB_APP_ID      the numeric App ID of your genesis GitHub App
+#   GENESIS_GITHUB_APP_SECRET  the App's private key — paste the FULL PEM,
+#                              including the BEGIN/END lines, between the quotes.
+
+ANTHROPIC_API_KEY=
+GENESIS_GITHUB_APP_ID=
+GENESIS_GITHUB_APP_SECRET="-----BEGIN RSA PRIVATE KEY-----
+...paste the full PEM here, keeping the BEGIN/END lines...
+-----END RSA PRIVATE KEY-----"
+"""
+
+
+def _genesis_config_dir() -> Path:
+    """Adopter-local config dir (override with GENESIS_CONFIG_DIR; mainly for tests)."""
+    override = os.environ.get("GENESIS_CONFIG_DIR")
+    return Path(override) if override else Path.home() / ".config" / "genesis"
+
+
+def ensure_local_env() -> Path:
+    """Create the adopter-local `.env` with placeholders if it doesn't exist yet.
+
+    The three secrets are identical for every project an adopter bootstraps, so
+    this lives once in `~/.config/genesis/.env` - never inside a dev repo. If the
+    file is already there (e.g. from a previous genesis project), it's left
+    untouched so the human only populates it once. Returns the env file path.
+    """
+    config_dir = _genesis_config_dir()
+    env_path = config_dir / ".env"
+    if env_path.exists():
+        return env_path
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.chmod(0o700)
+    env_path.write_text(LOCAL_ENV_TEMPLATE)
+    env_path.chmod(0o600)
+    return env_path
 
 SEED_AGENTS = [
     "orchestrator",
@@ -123,6 +171,7 @@ def scaffold_new_repo(
     project_name: str,
 ) -> None:
     """Create a new repo with full dev system scaffolding (embedded)."""
+    ensure_local_env()
     path.mkdir(parents=True, exist_ok=True)
 
     subprocess.run(
@@ -172,6 +221,8 @@ def scaffold_existing_repo(
     if not (path / ".git").is_dir():
         raise ValueError(f"{path} is not a git repository")
 
+    ensure_local_env()
+
     # Check for existing CLAUDE.md
     claude_md_path = path / "CLAUDE.md"
     claude_md_content = _render_template(
@@ -211,6 +262,7 @@ def scaffold_external_dev_repo(
     project_name: str,
 ) -> None:
     """Create a separate dev repo that manages work across target repos."""
+    ensure_local_env()
     dev_path.mkdir(parents=True, exist_ok=True)
 
     subprocess.run(

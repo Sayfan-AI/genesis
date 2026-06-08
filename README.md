@@ -34,6 +34,36 @@ Dev System (takes over from here):
 | Implement the AI-6 roadmap | Embedded in target repo |
 | Build a CLI that converts markdown to PDF | New repo with embedded dev system |
 
+## Getting Started
+
+### One-time setup (per adopter)
+
+Genesis uses **one GitHub App per user/org, shared by every project you bootstrap** - so this happens once, not per project, and your credentials live in a single central place.
+
+1. **Create your genesis GitHub App** (once). Permissions: Contents R/W, Issues R/W, Pull requests R/W, Workflows R/W, Metadata R; webhook disabled. Install it on the orgs/accounts you want genesis to manage, and generate a private key (downloads a `.pem`). Full walkthrough: [docs/bootstrapping-sessions/001-repo-guardian.md](docs/bootstrapping-sessions/001-repo-guardian.md).
+
+2. **Populate `~/.config/genesis/.env`.** Genesis writes this file with placeholders the first time you bootstrap a project (and never overwrites an existing one). Fill in the three values - they're shared across all your projects:
+
+   ```bash
+   ANTHROPIC_API_KEY=          # your Anthropic API key
+   GENESIS_GITHUB_APP_ID=      # your App's numeric ID
+   GENESIS_GITHUB_APP_SECRET=  # the App's private key (full PEM, BEGIN/END lines included)
+   ```
+
+### Bootstrap a project
+
+1. **Scaffold + publish.** In a Claude Code session in this repo, run the `genesis-new` skill with your goal. Genesis picks a topology, scaffolds the dev system, creates the GitHub repo, opens issue #1, and **publishes the workflows disabled** so they don't fail before credentials exist.
+
+2. **Activate.** From a clone of the new dev repo, run one command:
+
+   ```bash
+   .genesis/scripts/activate.sh
+   ```
+
+   It reads the three values from `~/.config/genesis/.env`, verifies the App is installed on the repo, sets them as the repo's Actions secrets, and enables the workflows. It refuses to run if any value is missing/placeholder or the App isn't installed.
+
+The next trigger (an issue/PR/comment event, a push, or the cron) wakes the orchestrator, and onboarding begins on issue #1. Every dev repo ships this same `activate.sh` and a **Setup** section in its own README for whoever operates it.
+
 ## What Genesis Seeds
 
 Every dev system gets a scaffold that it can evolve:
@@ -160,7 +190,7 @@ genesis/
 │   └── github.py         # GitHub integration (repo creation, issue #1)
 ├── templates/            # Templates for scaffolded dev systems
 │   ├── agents/           # Seed agent definitions
-│   ├── scripts/          # log.sh, issues.sh
+│   ├── scripts/          # log.sh, issues.sh, activate.sh
 │   ├── workflows/        # GitHub Actions orchestrator workflows
 │   ├── claude_md.md.j2   # CLAUDE.md template
 │   └── settings.json     # CC hooks configuration
