@@ -215,3 +215,5 @@ scripts/.manual_e2e_state.json
 # Canonical location is ~/.config/genesis/ (see scripts/seed-secrets.sh).
 genesis-dev-bot.private-key.pem
 *.pem
+
+.playwright-mcp/
