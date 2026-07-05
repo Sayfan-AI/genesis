@@ -5,10 +5,13 @@
   (no delete-scoped secret stored anywhere). Deletes only the hardcoded
   REAP_ALLOWLIST repos once they are older than the TTL (default 48h).
 
-  Install (adjust the repo path below if genesis lives elsewhere):
-    cp scripts/genesis-reap.plist ~/Library/LaunchAgents/ai.sayfan.genesis-reap.plist
-    launchctl unload ~/Library/LaunchAgents/ai.sayfan.genesis-reap.plist 2>/dev/null
-    launchctl load  -w ~/Library/LaunchAgents/ai.sayfan.genesis-reap.plist
+  This is a TEMPLATE: __GENESIS_DIR__ is substituted with the absolute path of
+  your genesis clone at install time. Do not run this file directly.
+
+  Install (macOS): from the genesis repo root, run
+    uv run python scripts/manual_e2e.py install-reaper
+  which renders this template with your repo path, writes it to
+  ~/Library/LaunchAgents/ai.sayfan.genesis-reap.plist, and loads it.
   Remove:
     launchctl unload ~/Library/LaunchAgents/ai.sayfan.genesis-reap.plist
     rm ~/Library/LaunchAgents/ai.sayfan.genesis-reap.plist
@@ -23,7 +26,7 @@
     <array>
         <string>/bin/zsh</string>
         <string>-lc</string>
-        <string>cd /Users/gigi/git/genesis &amp;&amp; direnv exec . uv run python scripts/manual_e2e.py reap</string>
+        <string>cd __GENESIS_DIR__ &amp;&amp; direnv exec . uv run python scripts/manual_e2e.py reap</string>
     </array>
     <key>StartInterval</key>
     <integer>3600</integer>
