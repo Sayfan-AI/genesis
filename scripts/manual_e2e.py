@@ -311,6 +311,40 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+PLIST_LABEL = "ai.sayfan.genesis-reap"
+
+
+def cmd_install_reaper(args: argparse.Namespace) -> int:
+    """Render the launchd template with this clone's path and load it (macOS).
+
+    Portable: the plist ships as a template with `__GENESIS_DIR__`, which we
+    substitute with this repo's absolute path so a fresh clone installs cleanly.
+    """
+    template_path = REPO_ROOT / "scripts" / "genesis-reap.plist"
+    if sys.platform != "darwin":
+        print(
+            "install-reaper targets macOS launchd. On Linux, run the reaper hourly via cron\n"
+            f"or a systemd timer instead:  cd {REPO_ROOT} && uv run python scripts/manual_e2e.py reap",
+            file=sys.stderr,
+        )
+        return 2
+
+    rendered = template_path.read_text().replace("__GENESIS_DIR__", str(REPO_ROOT))
+    dest = Path.home() / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(rendered)
+    print(f"Wrote {dest}")
+
+    subprocess.run(["launchctl", "unload", str(dest)], capture_output=True)
+    result = subprocess.run(["launchctl", "load", "-w", str(dest)])
+    if result.returncode != 0:
+        print("launchctl load failed.", file=sys.stderr)
+        return result.returncode
+    print(f"Loaded {PLIST_LABEL}: runs `reap` hourly. Logs: /tmp/genesis-reap.log")
+    print(f"Remove with: launchctl unload {dest} && rm {dest}")
+    return 0
+
+
 def cmd_reap(args: argparse.Namespace) -> int:
     """Delete leftover e2e/local-mode scratch repos older than the TTL.
 
@@ -499,6 +533,12 @@ def main(argv: list[str] | None = None) -> int:
     p_reap.add_argument("--ttl-hours", type=int, default=48, help="Delete allowlisted repos older than this many hours (default: 48).")
     p_reap.add_argument("--dry-run", action="store_true", help="Print what would be deleted without deleting.")
     p_reap.set_defaults(func=cmd_reap)
+
+    p_install = sub.add_parser(
+        "install-reaper",
+        help="Install the launchd agent that runs `reap` hourly (macOS).",
+    )
+    p_install.set_defaults(func=cmd_install_reaper)
 
     p_show = sub.add_parser("show", help="Print the saved state.")
     p_show.set_defaults(func=cmd_show)
