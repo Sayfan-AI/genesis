@@ -1,7 +1,7 @@
 ---
 name: genesis-e2e
 description: Run the manual end-to-end test for genesis — bootstrap a tic-tac-toe dev repo, wait for the dev system to ship, drive the deployed page with Playwright, then tear the repo down. Use when the user wants to validate the full genesis loop on real GitHub.
-argument-hint: [bootstrap | verify | cleanup | full]
+argument-hint: [bootstrap | verify | cleanup | reap | full]
 ---
 
 # Genesis: Manual End-to-End Test
@@ -19,6 +19,7 @@ The driver is `scripts/manual_e2e.py` at the genesis repo root. State persists i
 - `verify` — wait for the Pages deployment and drive Playwright
 - `enhance` — file a follow-up issue asking the dev system to add a human-vs-computer mode. Useful after a passing `verify` if you want to keep iterating on the same repo (skip `cleanup`).
 - `cleanup` — delete the GitHub repo
+- `reap` — delete any leftover scratch repos in the hardcoded `REAP_ALLOWLIST` that are older than `--ttl-hours` (default 48). This is the backstop for when `cleanup` isn't run: a launchd agent (`scripts/genesis-reap.plist`, installed to `~/Library/LaunchAgents/`) runs it hourly using your own `gh` creds, so scratch repos never leak but you still get an observation window. Supports `--dry-run`. It can only ever touch the two allowlisted names, never a real repo.
 - `full` — run bootstrap → verify → cleanup in sequence (long-running; the `verify` wait may need raising). GHA mode only; skips `enhance` and `serve`.
 
 ## Two modes — pick one after `bootstrap`

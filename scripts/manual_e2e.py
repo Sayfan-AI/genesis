@@ -23,6 +23,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -35,6 +36,15 @@ STATE_PATH = Path(__file__).parent / ".manual_e2e_state.json"
 DEFAULT_OWNER = "Sayfan-AI"
 REPO_NAME = "genesis-e2e-tictactoe"
 WORKDIR = Path("/tmp/genesis-manual-e2e")
+
+# Exact repos the reaper is allowed to delete. This is an allowlist on purpose,
+# NOT a topic/label lookup: the only way a repo gets reaped is by being named
+# here, so nothing can opt itself into deletion by carrying some tag. Any repo
+# not in this tuple is untouchable no matter how old or how it's labeled.
+REAP_ALLOWLIST = (
+    "Sayfan-AI/genesis-local-mode-test",
+    "Sayfan-AI/genesis-e2e-tictactoe-local",
+)
 
 GOAL = """\
 Build a two-player tic-tac-toe web app deployed to GitHub Pages.
@@ -102,6 +112,18 @@ def repo_exists(repo: str) -> bool:
         capture_output=True, text=True,
     )
     return result.returncode == 0
+
+
+def repo_created_at(repo: str) -> datetime | None:
+    """Return the repo's creation time (UTC), or None if it doesn't exist."""
+    result = subprocess.run(
+        ["gh", "repo", "view", repo, "--json", "createdAt"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    created = json.loads(result.stdout)["createdAt"]  # e.g. "2026-05-11T05:22:47Z"
+    return datetime.fromisoformat(created.replace("Z", "+00:00"))
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
@@ -289,6 +311,43 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reap(args: argparse.Namespace) -> int:
+    """Delete leftover e2e/local-mode scratch repos older than the TTL.
+
+    The delay is the TTL: a fresh test repo survives the observation window,
+    then the next reaper run past its expiry deletes it. Only ever considers
+    REAP_ALLOWLIST, so it can't touch a real repo even by mistake.
+    """
+    ttl = timedelta(hours=args.ttl_hours)
+    now = datetime.now(timezone.utc)
+    deleted = 0
+    for repo in REAP_ALLOWLIST:
+        created = repo_created_at(repo)
+        if created is None:
+            print(f"skip  {repo}: not present")
+            continue
+        age = now - created
+        age_str = f"{age.days}d{age.seconds // 3600}h"
+        if age < ttl:
+            print(f"keep  {repo}: age {age_str} < TTL {args.ttl_hours}h")
+            continue
+        if args.dry_run:
+            print(f"[dry-run] would delete {repo}: age {age_str} >= TTL {args.ttl_hours}h")
+            continue
+        print(f"delete {repo}: age {age_str} >= TTL {args.ttl_hours}h ...")
+        result = subprocess.run(["gh", "repo", "delete", repo, "--yes"])
+        if result.returncode != 0:
+            print(
+                f"gh repo delete {repo} failed. The token likely lacks 'delete_repo' scope.\n"
+                "Run: gh auth refresh -h github.com -u the-gigi -s delete_repo",
+                file=sys.stderr,
+            )
+            return result.returncode
+        deleted += 1
+    print(f"reap done: {deleted} deleted.")
+    return 0
+
+
 ENHANCE_TITLE = "Add a human-vs-computer mode"
 ENHANCE_BODY = """\
 ## Goal
@@ -432,6 +491,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Run `genesis serve` from the local scaffold (local control plane mode). Blocks.",
     )
     p_serve.set_defaults(func=cmd_serve)
+
+    p_reap = sub.add_parser(
+        "reap",
+        help="Delete leftover scratch repos (hardcoded allowlist) older than the TTL.",
+    )
+    p_reap.add_argument("--ttl-hours", type=int, default=48, help="Delete allowlisted repos older than this many hours (default: 48).")
+    p_reap.add_argument("--dry-run", action="store_true", help="Print what would be deleted without deleting.")
+    p_reap.set_defaults(func=cmd_reap)
 
     p_show = sub.add_parser("show", help="Print the saved state.")
     p_show.set_defaults(func=cmd_show)
