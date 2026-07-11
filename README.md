@@ -68,7 +68,7 @@ The next trigger (an issue/PR/comment event, a push, or the cron) wakes the orch
 
 Every dev system gets a scaffold that it can evolve:
 
-- **Seed agents** — onboarding, project manager, human interaction, evolver, health
+- **Seed agents** — three to start: orchestrator, human interaction, and evolver. The orchestrator also plays project manager, onboarder, and health-checker until the system earns the evidence to split those into their own agents.
 - **Orchestrator workflows** — GitHub Actions (cron + event-triggered) launching Claude Agent SDK sessions
 - **Observability** — Claude Code hooks that automatically log all agent activity to Grafana Loki
 - **Scripts** — shell scripts for issue management and structured logging (zero binary distribution overhead)
@@ -118,13 +118,12 @@ The evolver agent can rewrite its own definition. The modification procedure its
 │       │                                             │
 │       ▼                                             │
 │  Claude Agent SDK Orchestrator                      │
+│    (also plays PM · onboarder · health-checker)     │
 │       │                                             │
-│       ├──> Onboarding Agent (goal → milestones)     │
-│       ├──> Project Manager (roadmap, tasks)         │
 │       ├──> Human Interaction (A2H protocol)         │
-│       ├──> Evolver (evolve the system)               │
-│       ├──> Health (stuck detection, quality)        │
-│       └──> Worker Agents (designed by the system)   │
+│       ├──> Evolver (evolves the whole system)       │
+│       └──> Worker agents & specialists —            │
+│            grown from evidence, not seeded          │
 │                                                     │
 │  CC Hooks ──scripts──> Grafana Loki (observability)  │
 └─────────────────────────────────────────────────────┘
