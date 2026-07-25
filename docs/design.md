@@ -339,15 +339,19 @@ Each hook is `type: "command"` — calls `.genesis/scripts/log.sh` which reads t
 
 ### Loki labels and fields
 
-**Labels:** `project`, `agent_type`, `session_id`, `hook_event`
+**Labels (deliberately low-cardinality):** `project`, `hook_event`, `service_name`
 
-**Structured fields:**
-- Tool name, inputs, outputs
-- Trigger (cron, issue event, PR event, spawned by another agent)
-- GitHub/Linear issue being worked on
-- Sub-agents spawned
-- Files modified / PRs created / issues opened
-- Errors and failure reasons
+Labels are an index in Loki: every distinct combination is a separate stream. `session_id` must **not** be a label - it would mint a new stream per agent session forever, which is the classic cardinality blow-up. `agent_type` is left out for the same reason, since it is only meaningful in combination with a session.
+
+**Line fields (logfmt):** `ts`, `level`, `hook`, `project`, `session`, `tool`, `agent`
+
+The line is logfmt, so `| logfmt` promotes all of it to filterable fields at query time - `{project="X"} | logfmt | tool="Bash"` gets the filtering without the index cost. `level` is `error` for `*-failure` hooks and `info` otherwise, which is what Grafana's level detection reads.
+
+Not yet captured (each needs a hook payload field the logger doesn't read yet): tool inputs/outputs, run trigger, the issue being worked, sub-agents spawned, files modified, PRs opened. Adding them means richer lines, and the payload is built with `json.dumps` specifically so a tool input containing quotes or newlines can't corrupt it.
+
+### Timestamps
+
+Entries use `time.time_ns()`. This is load-bearing, not a detail: Loki silently drops an entry whose `(timestamp, line)` already exists in that stream, so a second-resolution stamp makes two same-second `Bash` calls byte-identical and the second one vanishes - acknowledged with HTTP 204. Measured on a real Grafana Cloud stack: 6 identical pushes, 1 line stored. `date +%s%N` is not portable (BSD `date` on macOS has no `%N`), which is why the timestamp comes from the same python3 call that parses the hook JSON. Guarded by `tests/unit/test_log_script.py`.
 
 ### Grafana Cloud Free Tier Limits (reference)
 - Logs: 50 GB/month, 14 days retention
