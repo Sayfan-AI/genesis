@@ -104,9 +104,28 @@ def test_new_repo_has_genesis_config(tmp_dir: Path) -> None:
     config = (repo / ".genesis" / "config.toml").read_text()
     assert PROJECT in config
     assert GOAL in config
-    assert "[loki]" in config
     assert "[issues]" in config
     assert "[a2h]" in config
+    # Loki is env/secrets only — the token is a secret and this file is committed.
+    assert "[loki]" not in config
+
+
+def test_new_repo_workflows_forward_loki_secrets(tmp_dir: Path) -> None:
+    """Every workflow that runs Claude must pass the Loki creds through the
+    action's `settings` env block, or the activity-logging hooks silently
+    degrade to stderr on every Actions run."""
+    repo = tmp_dir / PROJECT
+    scaffold_new_repo(repo, GOAL, PROJECT)
+
+    workflows_dir = repo / ".github" / "workflows"
+    for wf in sorted(workflows_dir.glob("genesis-*.yml")):
+        content = wf.read_text()
+        if "anthropics/claude-code-action" not in content:
+            continue
+        for var in ("GENESIS_LOKI_URL", "GENESIS_LOKI_USER", "GENESIS_LOKI_TOKEN"):
+            assert f'"{var}": "${{{{ secrets.{var} }}}}"' in content, (
+                f"{wf.name} does not forward {var} to the logging hooks"
+            )
 
 
 def test_new_repo_has_scripts(tmp_dir: Path) -> None:
