@@ -310,7 +310,9 @@ All agent activity is logged to **[Grafana Cloud Loki](https://grafana.com/prici
 
 ### Implementation: CC Hooks → Loki
 
-Genesis seeds `.claude/settings.json` with HTTP hooks that POST structured log entries directly to Grafana Cloud Loki. No intermediate scripts, no agent-side logging code.
+Genesis seeds `.claude/settings.json` with `command` hooks that call `.genesis/scripts/log.sh`, which POSTs a structured log entry to Grafana Cloud Loki. No agent-side logging code.
+
+Credentials live in the environment (`GENESIS_LOKI_URL` / `GENESIS_LOKI_USER` / `GENESIS_LOKI_TOKEN`), never in the committed `config.toml`. Two paths get them there: `activate.sh` seeds them as repo secrets from `~/.config/genesis/.env`, and each `genesis-*` workflow forwards those secrets to Claude Code through the action's `settings` env block. That forwarding is load-bearing — a step-level `env:` block is not documented as reaching the CLI, and without it every hook in an Actions run silently degrades to stderr.
 
 **Key hook events used:**
 
@@ -385,7 +387,7 @@ bash .genesis/scripts/issues.sh assign --id 5 --to worker-1
 ### Configuration
 
 Scripts read from `.genesis/config.toml` and environment variables:
-- `GENCTL_LOKI_URL`, `GENCTL_LOKI_USER`, `GENCTL_LOKI_TOKEN` — Loki credentials
+- `GENESIS_LOKI_URL`, `GENESIS_LOKI_USER`, `GENESIS_LOKI_TOKEN` — Loki credentials (env/secrets only, all three or none)
 - `gh` CLI uses standard GitHub auth (GITHUB_TOKEN or `gh auth`)
 
 ### Design Decision: Scripts over genctl CLI
