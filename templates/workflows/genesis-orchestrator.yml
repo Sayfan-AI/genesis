@@ -46,4 +46,7 @@ jobs:
           prompt: |
             Run the orchestrator agent defined in .claude/agents/orchestrator.md.
             This is a scheduled run — assess project state and advance work.
-          claude_args: "--max-turns 20 --allowedTools Read,Write,Edit,Bash,Glob,Grep,Agent"
+          # Orchestrator class — see the turn-budget floor in CLAUDE.md. Open-ended
+          # work, and dispatched subagents spend from this same budget.
+          # Enforced at >= 30 by tests/e2e/test_workflows.py.
+          claude_args: "--max-turns 40 --allowedTools Read,Write,Edit,Bash,Glob,Grep,Agent"

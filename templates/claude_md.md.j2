@@ -41,6 +41,25 @@ GitHub Actions serve as the trigger layer:
 
 Each trigger launches a Claude Agent SDK session as the orchestrator.
 
+### Turn Budgets
+
+Every workflow that invokes Claude must pass an explicit `--max-turns`, sized by
+workflow class. A session that dies at `error_max_turns` is the worst failure
+shape in this system: it produces no progress **and** no diagnosis, and the next
+run starts over from scratch.
+
+- **Orchestrator class** (`genesis-orchestrator`, `genesis-events`,
+  `genesis-evolver`) — open-ended work, and any subagents it dispatches spend from
+  the *same* budget. **Floor: 30 turns.** Seeded at 40.
+- **Narrow class** (`genesis-merge`, and anything else running a fixed procedure)
+  — kept deliberately small. If it needs more turns it is wandering, and failing
+  fast is the signal you want. The fix is a tighter procedure, not a bigger budget.
+
+Enforce this with a test, not a convention — a CI check that fails on any
+Claude-invoking workflow below its class floor, or with no `--max-turns` at all.
+When a run does die at max-turns, raise the budget for that whole *class* and
+record why; don't patch the single workflow and let the next one rediscover it.
+
 ## Tech Stack Preferences
 
 Defaults (override as needed):

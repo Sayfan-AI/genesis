@@ -55,4 +55,10 @@ jobs:
             - After merging, close the corresponding task issue if one exists
             - After all merges are done, trigger the orchestrator so it can assess state and continue work:
               gh workflow run genesis-orchestrator.yml
+          # Narrow class — small ON PURPOSE, do not raise to the orchestrator floor.
+          # This is a fixed procedure (find passing bot PRs, squash-merge, close the
+          # task issue, re-trigger). If it needs more than ~10 turns it is wandering,
+          # and failing fast is the signal we want. Enforced as a ceiling by
+          # tests/e2e/test_workflows.py — the fix for a starved merge run is a
+          # tighter procedure, not a bigger budget.
           claude_args: "--max-turns 10 --allowedTools Bash,Read,Glob,Grep"
