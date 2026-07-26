@@ -77,6 +77,27 @@ SEED_SCRIPTS = [
     "activate.sh",
 ]
 
+# Turn-budget classes for the Claude-invoking workflow templates.
+#
+# "orchestrator" — open-ended work, and dispatched subagents spend from the same
+# budget. These need headroom: a run that dies at `error_max_turns` produces no
+# progress, no diagnosis, and the next run redoes the work from scratch.
+# "narrow" — a fixed procedure. Kept deliberately small so a run that needs more
+# turns fails fast instead of wandering.
+#
+# Every Claude-invoking template must be classified here and must declare an
+# explicit `--max-turns`. Enforced by tests/e2e/test_workflows.py.
+WORKFLOW_TURN_CLASSES = {
+    "genesis-orchestrator.yml": "orchestrator",
+    "genesis-events.yml": "orchestrator",
+    "genesis-evolver.yml": "orchestrator",
+    "genesis-merge.yml": "narrow",
+}
+
+# Minimum turns for an orchestrator-class workflow. Two separate dev-system
+# workflows died at `error_max_turns` at 20 before this floor existed.
+ORCHESTRATOR_TURN_FLOOR = 30
+
 
 def _render_template(name: str, **kwargs: object) -> str:
     env = Environment(

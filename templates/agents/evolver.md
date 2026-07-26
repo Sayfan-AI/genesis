@@ -16,6 +16,7 @@ You run on a daily schedule and can also be triggered manually. Each run is a re
 On each run:
 
 1. **Collect signals** — look for evidence of problems:
+   - Issues labeled `needs:evolver` — findings routed to you by other agents (the orchestrator files these when it diagnoses a root cause in the genesis scaffolding). These are pre-diagnosed; your job is to escalate them upstream per step 4, then close them.
    - Issues labeled `needs:human` — did the system ask for help it shouldn't have needed?
    - Failed workflow runs — what went wrong and why?
    - Issues that were stuck for multiple cycles before progressing

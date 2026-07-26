@@ -63,6 +63,24 @@ The correct hooks format in `.claude/settings.json` requires a `matcher` + `hook
 
 NOT the flat format `{"type": "command", "command": "..."}` — that is invalid and causes Claude Code settings errors. The template at `templates/settings.json` must always use the correct format.
 
+## Workflow Turn Budgets
+
+Every workflow that invokes Claude — genesis's own and every template — must pass an
+explicit `--max-turns`, sized by class. `error_max_turns` is the worst failure shape
+in this system: no progress *and* no diagnosis, and the next run redoes the work.
+
+- **Orchestrator class** — open-ended, and dispatched subagents spend from the same
+  budget. **Floor: 30.** Templates seeded at 40.
+- **Narrow class** (e.g. `genesis-merge.yml`) — fixed procedure, deliberately small
+  so a run that needs more turns fails fast instead of wandering. The fix for a
+  starved narrow run is a tighter procedure, not a bigger budget.
+
+Classes live in `WORKFLOW_TURN_CLASSES` in `src/genesis/scaffold.py`; the floor is
+enforced by `tests/e2e/test_workflows.py`, which also fails if a Claude-invoking
+template is unclassified or declares no `--max-turns` at all. Two separate dev-system
+workflows died at 20 turns three weeks apart before this floor existed — when a run
+dies at max-turns, raise the whole class and record why.
+
 ## Self-Improvement
 
 This project opts in to self-improvement. Update this CLAUDE.md and project workflows as the design evolves. Keep `docs/` as the living design documents.

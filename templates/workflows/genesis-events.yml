@@ -54,4 +54,8 @@ jobs:
             - Event: ${{ github.event_name }} / ${{ github.event.action }}
 
             Assess this event in context of the project state and take appropriate action.
-          claude_args: "--max-turns 10 --allowedTools Read,Write,Edit,Bash,Glob,Grep,Agent"
+          # Orchestrator class — see the turn-budget floor in CLAUDE.md. An event
+          # often arrives carrying more work than a cron tick (assess, read a PR,
+          # review the diff, merge, close), and subagents spend from this same
+          # budget. Enforced at >= 30 by tests/e2e/test_workflows.py.
+          claude_args: "--max-turns 40 --allowedTools Read,Write,Edit,Bash,Glob,Grep,Agent"
