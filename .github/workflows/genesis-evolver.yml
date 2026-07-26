@@ -21,6 +21,14 @@ permissions:
   # started. We authenticate as the Genesis App below instead, like every
   # workflow genesis seeds into a dev system.
 
+# One evolver at a time. `gh issue create --label` fires BOTH an `opened` and a
+# `labeled` event, which started two 40-turn agents on the same issue (genesis
+# issue #37) racing to open competing PRs. The seeded dev-system templates have
+# had a concurrency group for a while; genesis's own workflow never got one.
+concurrency:
+  group: genesis-evolver-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   evolve:
     runs-on: ubuntu-latest
@@ -57,8 +65,27 @@ jobs:
             Run the evolver agent defined in .claude/agents/evolver.md.
 
             Trigger: ${{ github.event_name }} / ${{ github.event.action }}
+            ${{ github.event.issue.number && format('Issue: #{0}', github.event.issue.number) || '' }}
 
-            Review needs:evolver issues and improve genesis scaffolding where warranted.
+            Scope for this run — ONE issue, not the queue:
+
+            1. Pick exactly one `needs:evolver` issue. If this run was triggered
+               by an issue event, that is the one. Otherwise take the smallest
+               open one you can finish end to end.
+            2. Before doing any work, comment on that issue with a task
+               checklist: the steps you intend to take, unchecked. Keep it short.
+            3. Work the checklist, updating that comment as items complete.
+            4. If an issue is too large to finish in this run, do NOT start it.
+               Split it into sub-issues labeled `needs:evolver`, comment saying
+               so, and stop. A large issue attempted in one run produces nothing.
+            5. Finish by commenting the outcome and opening a PR. Genesis has no
+               auto-merge, so say in the PR that a human must merge it.
+
+            Why the checklist is mandatory: this workflow has died at
+            `error_max_turns` twice, and the run that left no comment left no
+            diagnosis and no resume point — $1.48 spent for zero durable output.
+            An updated checklist means the next run continues instead of
+            restarting.
           # 40 turns, and `Write` is in the toolset on purpose. At 15 turns this
           # workflow was the tightest-budgeted agent in the whole system while
           # doing the broadest work (evaluate a needs:evolver issue, change
