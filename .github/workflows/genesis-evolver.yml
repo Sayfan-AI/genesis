@@ -14,7 +14,12 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
-  id-token: write
+  # No id-token: write. With an OIDC token available and no `github_token` input,
+  # claude-code-action takes the OIDC -> app-token exchange path, which requires
+  # the separate Claude Code GitHub App (github.com/apps/claude) to be installed
+  # here. It isn't, so every run 401'd three times and died before Claude
+  # started. We authenticate as the Genesis App below instead, like every
+  # workflow genesis seeds into a dev system.
 
 jobs:
   evolve:
@@ -32,9 +37,22 @@ jobs:
       # the templates to v7 needs that checked separately.
       - uses: actions/checkout@v7
 
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.GENESIS_APP_ID }}
+          private-key: ${{ secrets.GENESIS_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
+          # The evolver's primary signal is failed runs, so it needs to read them.
+          permission-actions: read
+
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
           prompt: |
             Run the evolver agent defined in .claude/agents/evolver.md.
 
