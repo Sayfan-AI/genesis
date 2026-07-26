@@ -37,4 +37,12 @@ jobs:
             Trigger: ${{ github.event_name }} / ${{ github.event.action }}
 
             Review needs:evolver issues and improve genesis scaffolding where warranted.
-          claude_args: "--max-turns 15 --allowedTools Read,Edit,Bash,Glob,Grep,Agent"
+          # 40 turns, and `Write` is in the toolset on purpose. At 15 turns this
+          # workflow was the tightest-budgeted agent in the whole system while
+          # doing the broadest work (evaluate a needs:evolver issue, change
+          # templates, add tests, open a PR) — the exact shape that died at
+          # `error_max_turns` twice on MaKlaude (its #38 and #81) and the subject
+          # of #35. Without `Write` it can only edit existing files, so any issue
+          # asking for a new template or test was impossible to satisfy (same
+          # class as the already-fixed #9).
+          claude_args: "--max-turns 40 --allowedTools Read,Write,Edit,Bash,Glob,Grep,Agent"
