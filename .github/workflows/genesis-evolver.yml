@@ -26,7 +26,11 @@ jobs:
       (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'needs:evolver')) ||
       (github.event_name == 'issue_comment' && contains(github.event.issue.labels.*.name, 'needs:evolver'))
     steps:
-      - uses: actions/checkout@v6
+      # v7's one behavior change is blocking fork-PR checkouts under
+      # pull_request_target / workflow_run, neither of which triggers this
+      # workflow. Note that genesis-merge.yml DOES use workflow_run, so bumping
+      # the templates to v7 needs that checked separately.
+      - uses: actions/checkout@v7
 
       - uses: anthropics/claude-code-action@v1
         with:
