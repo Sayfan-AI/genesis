@@ -27,3 +27,14 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Pin the default index to PyPI so resolution is reproducible regardless of a
+# contributor's machine-level uv config. Without this, a corporate proxy set as
+# the default index in ~/.config/uv/uv.toml silently rewrites every source URL
+# in uv.lock on re-resolve — same packages, same versions, same hashes, but
+# pointing at a host nobody else can reach. That landed in a commit here once
+# and had to be reverted. Project config wins over user config, so this holds.
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
