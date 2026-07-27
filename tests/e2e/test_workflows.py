@@ -128,8 +128,26 @@ def test_ci_workflow_runs_the_suite_on_every_pr_without_secrets() -> None:
     """
     content = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
     assert "pull_request:" in content
-    assert "uv run --frozen pytest" in content, (
-        "CI must use --frozen; a bare `uv run` re-resolves and rewrites uv.lock"
+    # Match the commands, not the file. The comments in ci.yml discuss --frozen
+    # at length to explain why it is *not* used, and scanning raw text flags
+    # that prose — same reason the secrets check below matches on interpolation.
+    commands = "\n".join(
+        line
+        for line in content.splitlines()
+        if line.strip().lstrip("- ").startswith("run:")
+    )
+    # --locked, not --frozen: --frozen installs a stale lock without complaint,
+    # so a dependency added to pyproject.toml without a re-lock would pass CI.
+    assert "uv sync --locked" in commands, (
+        "CI must install with --locked so a stale uv.lock fails the run"
+    )
+    assert "uv run --no-sync pytest" in commands, (
+        "CI must run tests with --no-sync so the test step cannot touch the lock"
+    )
+    assert "--frozen" not in commands, (
+        "--frozen is not the guard it looks like: it accepts a stale lock, and "
+        "it does not keep uv off the configured index (build-system.requires is "
+        "resolved outside the lock). Use --locked + --no-sync."
     )
     # A workflow can only consume a secret through this interpolation, so match
     # on it rather than the bare word — prose in a comment is not a secret.

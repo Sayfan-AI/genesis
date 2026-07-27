@@ -32,15 +32,25 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      # --frozen is not optional. Without it `uv run` re-resolves and rewrites
-      # uv.lock; on a machine whose user-level uv config points at a proxy
-      # registry that silently repoints every source URL away from pypi.org
-      # (landed in f328364, reverted in 06ad4c4). --frozen installs exactly what
-      # is committed and touches nothing.
-      - run: uv run --frozen pytest tests/ -q
+      # --locked, not --frozen. Both install from the committed lock, but they
+      # disagree about a *stale* one: --frozen installs it anyway, so a PR that
+      # adds a dependency to pyproject.toml without re-locking goes green here
+      # and breaks for everyone else. Measured on this repo — dependency added,
+      # no re-lock: `uv sync --frozen` exits 0 having installed the old set,
+      # `uv sync --locked` exits 1 with "the lockfile needs to be updated".
+      - run: uv sync --locked
 
-      # Belt and braces for the same failure: if a change ever drops --frozen or
-      # commits a lockfile that does not match pyproject.toml, this fails loudly
-      # instead of shipping a rewritten lock.
+      # --no-sync so the test step itself cannot touch the environment or the
+      # lock. It is also the only invocation that stays off the package index
+      # entirely: --frozen pins the dependency *graph*, but building this
+      # project still resolves `build-system.requires` (hatchling), which no
+      # lockfile covers, against whatever index is configured. So --frozen is
+      # not the shield against a proxy registry that it was assumed to be — the
+      # [[tool.uv.index]] pin in pyproject.toml is, and this ordering keeps the
+      # index out of the picture after the one sync above.
+      - run: uv run --no-sync pytest tests/ -q
+
+      # Belt and braces: if a change ever drops the flags above, this fails
+      # loudly instead of shipping a rewritten lock.
       - name: uv.lock is unchanged by the test run
         run: git diff --exit-code uv.lock
