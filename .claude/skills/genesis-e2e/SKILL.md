@@ -48,7 +48,7 @@ gh auth status -t 2>&1 | grep -A1 "the-gigi$" | grep -q delete_repo \
   || echo "the-gigi token missing delete_repo scope — run: gh auth refresh -h github.com -u the-gigi -s delete_repo"
 ```
 
-If `.envrc` isn't loaded, `gh` will run as the active account (likely `the-work-account`), which is wrong for this OSS project. Stop and tell the user to run `direnv allow`.
+If `.envrc` isn't loaded, `gh` will run as whichever account is active (likely a work account), which is wrong for this OSS project. Stop and tell the user to run `direnv allow`.
 
 If the `delete_repo` scope is missing, tell the user to run `gh auth refresh -h github.com -u the-gigi -s delete_repo` before continuing.
 
