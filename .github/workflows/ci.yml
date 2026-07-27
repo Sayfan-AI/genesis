@@ -23,7 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v9
+      # Exact release, not `@v9`. setup-uv stopped publishing floating major
+      # tags after v7 — `@v9` does not resolve and fails the job at setup.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           # Test the floor declared in pyproject.toml (requires-python >=3.12),
           # not whatever newer interpreter the runner happens to ship.
