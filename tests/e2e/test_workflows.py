@@ -118,6 +118,26 @@ def test_genesis_own_claude_workflows_meet_orchestrator_floor() -> None:
         )
 
 
+def test_ci_workflow_runs_the_suite_on_every_pr_without_secrets() -> None:
+    """The guards in this file are only guards if something runs them.
+
+    Before ci.yml existed, the whole suite ran only when a human remembered to,
+    which made every assertion here advisory. Two properties keep it that way:
+    it must fire on `pull_request`, and it must need no secrets — a CI job that
+    costs money or an API key is one someone eventually disables.
+    """
+    content = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "pull_request:" in content
+    assert "uv run --frozen pytest" in content, (
+        "CI must use --frozen; a bare `uv run` re-resolves and rewrites uv.lock"
+    )
+    # A workflow can only consume a secret through this interpolation, so match
+    # on it rather than the bare word — prose in a comment is not a secret.
+    assert "${{ secrets." not in content, (
+        "CI must not consume secrets — it has to run on every PR for free"
+    )
+
+
 def test_scaffolded_workflows_match_templates(tmp_dir: Path) -> None:
     repo = tmp_dir / "test-project"
     scaffold_new_repo(repo, "test goal", "test-project")

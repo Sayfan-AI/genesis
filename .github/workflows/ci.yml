@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only, no secrets. Everything the suite needs is local: the log.sh tests
+# stand up an http.server on loopback, the scaffolding tests write to tmp_path,
+# and the GitHub integration tests mock subprocess. Keep it that way — CI has to
+# stay free and fast so it can gate every PR, unlike Genesis Evolver which burns
+# an ANTHROPIC_API_KEY per run.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          # Test the floor declared in pyproject.toml (requires-python >=3.12),
+          # not whatever newer interpreter the runner happens to ship.
+          python-version: "3.12"
+          enable-cache: true
+
+      # --frozen is not optional. Without it `uv run` re-resolves and rewrites
+      # uv.lock; on a machine whose user-level uv config points at a proxy
+      # registry that silently repoints every source URL away from pypi.org
+      # (landed in f328364, reverted in 06ad4c4). --frozen installs exactly what
+      # is committed and touches nothing.
+      - run: uv run --frozen pytest tests/ -q
+
+      # Belt and braces for the same failure: if a change ever drops --frozen or
+      # commits a lockfile that does not match pyproject.toml, this fails loudly
+      # instead of shipping a rewritten lock.
+      - name: uv.lock is unchanged by the test run
+        run: git diff --exit-code uv.lock

@@ -81,6 +81,27 @@ template is unclassified or declares no `--max-turns` at all. Two separate dev-s
 workflows died at 20 turns three weeks apart before this floor existed — when a run
 dies at max-turns, raise the whole class and record why.
 
+## CI
+
+`.github/workflows/ci.yml` runs `uv run --frozen pytest tests/ -q` on every push to
+`main` and every PR. It is what turns the guards above from convention into
+enforcement — before it existed, the suite ran only when a human remembered to, and
+several changes merged on the strength of a hand-run result.
+
+Two properties keep it usable, both asserted by `tests/e2e/test_workflows.py`:
+
+- **No secrets.** CI must stay free and fast so it can gate every PR. The paid
+  Claude-invoking workflows are separate; never gate a PR on them.
+- **`--frozen`, always.** A bare `uv run` re-resolves and rewrites `uv.lock`. On a
+  machine whose user-level uv config points at a proxy registry, that silently
+  repoints every source URL away from pypi.org — it landed here once and had to be
+  reverted. A `git diff --exit-code uv.lock` step catches a regression.
+
+The suite must stay hermetic: no network, no ambient config. `tests/conftest.py` sets
+`GIT_AUTHOR_*`/`GIT_COMMITTER_*` because the scaffolding tests end in a real `git
+commit`, which aborts on a runner with no global identity. If a new test needs
+credentials or a live service, it does not belong in this suite.
+
 ## Self-Improvement
 
 This project opts in to self-improvement. Update this CLAUDE.md and project workflows as the design evolves. Keep `docs/` as the living design documents.
