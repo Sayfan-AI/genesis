@@ -45,10 +45,10 @@ def test_disable_only_active_workflows(monkeypatch) -> None:
     fake = FakeRun(
         [
             [
-                {"id": 1, "name": "events", "state": "active"},
-                {"id": 2, "name": "scheduled", "state": "active"},
-                {"id": 3, "name": "old", "state": "disabled_manually"},
-                {"id": 4, "name": "inactive", "state": "disabled_inactivity"},
+                {"id": 1, "name": "events", "state": "active", "path": ".github/workflows/genesis-events.yml"},
+                {"id": 2, "name": "scheduled", "state": "active", "path": ".github/workflows/genesis-scheduled.yml"},
+                {"id": 3, "name": "old", "state": "disabled_manually", "path": ".github/workflows/genesis-old.yml"},
+                {"id": 4, "name": "inactive", "state": "disabled_inactivity", "path": ".github/workflows/genesis-inactive.yml"},
             ]
         ]
     )
@@ -61,7 +61,7 @@ def test_disable_only_active_workflows(monkeypatch) -> None:
 
 def test_disable_persists_tracking_file(monkeypatch) -> None:
     fake = FakeRun(
-        [[{"id": 1, "name": "events", "state": "active"}]]
+        [[{"id": 1, "name": "events", "state": "active", "path": ".github/workflows/genesis-events.yml"}]]
     )
     monkeypatch.setattr(subprocess, "run", fake)
 
@@ -75,8 +75,8 @@ def test_disable_persists_incrementally_on_partial_failure(monkeypatch) -> None:
     """If the 2nd disable call fails, the 1st must already be on disk for recovery."""
 
     list_payload = [
-        {"id": 1, "name": "events", "state": "active"},
-        {"id": 2, "name": "scheduled", "state": "active"},
+        {"id": 1, "name": "events", "state": "active", "path": ".github/workflows/genesis-events.yml"},
+        {"id": 2, "name": "scheduled", "state": "active", "path": ".github/workflows/genesis-scheduled.yml"},
     ]
 
     def fake_run(cmd, **kwargs):
@@ -103,7 +103,7 @@ def test_disable_merges_with_existing_tracked_state(monkeypatch) -> None:
     """A second disable_workflows call must not erase prior tracked disables."""
     workflows._persist_disabled([{"id": 99, "name": "old-from-prior-run"}])
     fake = FakeRun(
-        [[{"id": 1, "name": "events", "state": "active"}]]
+        [[{"id": 1, "name": "events", "state": "active", "path": ".github/workflows/genesis-events.yml"}]]
     )
     monkeypatch.setattr(subprocess, "run", fake)
 
@@ -117,7 +117,7 @@ def test_disable_merges_with_existing_tracked_state(monkeypatch) -> None:
 
 def test_disable_no_active_does_not_create_tracking_file(monkeypatch) -> None:
     fake = FakeRun(
-        [[{"id": 1, "name": "old", "state": "disabled_manually"}]]
+        [[{"id": 1, "name": "old", "state": "disabled_manually", "path": ".github/workflows/genesis-old.yml"}]]
     )
     monkeypatch.setattr(subprocess, "run", fake)
     assert workflows.disable_workflows() == []
@@ -135,10 +135,10 @@ def test_enable_targeted_only_restores_tracked_workflows(monkeypatch) -> None:
         [
             [
                 # genesis-disabled, should be re-enabled
-                {"id": 1, "name": "events", "state": "disabled_manually"},
+                {"id": 1, "name": "events", "state": "disabled_manually", "path": ".github/workflows/genesis-events.yml"},
                 # user-disabled before genesis ran, must NOT be re-enabled
-                {"id": 99, "name": "user-paused", "state": "disabled_manually"},
-                {"id": 2, "name": "active", "state": "active"},
+                {"id": 99, "name": "user-paused", "state": "disabled_manually", "path": ".github/workflows/genesis-user-paused.yml"},
+                {"id": 2, "name": "active", "state": "active", "path": ".github/workflows/genesis-active.yml"},
             ]
         ]
     )
@@ -155,9 +155,9 @@ def test_enable_recovery_mode_when_no_tracking_file(monkeypatch) -> None:
     fake = FakeRun(
         [
             [
-                {"id": 1, "name": "events", "state": "disabled_manually"},
-                {"id": 2, "name": "scheduled", "state": "active"},
-                {"id": 3, "name": "inactive", "state": "disabled_inactivity"},
+                {"id": 1, "name": "events", "state": "disabled_manually", "path": ".github/workflows/genesis-events.yml"},
+                {"id": 2, "name": "scheduled", "state": "active", "path": ".github/workflows/genesis-scheduled.yml"},
+                {"id": 3, "name": "inactive", "state": "disabled_inactivity", "path": ".github/workflows/genesis-inactive.yml"},
             ]
         ]
     )
@@ -169,24 +169,24 @@ def test_enable_recovery_mode_when_no_tracking_file(monkeypatch) -> None:
 
 
 def test_enable_with_no_disabled_workflows_is_noop(monkeypatch) -> None:
-    fake = FakeRun([[{"id": 1, "name": "events", "state": "active"}]])
+    fake = FakeRun([[{"id": 1, "name": "events", "state": "active", "path": ".github/workflows/genesis-events.yml"}]])
     monkeypatch.setattr(subprocess, "run", fake)
     assert workflows.enable_workflows() == []
     assert fake.enable_calls == []
 
 
 def test_list_workflows_parses_json(monkeypatch) -> None:
-    fake = FakeRun([[{"id": 1, "name": "events", "state": "active"}]])
+    fake = FakeRun([[{"id": 1, "name": "events", "state": "active", "path": ".github/workflows/genesis-events.yml"}]])
     monkeypatch.setattr(subprocess, "run", fake)
     result = workflows.list_workflows()
-    assert result == [{"id": 1, "name": "events", "state": "active"}]
+    assert result == [{"id": 1, "name": "events", "state": "active", "path": ".github/workflows/genesis-events.yml"}]
 
 
 # ---------- --repo propagation ----------
 
 
 def test_disable_threads_repo_arg_to_gh(monkeypatch) -> None:
-    fake = FakeRun([[{"id": 1, "name": "events", "state": "active"}]])
+    fake = FakeRun([[{"id": 1, "name": "events", "state": "active", "path": ".github/workflows/genesis-events.yml"}]])
     monkeypatch.setattr(subprocess, "run", fake)
     workflows.disable_workflows(repo="alice/foo")
     # disable cmd should carry --repo alice/foo
@@ -197,7 +197,7 @@ def test_disable_threads_repo_arg_to_gh(monkeypatch) -> None:
 
 def test_enable_threads_repo_arg_to_gh(monkeypatch) -> None:
     fake = FakeRun(
-        [[{"id": 1, "name": "events", "state": "disabled_manually"}]]
+        [[{"id": 1, "name": "events", "state": "disabled_manually", "path": ".github/workflows/genesis-events.yml"}]]
     )
     monkeypatch.setattr(subprocess, "run", fake)
     workflows.enable_workflows(repo="alice/foo")
@@ -228,3 +228,89 @@ def test_repo_arg_omitted_when_none(monkeypatch) -> None:
     monkeypatch.setattr(subprocess, "run", fake_run)
     workflows.list_workflows()
     assert "--repo" not in captured[0]
+
+
+# ---------- genesis-only filtering ----------
+
+
+def test_disable_leaves_non_genesis_workflows_alone(monkeypatch) -> None:
+    """CI and other gates must keep running while the local plane drives.
+
+    Disabling them was actively harmful: the merge agent requires "all checks
+    passing", which a disabled workflow can never report.
+    """
+    fake = FakeRun(
+        [
+            [
+                {
+                    "id": 1,
+                    "name": "Genesis Orchestrator (Events)",
+                    "state": "active",
+                    "path": ".github/workflows/genesis-events.yml",
+                },
+                {
+                    "id": 2,
+                    "name": "CI",
+                    "state": "active",
+                    "path": ".github/workflows/ci.yml",
+                },
+                {
+                    "id": 3,
+                    "name": "E2E (kind)",
+                    "state": "active",
+                    "path": ".github/workflows/e2e.yml",
+                },
+            ]
+        ]
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    disabled = workflows.disable_workflows()
+    assert disabled == ["Genesis Orchestrator (Events)"]
+    assert [c[3] for c in fake.disable_calls] == ["1"]
+
+
+def test_disable_all_workflows_when_genesis_only_is_false(monkeypatch) -> None:
+    fake = FakeRun(
+        [
+            [
+                {
+                    "id": 1,
+                    "name": "Genesis Evolver",
+                    "state": "active",
+                    "path": ".github/workflows/genesis-evolver.yml",
+                },
+                {
+                    "id": 2,
+                    "name": "CI",
+                    "state": "active",
+                    "path": ".github/workflows/ci.yml",
+                },
+            ]
+        ]
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    assert workflows.disable_workflows(genesis_only=False) == ["Genesis Evolver", "CI"]
+
+
+def test_is_genesis_workflow_falls_back_to_name_without_path() -> None:
+    """Older `gh` output has no `path`; the display name is the only signal."""
+    assert workflows.is_genesis_workflow({"name": "Genesis Evolver"})
+    assert not workflows.is_genesis_workflow({"name": "CI"})
+    # An explicit path always wins over the name.
+    assert not workflows.is_genesis_workflow(
+        {"name": "Genesis Evolver", "path": ".github/workflows/ci.yml"}
+    )
+
+
+def test_list_workflows_requests_path_field(monkeypatch) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    workflows.list_workflows()
+    assert "path" in captured[0][captured[0].index("--json") + 1]

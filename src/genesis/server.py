@@ -5,13 +5,17 @@ fresh Claude sessions when relevant activity is detected. Disables GitHub
 Actions workflows on start to prevent duplicate execution; re-enables them on
 graceful shutdown.
 
-Authentication uses the user's existing `gh` CLI auth (`gh auth token`).
-The Anthropic API key must be available in the environment for `claude -p`.
+Authentication uses the user's existing `gh` CLI auth (`gh auth token`) for
+GitHub, and whatever the local `claude` CLI is already logged in with for the
+model — a Claude subscription works, so no ANTHROPIC_API_KEY is required. That
+is the main practical reason to prefer local mode: GitHub Actions needs a
+credential in the repo, this needs none.
 
 Configuration (environment variables):
     GENESIS_POLL_INTERVAL    seconds between polls (default: 60)
     GENESIS_SESSION_TIMEOUT  max seconds per orchestrator session (default: 3600)
     GENESIS_REPO             owner/repo (default: detected from git remote)
+    GENESIS_AGENT            agent definition to run (default: the orchestrator)
 """
 
 from __future__ import annotations
@@ -38,6 +42,20 @@ HIGHWATER_PATH = Path(".genesis/.poll-highwater")
 RELEVANT_EVENT_TYPES = frozenset(
     {"IssuesEvent", "IssueCommentEvent", "PullRequestEvent"}
 )
+
+DEFAULT_AGENT = ".claude/agents/orchestrator.md"
+
+# Local mode runs the same agent as the GHA workflows and must respect the same
+# turn-budget floor (see ORCHESTRATOR_TURN_FLOOR in scaffold.py). This was 20 —
+# below the floor — because the floor guard only inspected workflow templates,
+# so local mode quietly kept the budget that had already killed two runs.
+# Enforced by tests/unit/test_server.py.
+SESSION_MAX_TURNS = 40
+
+# `Write` is required: without it the agent can edit existing files but cannot
+# create any, so any task needing a new file, test, or agent definition is
+# impossible to satisfy.
+ALLOWED_TOOLS = "Read,Write,Edit,Bash,Glob,Grep,Agent"
 
 
 def _now_iso() -> str:
@@ -149,17 +167,17 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text)
 
 
-def _build_prompt(event: dict | None) -> str:
+def _build_prompt(event: dict | None, agent: str = DEFAULT_AGENT) -> str:
     if event is None:
         return (
-            "Run the orchestrator agent defined in .claude/agents/orchestrator.md. "
+            f"Run the agent defined in {agent}. "
             "This is a local control plane initial run — assess project state and advance work."
         )
     event_type = event.get("type", "UnknownEvent")
     action = event.get("payload", {}).get("action", "unknown")
     actor = event.get("actor", {}).get("login", "unknown")
     return (
-        "Run the orchestrator agent defined in .claude/agents/orchestrator.md.\n\n"
+        f"Run the agent defined in {agent}.\n\n"
         "An event triggered this run:\n"
         f"- Event: {event_type} / {action}\n"
         f"- Actor: {actor}\n\n"
@@ -172,6 +190,8 @@ class LocalControlPlane:
     repo: str
     poll_interval: int = 60
     session_timeout: int = 3600
+    agent: str = DEFAULT_AGENT
+    all_workflows: bool = False
     shutdown: bool = False
     last_event_id: str | None = None
     etag: str | None = None
@@ -230,7 +250,7 @@ class LocalControlPlane:
                 proc.kill()
 
     def run_orchestrator(self, event: dict | None) -> int:
-        prompt = _build_prompt(event)
+        prompt = _build_prompt(event, self.agent)
         if event is None:
             log("Launching orchestrator (initial run)")
         else:
@@ -244,9 +264,9 @@ class LocalControlPlane:
             "-p",
             prompt,
             "--max-turns",
-            "20",
+            str(SESSION_MAX_TURNS),
             "--allowedTools",
-            "Read,Edit,Bash,Glob,Grep,Agent",
+            ALLOWED_TOOLS,
         ]
         try:
             self.orch_proc = subprocess.Popen(cmd, start_new_session=True)
@@ -364,7 +384,7 @@ class LocalControlPlane:
                 return 1
 
         try:
-            disable_workflows(repo=self.repo)
+            disable_workflows(repo=self.repo, genesis_only=not self.all_workflows)
         except subprocess.CalledProcessError as e:
             log(f"Failed to disable workflows: {e}")
             # disable_workflows persists incrementally, so any partial-disable
@@ -453,6 +473,15 @@ def serve() -> int:
     """Run the local orchestrator server. Entry point for `genesis serve`."""
     poll_interval = int(os.environ.get("GENESIS_POLL_INTERVAL", "60"))
     session_timeout = int(os.environ.get("GENESIS_SESSION_TIMEOUT", "3600"))
+    agent = os.environ.get("GENESIS_AGENT", DEFAULT_AGENT)
+    all_workflows = os.environ.get("GENESIS_ALL_WORKFLOWS") == "1"
+
+    # Fail before disabling any workflows: a missing agent definition means every
+    # session would ask Claude to run a file that isn't there.
+    if not Path(agent).is_file():
+        log(f"Error: agent definition not found: {agent}")
+        log("Pass --agent <path> or set GENESIS_AGENT to an existing definition.")
+        return 1
 
     try:
         repo = _get_repo()
@@ -465,6 +494,8 @@ def serve() -> int:
         repo=repo,
         poll_interval=poll_interval,
         session_timeout=session_timeout,
+        agent=agent,
+        all_workflows=all_workflows,
     )
 
     handler = _make_signal_handler(plane)

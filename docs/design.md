@@ -133,14 +133,20 @@ The local control plane is the `genesis serve` subcommand of the genesis CLI. Th
 3. **Launch** — on first start (initial assessment) and whenever new activity is detected, launches `claude -p` with the orchestrator prompt. Same agent definition, same logic as GHA mode. The orchestrator reads full issue state when it runs.
 4. **Concurrency guard** — `.genesis/.orchestrator.lock` (PID-based) prevents multiple `genesis serve` instances on the same repo. If a session exceeds its timeout, the entire process tree is killed. Intermediate work is already in GitHub issues or committed files — the next run picks up.
 
-**Secrets:** Needs `ANTHROPIC_API_KEY` (for Claude) and `gh` CLI authentication (for GitHub API). The user already has both if they're running Claude Code locally. No additional secrets infrastructure needed — the user's machine is a trusted environment.
+**Secrets:** Needs `gh` CLI authentication for the GitHub API, and nothing else. `claude -p` uses whatever the local CLI is already logged in with, so a Claude subscription is enough and no `ANTHROPIC_API_KEY` is required. That is local mode's strongest argument: the GHA path needs a model credential stored in the repo, this path needs none.
+
+**Scope of the workflow disable:** only genesis-owned workflows (`genesis-*.yml`) are disabled, so CI and other gates keep running. Disabling everything broke the merge agent, whose precondition is "all CI checks passing" — a disabled workflow can never report that. Pass `--all-workflows` for the old behaviour.
 
 **Sandboxing:** The orchestrator session can run with Claude Code's built-in sandboxing. For stronger isolation, the user can run `genesis serve` inside Docker.
 
-**Configuration** (environment variables):
+**Configuration** (environment variables, each with a matching `genesis serve` flag):
 - `GENESIS_POLL_INTERVAL` — seconds between polls (default: 60)
 - `GENESIS_SESSION_TIMEOUT` — max seconds per orchestrator session (default: 3600)
 - `GENESIS_REPO` — owner/repo (default: detected from git remote)
+- `GENESIS_AGENT` — agent definition to run (default: `.claude/agents/orchestrator.md`). Repos with no orchestrator — genesis itself — point this at the agent they do have. `serve` refuses to start if the file is missing, before disabling anything.
+- `GENESIS_ALL_WORKFLOWS` — set to `1` to disable every workflow instead of only `genesis-*`
+
+The session budget is `SESSION_MAX_TURNS` in `server.py`, held at or above `ORCHESTRATOR_TURN_FLOOR` by `tests/unit/test_server.py` — local mode is the same agent doing the same work, so it gets the same floor.
 
 **When to use local mode:**
 - Sessions that need to exceed GHA's 6-hour limit

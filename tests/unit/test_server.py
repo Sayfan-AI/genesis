@@ -358,3 +358,56 @@ def test_serve_skips_self_heal_when_no_stale_file(plane, monkeypatch) -> None:
     assert disable_called.called
     # If self-heal had run, enable would be called >= 2 times (heal + cleanup).
     assert enable_called.call_count == 1
+
+
+# ---------- budget / toolset / agent guards ----------
+
+
+def test_local_mode_respects_the_orchestrator_turn_floor() -> None:
+    """Local mode runs the same agent as the workflows and must honour the same
+    floor. It sat at 20 — below the floor — because the floor guard only
+    inspected workflow templates, so this execution path silently kept the
+    budget that had already killed two runs.
+    """
+    from genesis.scaffold import ORCHESTRATOR_TURN_FLOOR
+
+    assert server.SESSION_MAX_TURNS >= ORCHESTRATOR_TURN_FLOOR
+
+
+def test_local_mode_allows_the_write_tool() -> None:
+    """Without Write the agent can edit files but never create one, so any task
+    needing a new file, test, or agent definition is unsatisfiable."""
+    assert "Write" in server.ALLOWED_TOOLS.split(",")
+
+
+def test_run_orchestrator_uses_the_declared_budget_and_tools(plane) -> None:
+    fake_proc = MagicMock()
+    fake_proc.wait.return_value = 0
+    fake_proc.pid = 12345
+    with patch("subprocess.Popen", return_value=fake_proc) as popen:
+        plane.run_orchestrator(None)
+    cmd = popen.call_args[0][0]
+    assert cmd[cmd.index("--max-turns") + 1] == str(server.SESSION_MAX_TURNS)
+    assert cmd[cmd.index("--allowedTools") + 1] == server.ALLOWED_TOOLS
+
+
+def test_build_prompt_defaults_to_the_orchestrator() -> None:
+    assert server.DEFAULT_AGENT in server._build_prompt(None)
+
+
+def test_build_prompt_honours_a_custom_agent() -> None:
+    """Repos without an orchestrator — genesis itself — point at another agent."""
+    prompt = server._build_prompt(None, ".claude/agents/evolver.md")
+    assert ".claude/agents/evolver.md" in prompt
+    assert "orchestrator.md" not in prompt
+
+
+def test_run_orchestrator_prompt_carries_the_planes_agent(plane) -> None:
+    plane.agent = ".claude/agents/evolver.md"
+    fake_proc = MagicMock()
+    fake_proc.wait.return_value = 0
+    fake_proc.pid = 12345
+    with patch("subprocess.Popen", return_value=fake_proc) as popen:
+        plane.run_orchestrator(None)
+    cmd = popen.call_args[0][0]
+    assert ".claude/agents/evolver.md" in cmd[cmd.index("-p") + 1]

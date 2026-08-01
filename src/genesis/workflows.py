@@ -25,10 +25,27 @@ def _gh_repo_args(repo: str | None) -> list[str]:
 
 def list_workflows(repo: str | None = None) -> list[dict]:
     """Return all GitHub Actions workflows in the target repository."""
-    cmd = ["gh", "workflow", "list", "--all", "--json", "id,name,state"]
+    cmd = ["gh", "workflow", "list", "--all", "--json", "id,name,state,path"]
     cmd += _gh_repo_args(repo)
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
+
+
+def is_genesis_workflow(wf: dict) -> bool:
+    """True for workflows genesis seeded and therefore owns.
+
+    Local mode needs to silence the agent-driving workflows without touching the
+    repo's own gates. Disabling CI and E2E as well was actively harmful: the
+    merge agent's precondition is "all checks passing", which no disabled
+    workflow can ever report.
+
+    Matches on the seeded filename prefix, falling back to the display name when
+    `path` is absent (older `gh` output).
+    """
+    path = wf.get("path") or ""
+    if path:
+        return path.rsplit("/", 1)[-1].startswith("genesis-")
+    return wf.get("name", "").lower().startswith("genesis")
 
 
 def _persist_disabled(disabled: list[dict]) -> None:
@@ -47,8 +64,12 @@ def _clear_disabled() -> None:
     DISABLED_LIST_PATH.unlink(missing_ok=True)
 
 
-def disable_workflows(repo: str | None = None) -> list[str]:
-    """Disable all currently-active workflows in the target repo.
+def disable_workflows(repo: str | None = None, genesis_only: bool = True) -> list[str]:
+    """Disable currently-active workflows in the target repo.
+
+    By default only genesis-owned (`genesis-*.yml`) workflows are disabled, so
+    CI and other gates keep running while the local control plane drives. Pass
+    `genesis_only=False` to disable everything.
 
     Persists the set of disabled workflow IDs to `.genesis/.disabled-by-genesis`
     after each successful disable so a partial failure (e.g. one of N gh calls
@@ -64,6 +85,9 @@ def disable_workflows(repo: str | None = None) -> list[str]:
     new_names: list[str] = []
     for wf in list_workflows(repo):
         if wf["state"] != "active":
+            continue
+        if genesis_only and not is_genesis_workflow(wf):
+            print(f"Leaving non-genesis workflow active: {wf['name']}")
             continue
         print(f"Disabling workflow: {wf['name']}")
         cmd = ["gh", "workflow", "disable", str(wf["id"])] + _gh_repo_args(repo)

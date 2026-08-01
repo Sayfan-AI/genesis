@@ -40,6 +40,22 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         help="Max seconds per orchestrator session (default: 3600, env: GENESIS_SESSION_TIMEOUT)",
     )
+    serve_parser.add_argument(
+        "--agent",
+        help=(
+            "Agent definition to run (default: .claude/agents/orchestrator.md, "
+            "env: GENESIS_AGENT). Repos without an orchestrator — genesis itself, "
+            "for one — point this at the agent they actually have."
+        ),
+    )
+    serve_parser.add_argument(
+        "--all-workflows",
+        action="store_true",
+        help=(
+            "Disable every workflow, not just the genesis-* ones. Off by default "
+            "so CI and other gates keep running while the local plane drives."
+        ),
+    )
 
     workflows_parser = subparsers.add_parser(
         "workflows",
@@ -72,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
             os.environ["GENESIS_POLL_INTERVAL"] = str(args.poll_interval)
         if args.session_timeout is not None:
             os.environ["GENESIS_SESSION_TIMEOUT"] = str(args.session_timeout)
+        if args.agent:
+            os.environ["GENESIS_AGENT"] = args.agent
+        if args.all_workflows:
+            os.environ["GENESIS_ALL_WORKFLOWS"] = "1"
         return serve()
 
     if args.command == "workflows":
