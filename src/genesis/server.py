@@ -26,6 +26,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -172,6 +173,23 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text)
 
 
+def _brief(tool_input: object, limit: int = 88) -> str:
+    """Render a tool's input as one short line for the progress feed.
+
+    Prefers the field that says what the call is actually doing — a command, a
+    path, a pattern — and falls back to a truncated repr.
+    """
+    if not isinstance(tool_input, dict):
+        return ""
+    for key in ("command", "file_path", "pattern", "path", "query", "description"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            flat = " ".join(value.split())
+            return flat[:limit] + ("…" if len(flat) > limit else "")
+    flat = " ".join(str(tool_input).split())
+    return flat[:limit] + ("…" if len(flat) > limit else "")
+
+
 def _build_prompt(event: dict | None, agent: str = DEFAULT_AGENT) -> str:
     if event is None:
         return (
@@ -254,6 +272,42 @@ class LocalControlPlane:
             except (ProcessLookupError, PermissionError):
                 proc.kill()
 
+    def _stream_progress(self, stream) -> None:
+        """Print one compact line per tool call from claude's stream-json output.
+
+        Best-effort by construction: any parse failure, unexpected shape, or
+        non-iterable stream ends the reader quietly. Progress reporting must
+        never be able to take down the run it is reporting on.
+        """
+        try:
+            turns = 0
+            for raw in stream:
+                line = (raw or "").strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                kind = event.get("type")
+                if kind == "assistant":
+                    content = (event.get("message") or {}).get("content") or []
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "tool_use":
+                            turns += 1
+                            log(f"  {turns:>3}. {block.get('name')} {_brief(block.get('input'))}")
+                elif kind == "result":
+                    cost = event.get("total_cost_usd") or 0
+                    secs = round((event.get("duration_ms") or 0) / 1000)
+                    log(
+                        f"  session ended: {event.get('subtype')} "
+                        f"turns={event.get('num_turns')} cost=${cost:.2f} {secs}s"
+                    )
+        except Exception:  # noqa: BLE001 - reporting must never break the run
+            return
+
     def run_orchestrator(self, event: dict | None) -> int:
         prompt = _build_prompt(event, self.agent)
         if event is None:
@@ -272,12 +326,32 @@ class LocalControlPlane:
             str(SESSION_MAX_TURNS),
             "--allowedTools",
             ALLOWED_TOOLS,
+            # Without this, `claude -p` buffers everything until the session ends,
+            # so a 25-minute run prints nothing at all — and hook stderr doesn't
+            # help, because Claude Code captures it into its own transcript rather
+            # than passing it through. Streaming turns a silent box into a feed.
+            "--output-format",
+            "stream-json",
+            "--verbose",
         ]
         try:
-            self.orch_proc = subprocess.Popen(cmd, start_new_session=True)
+            self.orch_proc = subprocess.Popen(
+                cmd,
+                start_new_session=True,
+                stdout=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
         except FileNotFoundError:
             log("Error: 'claude' command not found. Install Claude Code and ensure it's on PATH.")
             return 127
+
+        # A piped stdout MUST be drained or the child blocks once the pipe fills.
+        # Daemon thread so a wedged reader can never hold up shutdown.
+        reader = threading.Thread(
+            target=self._stream_progress, args=(self.orch_proc.stdout,), daemon=True
+        )
+        reader.start()
 
         deadline = time.time() + self.session_timeout
         try:

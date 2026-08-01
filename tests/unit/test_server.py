@@ -430,3 +430,80 @@ def test_serve_handles_sighup(monkeypatch, tmp_path) -> None:
     assert server.serve() == 0
     for sig in (server.signal.SIGINT, server.signal.SIGTERM, server.signal.SIGHUP):
         assert sig in registered, f"{sig!r} not handled"
+
+
+# ---------- progress feed ----------
+
+
+def test_stream_progress_renders_tool_calls_and_result(plane, capsys) -> None:
+    """`claude -p` buffers until the session ends, so without this a 25-minute
+    run prints nothing. Hook stderr doesn't fill the gap — Claude Code captures
+    it into its own transcript."""
+    stream = [
+        json.dumps({"type": "system", "subtype": "init"}),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "thinking"},
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "go test ./...", "description": "run tests"},
+                        },
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Edit",
+                            "input": {"file_path": "/repo/internal/kube/client.go"},
+                        }
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "num_turns": 12,
+                "total_cost_usd": 1.2345,
+                "duration_ms": 61000,
+            }
+        ),
+    ]
+    plane._stream_progress(iter(stream))
+    out = capsys.readouterr().out
+
+    assert "1. Bash go test ./..." in out
+    assert "2. Edit /repo/internal/kube/client.go" in out
+    assert "session ended: success turns=12 cost=$1.23 61s" in out
+
+
+def test_stream_progress_survives_garbage(plane, capsys) -> None:
+    """Progress reporting must never be able to take down the run it reports on."""
+    plane._stream_progress(iter(["not json", "", json.dumps({"type": "other"})]))
+    plane._stream_progress(None)  # non-iterable
+    assert "Traceback" not in capsys.readouterr().out
+
+
+def test_run_orchestrator_requests_streaming_output(plane) -> None:
+    fake_proc = MagicMock()
+    fake_proc.wait.return_value = 0
+    fake_proc.pid = 12345
+    fake_proc.stdout = iter([])
+    with patch("subprocess.Popen", return_value=fake_proc) as popen:
+        plane.run_orchestrator(None)
+    cmd = popen.call_args[0][0]
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in cmd
+    # A piped stdout must be drained or the child blocks when the pipe fills.
+    assert popen.call_args[1]["stdout"] is subprocess.PIPE
