@@ -411,3 +411,22 @@ def test_run_orchestrator_prompt_carries_the_planes_agent(plane) -> None:
         plane.run_orchestrator(None)
     cmd = popen.call_args[0][0]
     assert ".claude/agents/evolver.md" in cmd[cmd.index("-p") + 1]
+
+
+def test_serve_handles_sighup(monkeypatch, tmp_path) -> None:
+    """Closing the terminal sends SIGHUP. Unhandled, it skips cleanup and leaves
+    the repo's workflows disabled with a stale tracking file."""
+    registered: dict[int, object] = {}
+    monkeypatch.setattr(
+        server.signal, "signal", lambda sig, h: registered.__setitem__(sig, h)
+    )
+    monkeypatch.setattr(server, "_get_repo", lambda: "alice/foo")
+    monkeypatch.chdir(tmp_path)
+    agent = tmp_path / "agent.md"
+    agent.write_text("# agent")
+    monkeypatch.setenv("GENESIS_AGENT", str(agent))
+    monkeypatch.setattr(server.LocalControlPlane, "serve", lambda self: 0)
+
+    assert server.serve() == 0
+    for sig in (server.signal.SIGINT, server.signal.SIGTERM, server.signal.SIGHUP):
+        assert sig in registered, f"{sig!r} not handled"

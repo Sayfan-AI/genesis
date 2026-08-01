@@ -522,6 +522,11 @@ def serve() -> int:
     handler = _make_signal_handler(plane)
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)
+    # SIGHUP too: closing the terminal window is the most common way this process
+    # dies, and unhandled it skips cleanup entirely — leaving the repo's
+    # workflows disabled and a stale tracking file behind. SIGKILL still can't be
+    # caught; `genesis workflows enable` is the recovery hatch for that.
+    signal.signal(signal.SIGHUP, handler)
 
     try:
         return plane.serve()
