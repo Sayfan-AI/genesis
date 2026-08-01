@@ -100,6 +100,25 @@ def disable_workflows(repo: str | None = None, genesis_only: bool = True) -> lis
     return new_names
 
 
+def tracked_all_disabled(repo: str | None = None) -> bool:
+    """True if every workflow in the tracking file is still `disabled_manually`.
+
+    Lets a restarting `serve` skip the enable/disable round-trip. That round-trip
+    is not free: it re-arms GHA for the seconds between the two calls, and a
+    queued event or a cron tick landing in that window starts exactly the
+    duplicate orchestrator run local mode exists to prevent.
+
+    False when the tracking file is absent or any tracked workflow has been
+    re-enabled behind our back, in which case the caller should reconcile by
+    enabling and re-disabling.
+    """
+    tracked = _load_disabled()
+    if not tracked:
+        return False
+    states = {wf["id"]: wf["state"] for wf in list_workflows(repo)}
+    return all(states.get(wf["id"]) == "disabled_manually" for wf in tracked)
+
+
 def enable_workflows(repo: str | None = None) -> list[str]:
     """Re-enable workflows in the target repo.
 

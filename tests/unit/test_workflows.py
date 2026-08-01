@@ -314,3 +314,58 @@ def test_list_workflows_requests_path_field(monkeypatch) -> None:
     monkeypatch.setattr(subprocess, "run", fake_run)
     workflows.list_workflows()
     assert "path" in captured[0][captured[0].index("--json") + 1]
+
+
+# ---------- restart reconciliation ----------
+
+
+def test_tracked_all_disabled_false_without_tracking_file(monkeypatch) -> None:
+    fake = FakeRun([[]])
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert workflows.tracked_all_disabled() is False
+
+
+def test_tracked_all_disabled_true_when_state_matches(monkeypatch) -> None:
+    """A restart that finds its own workflows still off must not re-arm GHA."""
+    workflows._persist_disabled([{"id": 1, "name": "Genesis Evolver"}])
+    fake = FakeRun(
+        [
+            [
+                {
+                    "id": 1,
+                    "name": "Genesis Evolver",
+                    "state": "disabled_manually",
+                    "path": ".github/workflows/genesis-evolver.yml",
+                }
+            ]
+        ]
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert workflows.tracked_all_disabled() is True
+
+
+def test_tracked_all_disabled_false_when_one_was_re_enabled(monkeypatch) -> None:
+    """Someone re-enabled a workflow behind our back — reconcile properly."""
+    workflows._persist_disabled(
+        [{"id": 1, "name": "Genesis Evolver"}, {"id": 2, "name": "Genesis Auto-Merge"}]
+    )
+    fake = FakeRun(
+        [
+            [
+                {
+                    "id": 1,
+                    "name": "Genesis Evolver",
+                    "state": "disabled_manually",
+                    "path": ".github/workflows/genesis-evolver.yml",
+                },
+                {
+                    "id": 2,
+                    "name": "Genesis Auto-Merge",
+                    "state": "active",
+                    "path": ".github/workflows/genesis-merge.yml",
+                },
+            ]
+        ]
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert workflows.tracked_all_disabled() is False

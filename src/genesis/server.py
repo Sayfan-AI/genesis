@@ -33,7 +33,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from genesis.workflows import DISABLED_LIST_PATH, disable_workflows, enable_workflows
+from genesis.workflows import (
+    DISABLED_LIST_PATH,
+    disable_workflows,
+    enable_workflows,
+    tracked_all_disabled,
+)
 
 LOCK_PATH = Path(".genesis/.orchestrator.lock")
 ETAG_PATH = Path(".genesis/.poll-etag")
@@ -369,19 +374,35 @@ class LocalControlPlane:
         # starts from a known clean state; the subsequent disable_workflows
         # below will disable them again under fresh tracking.
         if DISABLED_LIST_PATH.exists():
-            log(
-                f"Found stale {DISABLED_LIST_PATH} from a prior session — "
-                "re-enabling workflows before disabling them again"
-            )
             try:
-                enable_workflows(repo=self.repo)
+                already_off = tracked_all_disabled(repo=self.repo)
             except subprocess.CalledProcessError as e:
+                log(f"Could not read workflow state ({e}); assuming reconcile is needed")
+                already_off = False
+
+            if already_off:
+                # Nothing to heal: the end state we want is the state we're in.
+                # Enabling here only to disable again seconds later would re-arm
+                # GHA long enough for a queued event or cron tick to start the
+                # duplicate run this whole mechanism exists to prevent.
                 log(
-                    f"Self-heal failed ({e}). Run `genesis workflows enable` "
-                    "manually, then re-run `genesis serve`."
+                    f"Found {DISABLED_LIST_PATH} from a prior session; tracked "
+                    "workflows are still disabled — keeping them off"
                 )
-                self.release_lock()
-                return 1
+            else:
+                log(
+                    f"Found stale {DISABLED_LIST_PATH} from a prior session with "
+                    "workflows re-enabled — reconciling before disabling again"
+                )
+                try:
+                    enable_workflows(repo=self.repo)
+                except subprocess.CalledProcessError as e:
+                    log(
+                        f"Self-heal failed ({e}). Run `genesis workflows enable` "
+                        "manually, then re-run `genesis serve`."
+                    )
+                    self.release_lock()
+                    return 1
 
         try:
             disable_workflows(repo=self.repo, genesis_only=not self.all_workflows)
