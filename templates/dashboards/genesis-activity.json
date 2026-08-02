@@ -1,12 +1,18 @@
 {
   "title": "Genesis dev system activity",
   "uid": "genesis-activity",
-  "tags": ["genesis", "agents"],
+  "tags": [
+    "genesis",
+    "agents"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,
   "refresh": "1m",
-  "time": { "from": "now-24h", "to": "now" },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
@@ -14,19 +20,34 @@
         "label": "Loki",
         "type": "datasource",
         "query": "loki",
-        "current": {},
-        "hide": 0
+        "current": {
+          "text": "grafanacloud-bouncymillet382-logs",
+          "value": "grafanacloud-logs",
+          "selected": true
+        },
+        "hide": 0,
+        "regex": "/-logs$/"
       },
       {
         "name": "project",
         "label": "Project",
         "type": "query",
-        "datasource": { "type": "loki", "uid": "${ds}" },
-        "query": { "label": "project", "refId": "project" },
+        "datasource": {
+          "type": "loki",
+          "uid": "${ds}"
+        },
+        "query": {
+          "label": "project",
+          "refId": "project"
+        },
         "refresh": 1,
         "includeAll": false,
         "multi": false,
-        "current": {}
+        "current": {
+          "text": "MaKlaude",
+          "value": "MaKlaude",
+          "selected": true
+        }
       }
     ]
   },
@@ -36,24 +57,50 @@
       "type": "stat",
       "title": "Spend in range",
       "description": "Summed from every session-outcome event. Before these events existed, cost lived only in the terminal running `genesis serve` and vanished with the window.",
-      "datasource": { "type": "loki", "uid": "${ds}" },
-      "gridPos": { "h": 5, "w": 5, "x": 0, "y": 0 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 0,
+        "y": 0
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
           "decimals": 2,
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 25 },
-              { "color": "red", "value": 60 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 25
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
             ]
           }
         }
       },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "none" },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "none"
+      },
       "targets": [
         {
           "refId": "A",
@@ -66,10 +113,30 @@
       "id": 2,
       "type": "stat",
       "title": "Sessions",
-      "datasource": { "type": "loki", "uid": "${ds}" },
-      "gridPos": { "h": 5, "w": 5, "x": 5, "y": 0 },
-      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 } },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "none" },
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 5,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "none"
+      },
       "targets": [
         {
           "refId": "A",
@@ -82,10 +149,26 @@
       "id": 3,
       "type": "piechart",
       "title": "How sessions ended",
-      "description": "error_max_turns is the failure that produces no diagnosis of its own — the reason this panel exists.",
-      "datasource": { "type": "loki", "uid": "${ds}" },
-      "gridPos": { "h": 5, "w": 7, "x": 10, "y": 0 },
-      "options": { "legend": { "displayMode": "table", "placement": "right", "values": ["value"] } },
+      "description": "error_max_turns is the failure that produces no diagnosis of its own \u2014 the reason this panel exists.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 7,
+        "x": 10,
+        "y": 0
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value"
+          ]
+        }
+      },
       "targets": [
         {
           "refId": "A",
@@ -98,8 +181,16 @@
       "id": 4,
       "type": "stat",
       "title": "Tool failures",
-      "datasource": { "type": "loki", "uid": "${ds}" },
-      "gridPos": { "h": 5, "w": 7, "x": 17, "y": 0 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 7,
+        "x": 17,
+        "y": 0
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -107,13 +198,26 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 20 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 20
+              }
             ]
           }
         }
       },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "area"
+      },
       "targets": [
         {
           "refId": "A",
@@ -126,12 +230,24 @@
       "id": 5,
       "type": "timeseries",
       "title": "Cost per session over time",
-      "datasource": { "type": "loki", "uid": "${ds}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
-          "custom": { "drawStyle": "bars", "fillOpacity": 60, "lineWidth": 1 }
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1
+          }
         }
       },
       "targets": [
@@ -145,10 +261,26 @@
       "id": 6,
       "type": "timeseries",
       "title": "Tool calls by tool",
-      "datasource": { "type": "loki", "uid": "${ds}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
       "fieldConfig": {
-        "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } } }
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
       },
       "targets": [
         {
@@ -160,11 +292,21 @@
     {
       "id": 7,
       "type": "table",
-      "title": "Continuation decisions — did the judge call it right?",
+      "title": "Continuation decisions \u2014 did the judge call it right?",
       "description": "Every stalled session that was resumed or stopped, with the rung that decided and the judge's own words when it was consulted.",
-      "datasource": { "type": "loki", "uid": "${ds}" },
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 13 },
-      "options": { "showHeader": true },
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "options": {
+        "showHeader": true
+      },
       "targets": [
         {
           "refId": "A",
@@ -177,9 +319,21 @@
       "id": 8,
       "type": "logs",
       "title": "Recent activity",
-      "datasource": { "type": "loki", "uid": "${ds}" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 22 },
-      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" },
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      },
       "targets": [
         {
           "refId": "A",
