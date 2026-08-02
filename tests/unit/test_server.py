@@ -803,3 +803,27 @@ def test_app_private_key_never_reaches_the_agent(plane, monkeypatch) -> None:
     assert env["GH_TOKEN"] == "ghs_minted"
     assert "GENESIS_GITHUB_APP_SECRET" not in env
     assert "GENESIS_GITHUB_APP_ID" not in env
+
+
+def test_any_abnormal_ending_resumes_not_just_max_turns(plane) -> None:
+    """Observed in production: a session died `error_during_execution` at turn 41
+    with real work uncommitted, and the chain stopped because the subtype string
+    didn't match. Every abnormal ending strands work the same way."""
+    calls = _fake_sessions(
+        plane, [_session_stream("error_during_execution"), _session_stream("success")]
+    )
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 2, "an execution error should resume like a budget death"
+    assert "--resume" in calls[1]
+
+
+def test_success_still_ends_the_chain(plane) -> None:
+    calls = _fake_sessions(plane, [_session_stream("success"), _session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1

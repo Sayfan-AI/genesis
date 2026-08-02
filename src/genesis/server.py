@@ -322,6 +322,24 @@ def loki_push(hook_event: str, fields: dict[str, object]) -> bool:
         return False
 
 
+def _died_mid_task(subtype: str | None) -> bool:
+    """True for any abnormal session ending, not just an exhausted budget.
+
+    This started as an `error_max_turns` check and that was too narrow. Observed
+    in production: a session died `error_during_execution` at turn 41 with real
+    work uncommitted in the tree, and the chain stopped because the subtype did
+    not match - $6.63 spent and the task left stranded for no better reason than
+    a string comparison.
+
+    Every abnormal ending has the same shape: reasoning in a transcript on disk,
+    work in the tree, nobody continuing it. Whether resuming is *wise* is not this
+    function's business - that is what the evidence ladder in _should_continue is
+    for, and its zero-tool-calls rung already stops a session that fails instantly
+    and repeatedly.
+    """
+    return bool(subtype) and subtype != "success"
+
+
 def _cost_ceiling() -> float:
     """Spend allowed per unit of work before continuations stop, whatever anyone
     thinks. Env override so an operator can tighten it without editing code."""
@@ -566,7 +584,7 @@ class LocalControlPlane:
         spent = self.last_cost
 
         for attempt in range(1, MAX_CONTINUATIONS + 1):
-            if self.shutdown or self.last_result_subtype != "error_max_turns":
+            if self.shutdown or not _died_mid_task(self.last_result_subtype):
                 break
             session_id = self.last_session_id
             if not session_id:
@@ -599,7 +617,7 @@ class LocalControlPlane:
             rc = self._run_session(None, deadline, resume=session_id)
             spent += self.last_cost
 
-        if self.last_result_subtype == "error_max_turns":
+        if _died_mid_task(self.last_result_subtype):
             # The work is real and uncommitted, and nothing else is scheduled to
             # touch it. Without this flag the plane would sit idle holding a
             # half-finished task until some unrelated repo event happened along.
