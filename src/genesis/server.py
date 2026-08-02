@@ -607,6 +607,41 @@ class LocalControlPlane:
             log(f"  still incomplete (${spent:.2f} spent) — will pick it up on the next tick")
         return rc
 
+    def _session_env(self) -> dict[str, str]:
+        """Environment for a child `claude` process.
+
+        One helper for both the agent and the judge, because the two used to
+        build this separately and drifted: an edit meant for the agent landed in
+        the judge, so the judge authenticated as the App while the agent it was
+        judging still ran as the operator.
+        """
+        env = dict(os.environ)
+        if self.claude_home is not None:
+            env["CLAUDE_CONFIG_DIR"] = str(self.claude_home)
+
+        # Act as the GitHub App, like the Actions path does, so the agent is a
+        # distinguishable identity rather than a second copy of the operator.
+        # Minted per session: installation tokens last an hour and a plane that
+        # runs all afternoon would otherwise hold a dead one.
+        app_token = mint_installation_token(self.repo, env)
+
+        # The App private key is far stronger than the hour-long token minted
+        # from it - it can mint tokens for every repo the App is installed on, at
+        # any time. The plane needs it, a session never does.
+        for secret in ("GENESIS_GITHUB_APP_SECRET", "GENESIS_GITHUB_APP_ID"):
+            env.pop(secret, None)
+
+        if app_token:
+            env["GH_TOKEN"] = app_token
+            env["GITHUB_TOKEN"] = app_token
+            if not self.identity_logged:
+                log("  agent authenticates as the Genesis App, not your account")
+                self.identity_logged = True
+        elif not self.identity_logged:
+            log("  agent uses your personal gh credential - its commits will look like yours")
+            self.identity_logged = True
+        return env
+
     def ask_judge(self, task: str) -> tuple[bool, str]:
         """Ask a fresh session whether a stalled run deserves another continuation.
 
@@ -660,24 +695,7 @@ class LocalControlPlane:
             "--allowedTools",
             "",
         ]
-        child_env = dict(os.environ)
-        if self.claude_home is not None:
-            child_env["CLAUDE_CONFIG_DIR"] = str(self.claude_home)
-
-        # Act as the GitHub App, like the Actions path does, so the agent is a
-        # distinguishable identity rather than a second copy of the operator.
-        # Minted per session because installation tokens last an hour and a
-        # long-running plane would otherwise hold a dead one.
-        app_token = mint_installation_token(self.repo, child_env)
-        if app_token:
-            child_env["GH_TOKEN"] = app_token
-            child_env["GITHUB_TOKEN"] = app_token
-            if not self.identity_logged:
-                log("  agent authenticates as the Genesis App (not your account)")
-                self.identity_logged = True
-        elif not self.identity_logged:
-            log("  agent uses your personal gh credential — its commits will look like yours")
-            self.identity_logged = True
+        child_env = self._session_env()
         try:
             out = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=180, env=child_env, check=False
@@ -743,9 +761,7 @@ class LocalControlPlane:
             "stream-json",
             "--verbose",
         ]
-        child_env = dict(os.environ)
-        if self.claude_home is not None:
-            child_env["CLAUDE_CONFIG_DIR"] = str(self.claude_home)
+        child_env = self._session_env()
 
         try:
             self.orch_proc = subprocess.Popen(

@@ -785,3 +785,21 @@ def test_unfinished_work_schedules_a_followup(plane) -> None:
         plane._stop_patch.stop()
     assert plane.pending_followup is True
     assert len(calls) == 1 + server.MAX_CONTINUATIONS
+
+
+def test_app_private_key_never_reaches_the_agent(plane, monkeypatch) -> None:
+    """The PEM can mint tokens for every repo the App is installed on, forever.
+    The hour-long token it produces is the only thing a session should hold."""
+    monkeypatch.setattr(server, "mint_installation_token", lambda repo, env: "ghs_minted")
+    monkeypatch.setenv("GENESIS_GITHUB_APP_SECRET", "-----BEGIN RSA PRIVATE KEY-----")
+    monkeypatch.setenv("GENESIS_GITHUB_APP_ID", "12345")
+    fake_proc = MagicMock()
+    fake_proc.wait.return_value = 0
+    fake_proc.pid = 1
+    fake_proc.stdout = iter([])
+    with patch("subprocess.Popen", return_value=fake_proc) as popen:
+        plane.run_orchestrator(None)
+    env = popen.call_args[1]["env"]
+    assert env["GH_TOKEN"] == "ghs_minted"
+    assert "GENESIS_GITHUB_APP_SECRET" not in env
+    assert "GENESIS_GITHUB_APP_ID" not in env
