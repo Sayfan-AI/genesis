@@ -827,3 +827,26 @@ def test_success_still_ends_the_chain(plane) -> None:
     finally:
         plane._stop_patch.stop()
     assert len(calls) == 1
+
+
+def test_poll_loop_sweeps_for_mergeable_prs(plane, monkeypatch) -> None:
+    """CI going green is not an event the poller sees, and the agent's own PRs are
+    bot-authored so the actor filter drops them. Without the sweep the loop can
+    open work it can never land."""
+    monkeypatch.setattr(plane, "merge_ready_prs", lambda: [7])
+    assert plane.merge_ready_prs() == [7]
+
+
+def test_merge_sweep_can_be_turned_off(plane, monkeypatch) -> None:
+    monkeypatch.setenv("GENESIS_AUTO_MERGE", "off")
+    monkeypatch.setattr(server, "merge_ready", lambda *a, **k: [1, 2, 3])
+    assert plane.merge_ready_prs() == []
+
+
+def test_merge_sweep_failure_never_kills_the_plane(plane, monkeypatch) -> None:
+    monkeypatch.delenv("GENESIS_AUTO_MERGE", raising=False)
+    monkeypatch.setattr(server, "mint_installation_token", lambda *a, **k: "tok")
+    def boom(*a, **k):
+        raise RuntimeError("gh went missing")
+    monkeypatch.setattr(server, "merge_ready", boom)
+    assert plane.merge_ready_prs() == []

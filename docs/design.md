@@ -135,6 +135,12 @@ The local control plane is the `genesis serve` subcommand of the genesis CLI. Th
 
 **Secrets:** Needs `gh` CLI authentication for the GitHub API, and nothing else. `claude -p` uses whatever the local CLI is already logged in with, so a Claude subscription is enough and no `ANTHROPIC_API_KEY` is required. That is local mode's strongest argument: the GHA path needs a model credential stored in the repo, this path needs none.
 
+**Merging in local mode.** `serve` sweeps for mergeable pull requests on every poll tick and squash-merges any that are bot-authored, non-draft, and green on every check. This is the local equivalent of `genesis-merge.yml`, which local mode disables.
+
+It has to be a state-derived sweep rather than an event handler, for two reasons that compound. CI-completion is not among the events the poller reads (`IssuesEvent`, `IssueCommentEvent`, `PullRequestEvent`), so "checks just went green" can never wake anything. And once local sessions began authenticating as the App, the agent's own pull requests became bot-authored, so the feedback-loop filter drops those events too. Without the sweep the loop can open work it is structurally unable to land.
+
+Deterministic on purpose: the merge rule is a predicate, not a judgement, and a merge step that cannot exhaust a turn budget is one less way for the loop to stall. `mergeStateStatus == CLEAN` is deliberately *not* trusted on its own, because GitHub reports CLEAN when no branch protection requires the failing check. Disable with `GENESIS_AUTO_MERGE=off`.
+
 **Scope of the workflow disable:** only genesis-owned workflows (`genesis-*.yml`) are disabled, so CI and other gates keep running. Disabling everything broke the merge agent, whose precondition is "all CI checks passing" — a disabled workflow can never report that. Pass `--all-workflows` for the old behaviour.
 
 **Sandboxing:** The orchestrator session can run with Claude Code's built-in sandboxing. For stronger isolation, the user can run `genesis serve` inside Docker.

@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Iterable
 
 from genesis.appauth import mint_installation_token
+from genesis.automerge import merge_ready
 from genesis.workflows import (
     DISABLED_LIST_PATH,
     disable_workflows,
@@ -625,6 +626,23 @@ class LocalControlPlane:
             log(f"  still incomplete (${spent:.2f} spent) — will pick it up on the next tick")
         return rc
 
+    def merge_ready_prs(self) -> list[int]:
+        """Land any bot pull request whose checks are all green.
+
+        Deterministic on purpose. The rule is a predicate, not a judgement, and a
+        merge step that cannot exhaust a turn budget is one less way for the loop
+        to stall. Merging as the App keeps the attribution honest and keeps the
+        "only merge bot PRs" rule meaningful.
+        """
+        if os.environ.get("GENESIS_AUTO_MERGE", "on").strip().lower() == "off":
+            return []
+        token = mint_installation_token(self.repo)
+        try:
+            return merge_ready(self.repo, token, log=log)
+        except Exception as e:  # noqa: BLE001 - a merge sweep must never kill the plane
+            log(f"  merge sweep failed: {e}")
+            return []
+
     def _session_env(self) -> dict[str, str]:
         """Environment for a child `claude` process.
 
@@ -980,6 +998,14 @@ class LocalControlPlane:
             except urllib.error.URLError as e:
                 log(f"Network error polling events: {e}")
                 continue
+
+            # A pull request going green is not an event this poller can see, and
+            # the agent's own pull requests are bot-authored so they are filtered
+            # out too. Without this sweep the local loop can open work it can
+            # never land - which is exactly what genesis-merge.yml does in CI, on
+            # a trigger local mode does not have.
+            if self.merge_ready_prs():
+                self.pending_followup = True
 
             for event in new_events:
                 if self.shutdown:
