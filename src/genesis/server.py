@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from genesis.appauth import mint_installation_token
 from genesis.workflows import (
     DISABLED_LIST_PATH,
     disable_workflows,
@@ -406,6 +407,7 @@ class LocalControlPlane:
     recent_tools: list[str] = field(default_factory=list)
     pending_followup: bool = False
     continuation_index: int = 0
+    identity_logged: bool = False
     all_workflows: bool = False
     shutdown: bool = False
     last_event_id: str | None = None
@@ -661,6 +663,21 @@ class LocalControlPlane:
         child_env = dict(os.environ)
         if self.claude_home is not None:
             child_env["CLAUDE_CONFIG_DIR"] = str(self.claude_home)
+
+        # Act as the GitHub App, like the Actions path does, so the agent is a
+        # distinguishable identity rather than a second copy of the operator.
+        # Minted per session because installation tokens last an hour and a
+        # long-running plane would otherwise hold a dead one.
+        app_token = mint_installation_token(self.repo, child_env)
+        if app_token:
+            child_env["GH_TOKEN"] = app_token
+            child_env["GITHUB_TOKEN"] = app_token
+            if not self.identity_logged:
+                log("  agent authenticates as the Genesis App (not your account)")
+                self.identity_logged = True
+        elif not self.identity_logged:
+            log("  agent uses your personal gh credential — its commits will look like yours")
+            self.identity_logged = True
         try:
             out = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=180, env=child_env, check=False

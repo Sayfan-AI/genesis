@@ -147,6 +147,13 @@ The local control plane is the `genesis serve` subcommand of the genesis CLI. Th
 - `GENESIS_ALL_WORKFLOWS` — set to `1` to disable every workflow instead of only `genesis-*`
 - `GENESIS_CLAUDE_HOME` — config dir for the agent's own Claude Code profile (default: `~/.config/genesis/claude-home`)
 - `GENESIS_CLAUDE_PROFILE=personal` — opt out of isolation and run sessions under the operator's own profile
+- `GENESIS_AGENT_IDENTITY=personal` — opt out of App authentication and let sessions use the operator's own `gh` credential
+
+**Why sessions authenticate as the GitHub App.** In Actions the agent is `genesis-dev-bot[bot]`, because `actions/create-github-app-token` mints a token per run. Locally there was no equivalent, so sessions inherited the operator's `gh` credential and the agent became indistinguishable from the human — same login on its commits, comments, merges, and approvals.
+
+That collapse is not cosmetic. An approval gate's premise is that the approver is not the actor, and it cannot check what it cannot distinguish; "only merge PRs created by the bot" becomes vacuous; and the operator loses the ability to read their own repo history. Observed on MaKlaude: PRs reading `author=the-gigi mergedBy=the-gigi` where both were the agent, and an orchestrator that explained a merge it had not performed by inventing auto-merge as the cause.
+
+There is no stored token to reuse — Actions mints one every run — so local mode performs the same exchange from the App ID and private key already in `~/.config/genesis/.env`: sign a JWT, resolve the installation, trade it for a one-hour token. Minting happens per session, since a plane running all afternoon would otherwise hold a dead credential after the first hour. Every failure falls back to the ambient credential: worse attribution beats a dev system that will not start because a token exchange hiccuped.
 
 **Why sessions get their own Claude profile.** A local session otherwise inherits the operator's `~/.claude/CLAUDE.md`, which is written as guidance for a human's assistant and is then read as policy by an autonomous system. This is not theoretical: on MaKlaude, a personal convention to qualify GitHub references produced `Closes issue #117` in a PR body, GitHub's parser only links `<keyword> #<number>`, and a merged PR silently left its task issue open. Rules like "never merge PRs" or "always commit through the `gcm` alias" land in the same lap, and the agent resolves the contradiction unpredictably. Isolation also makes a local run behave like the Actions run, where no such file exists.
 
