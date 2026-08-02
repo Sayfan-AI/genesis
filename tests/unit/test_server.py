@@ -916,3 +916,13 @@ def test_a_completed_login_is_a_usable_profile(tmp_path) -> None:
         json.dumps({"userID": "abc", "oauthAccount": {"accountUuid": "u"}})
     )
     assert server.resolve_claude_home({"GENESIS_CLAUDE_HOME": str(home)}) == home
+
+
+def test_a_session_that_ran_no_tools_is_called_out(plane, capsys) -> None:
+    """The failure that motivated this: an unauthenticated profile made every run
+    exit in one turn for $0.00 reporting success, eating the event backlog while
+    looking healthy."""
+    plane._stream_progress(iter([json.dumps(
+        {"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0, "duration_ms": 1000}
+    )]))
+    assert "ran no tools at all" in capsys.readouterr().out

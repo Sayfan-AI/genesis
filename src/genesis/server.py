@@ -545,6 +545,16 @@ class LocalControlPlane:
                             del self.recent_tools[:-12]
                 elif kind == "result":
                     self.last_result_subtype = event.get("subtype")
+                    # A "successful" session that used no tools did nothing, and
+                    # nothing is the failure this whole system exists to notice.
+                    # Seen for real: an unauthenticated agent profile made every
+                    # run exit in one turn for $0.00 while reporting success,
+                    # quietly consuming the event backlog as it went.
+                    if turns == 0 and event.get("subtype") == "success":
+                        log(
+                            "  WARNING: session ran no tools at all - check that the "
+                            "agent profile is authenticated"
+                        )
                     loki_push(
                         "session-outcome",
                         {
