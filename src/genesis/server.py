@@ -20,6 +20,7 @@ Configuration (environment variables):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -72,11 +73,21 @@ DEFAULT_AGENT_HOME = Path.home() / ".config" / "genesis" / "claude-home"
 # Enforced by tests/unit/test_server.py.
 SESSION_MAX_TURNS = 40
 
-# How many times a budget death may be resumed before the run is left for the next
-# event. Three sessions of 40 is 120 turns of continuous context, which is far more
-# than any single task here has needed — and the cap matters more than the number:
-# an unbounded retry loop on a paid API is a way to spend money while asleep.
-MAX_CONTINUATIONS = 2
+# Hard backstop on continuations. It is deliberately generous, because it is no
+# longer the mechanism that decides when to stop — it exists so a bug in the
+# decision logic cannot loop forever. See _should_continue for the real ladder.
+MAX_CONTINUATIONS = 6
+
+# The ceiling that actually binds. A turn count measures effort spent, not work
+# completed, which is why raising it never helped: 20 died, 40 died, 60 died, and
+# a single task was observed spending $10.09 across three sessions while making
+# real progress the whole time. Dollars are what an operator actually wants to
+# bound. Env: GENESIS_COST_CEILING.
+COST_CEILING_USD = 15.0
+
+# Budget for the judge itself. It reads evidence handed to it and answers with one
+# word, so it needs no tools and almost no turns.
+JUDGE_MAX_TURNS = 2
 
 # `Write` is required: without it the agent can edit existing files but cannot
 # create any, so any task needing a new file, test, or agent definition is
@@ -236,6 +247,41 @@ def resolve_claude_home(env: dict[str, str] | None = None) -> Path | None:
     return None
 
 
+def _cost_ceiling() -> float:
+    """Spend allowed per unit of work before continuations stop, whatever anyone
+    thinks. Env override so an operator can tighten it without editing code."""
+    raw = os.environ.get("GENESIS_COST_CEILING", "").strip()
+    try:
+        return float(raw) if raw else COST_CEILING_USD
+    except ValueError:
+        return COST_CEILING_USD
+
+
+def _git(args: list[str]) -> str:
+    """Run a read-only git command, returning "" on any failure."""
+    try:
+        out = subprocess.run(
+            ["git", *args], capture_output=True, text=True, timeout=15, check=False
+        )
+        return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def repo_fingerprint() -> str:
+    """A cheap hash of what the repo actually looks like right now.
+
+    This is the evidence the continuation decision rests on, and it is deliberately
+    not the agent's own account of what it did. Within one hour we watched a worker
+    report it had not merged a PR it had merged, and an orchestrator conclude that
+    auto-merge had closed an issue a human closed by hand. Self-reports are a
+    narrative; HEAD and the working tree are facts.
+    """
+    return hashlib.sha256(
+        "\n".join([_git(["rev-parse", "HEAD"]), _git(["status", "--porcelain"])]).encode()
+    ).hexdigest()[:16]
+
+
 def _brief(tool_input: object, limit: int = 88) -> str:
     """Render a tool's input as one short line for the progress feed.
 
@@ -282,6 +328,9 @@ class LocalControlPlane:
     last_session_id: str | None = None
     last_result_subtype: str | None = None
     last_tool_calls: int = 0
+    last_cost: float = 0.0
+    recent_tools: list[str] = field(default_factory=list)
+    pending_followup: bool = False
     all_workflows: bool = False
     shutdown: bool = False
     last_event_id: str | None = None
@@ -370,10 +419,17 @@ class LocalControlPlane:
                             continue
                         if block.get("type") == "tool_use":
                             turns += 1
-                            log(f"  {turns:>3}. {block.get('name')} {_brief(block.get('input'))}")
+                            summary = f"{block.get('name')} {_brief(block.get('input'))}"
+                            log(f"  {turns:>3}. {summary}")
+                            # Kept for the judge: what it actually did, not what it
+                            # says it did. Bounded so a long session can't grow this
+                            # without limit.
+                            self.recent_tools.append(summary)
+                            del self.recent_tools[:-12]
                 elif kind == "result":
                     self.last_result_subtype = event.get("subtype")
                     self.last_tool_calls = turns
+                    self.last_cost = float(event.get("total_cost_usd") or 0)
                     if event.get("session_id"):
                         self.last_session_id = event["session_id"]
                     cost = event.get("total_cost_usd") or 0
@@ -413,7 +469,11 @@ class LocalControlPlane:
         # continuations could quietly run for three times the configured timeout.
         deadline = time.time() + self.session_timeout
 
+        task = prompt.splitlines()[0] if prompt else "the current unit of work"
+        before = repo_fingerprint()
         rc = self._run_session(prompt, deadline)
+        spent = self.last_cost
+
         for attempt in range(1, MAX_CONTINUATIONS + 1):
             if self.shutdown or self.last_result_subtype != "error_max_turns":
                 break
@@ -421,20 +481,117 @@ class LocalControlPlane:
             if not session_id:
                 log("  hit max turns but no session id was reported — cannot resume")
                 break
-            if self.last_tool_calls == 0:
-                log("  previous attempt made no tool calls — stopping rather than looping")
-                break
             if time.time() > deadline:
                 log("  session deadline reached — not continuing")
                 break
+
+            go, why = self._should_continue(task, before, spent)
+            if not go:
+                log(f"  not continuing: {why}")
+                break
+
             log(f"  hit max turns; resuming {session_id[:8]} "
-                f"(continuation {attempt}/{MAX_CONTINUATIONS})")
+                f"(continuation {attempt}, ${spent:.2f} spent) — {why}")
+            before = repo_fingerprint()
             rc = self._run_session(None, deadline, resume=session_id)
+            spent += self.last_cost
 
         if self.last_result_subtype == "error_max_turns":
-            log(f"  still incomplete after {MAX_CONTINUATIONS} continuations — "
-                "work is in the tree and the next event will pick it up")
+            # The work is real and uncommitted, and nothing else is scheduled to
+            # touch it. Without this flag the plane would sit idle holding a
+            # half-finished task until some unrelated repo event happened along.
+            self.pending_followup = True
+            log(f"  still incomplete (${spent:.2f} spent) — will pick it up on the next tick")
         return rc
+
+    def ask_judge(self, task: str) -> tuple[bool, str]:
+        """Ask a fresh session whether a stalled run deserves another continuation.
+
+        Separate session, no shared context, and it is handed evidence rather than
+        the previous session's summary. It is framed to justify *stopping*: a judge
+        asked "may this continue?" tends to say yes, and the expensive mistake here
+        is continuing, not halting.
+
+        Fails closed. Any error, timeout, or unrecognised answer stops the chain,
+        because the failure mode of a broken judge should be an idle dev system,
+        not an open-ended spend.
+        """
+        evidence = "\n".join(
+            [
+                f"Task: {task}",
+                "",
+                "Uncommitted changes (git status --porcelain):",
+                _git(["status", "--porcelain"]) or "(none)",
+                "",
+                "Diff stat (git diff --stat):",
+                _git(["diff", "--stat"]) or "(none)",
+                "",
+                "Recent commits:",
+                _git(["log", "--oneline", "-3"]) or "(none)",
+                "",
+                "What the last session actually did, most recent last:",
+                "\n".join(f"  - {t}" for t in self.recent_tools) or "  (nothing)",
+            ]
+        )
+        prompt = (
+            "You are judging whether an autonomous coding session that ran out of "
+            "turns should be given another one. It has already been resumed at "
+            "least once.\n\n"
+            "Default to STOP. Answer CONTINUE only if the evidence shows the "
+            "session converging on a finish — edits narrowing toward a specific "
+            "goal, tests being fixed, a diff that is coherent and nearly done. "
+            "Answer STOP if it looks like it is thrashing: re-reading the same "
+            "files, re-editing the same lines, broadening scope, or producing no "
+            "durable change.\n\n"
+            f"{evidence}\n\n"
+            "Reply with exactly one word, CONTINUE or STOP, then a single short "
+            "sentence of justification on the same line."
+        )
+
+        cmd = [
+            "claude",
+            "-p",
+            prompt,
+            "--max-turns",
+            str(JUDGE_MAX_TURNS),
+            "--allowedTools",
+            "",
+        ]
+        child_env = dict(os.environ)
+        if self.claude_home is not None:
+            child_env["CLAUDE_CONFIG_DIR"] = str(self.claude_home)
+        try:
+            out = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=180, env=child_env, check=False
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            return False, f"judge unavailable ({e})"
+
+        answer = (out.stdout or "").strip()
+        head = answer.upper()[:40]
+        if head.startswith("CONTINUE"):
+            return True, answer.splitlines()[0][:160]
+        if head.startswith("STOP"):
+            return False, answer.splitlines()[0][:160]
+        return False, f"judge gave no clear verdict: {answer.splitlines()[0][:120] if answer else '(empty)'}"
+
+    def _should_continue(
+        self, task: str, before: str, spent: float
+    ) -> tuple[bool, str]:
+        """Decide whether to resume, cheapest evidence first.
+
+        A model is only consulted for the genuinely ambiguous case — work was done
+        but nothing landed — because every other rung is answerable by git or by a
+        counter, and paying for an opinion you can compute is waste.
+        """
+        ceiling = _cost_ceiling()
+        if spent >= ceiling:
+            return False, f"cost ceiling reached (${spent:.2f} >= ${ceiling:.2f})"
+        if self.last_tool_calls == 0:
+            return False, "the attempt made no tool calls"
+        if repo_fingerprint() != before:
+            return True, "work landed in the repo"
+        return self.ask_judge(task)
 
     def _run_session(
         self, prompt: str | None, deadline: float, resume: str | None = None
@@ -676,6 +833,15 @@ class LocalControlPlane:
                 if self.shutdown:
                     break
                 self.run_orchestrator(event)
+                self.save_state()
+
+            # A run that stopped mid-task left work in the tree that no future
+            # event references. Pick it up on the next tick rather than waiting
+            # for unrelated repo activity to happen along.
+            if self.pending_followup and not new_events and not self.shutdown:
+                self.pending_followup = False
+                log("Resuming unfinished work from the previous run")
+                self.run_orchestrator(None)
                 self.save_state()
 
         return self._shutdown(token_ok=True)

@@ -563,6 +563,24 @@ def test_session_env_left_alone_for_personal_profile(plane) -> None:
 # ---------- resume across budget deaths ----------
 
 
+@pytest.fixture(autouse=True)
+def _no_real_git(monkeypatch):
+    """Keep repo_fingerprint away from subprocess.
+
+    `subprocess.run` builds a Popen internally, and these tests patch Popen to
+    fake claude sessions — so a real git call would be handed a MagicMock and
+    fail deep inside subprocess. Default is a fresh value per call, i.e. "work
+    landed"; tests that care about the stalled case pin it themselves.
+    """
+    counter = {"n": 0}
+
+    def fingerprint():
+        counter["n"] += 1
+        return f"fp-{counter['n']}"
+
+    monkeypatch.setattr(server, "repo_fingerprint", fingerprint)
+
+
 def _session_stream(subtype: str, tool_calls: int = 1, sid: str = "sess-abc123def") -> list[str]:
     lines = [json.dumps({"type": "system", "subtype": "init", "session_id": sid})]
     for i in range(tool_calls):
@@ -682,3 +700,88 @@ def test_shutdown_stops_continuations(plane) -> None:
     finally:
         plane._stop_patch.stop()
     assert len(calls) == 1
+
+
+# ---------- dynamic continuation: the decision ladder ----------
+
+
+def test_landed_work_continues_without_paying_a_judge(plane, monkeypatch) -> None:
+    """Cheapest rung: git already answers "did anything happen", so don't buy an
+    opinion you can compute."""
+    called = []
+    monkeypatch.setattr(plane, "ask_judge", lambda task: called.append(task) or (False, "x"))
+    plane.last_tool_calls = 5
+    go, why = plane._should_continue("task", before="OLD", spent=1.0)
+    assert go and "landed" in why
+    assert called == [], "judge must not be consulted when progress is visible"
+
+
+def test_stalled_attempt_consults_the_judge(plane, monkeypatch) -> None:
+    monkeypatch.setattr(server, "repo_fingerprint", lambda: "SAME")
+    monkeypatch.setattr(plane, "ask_judge", lambda task: (True, "converging on a fix"))
+    plane.last_tool_calls = 9
+    go, why = plane._should_continue("task", before="SAME", spent=1.0)
+    assert go and why == "converging on a fix"
+
+
+def test_cost_ceiling_overrides_everything(plane, monkeypatch) -> None:
+    """A judge that can always grant one more round is an unbounded spend loop."""
+    monkeypatch.setenv("GENESIS_COST_CEILING", "5")
+    monkeypatch.setattr(plane, "ask_judge", lambda task: (True, "just one more"))
+    plane.last_tool_calls = 9
+    go, why = plane._should_continue("task", before="OLD", spent=5.01)
+    assert not go and "cost ceiling" in why
+
+
+def test_judge_fails_closed_on_garbage(plane, monkeypatch) -> None:
+    """A broken judge should leave an idle dev system, not an open-ended spend."""
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "maybe?", "")
+    )
+    go, why = plane.ask_judge("task")
+    assert not go and "no clear verdict" in why
+
+
+def test_judge_reads_evidence_not_self_report(plane, monkeypatch) -> None:
+    """Agent self-reports were observed wrong twice in one hour; the judge gets
+    git state and the actual tool calls instead."""
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return subprocess.CompletedProcess(cmd, 0, f"GITOUT:{cmd[1]}", "")
+        seen["prompt"] = cmd[cmd.index("-p") + 1]
+        return subprocess.CompletedProcess(cmd, 0, "STOP thrashing on the same file", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    plane.recent_tools = ["Edit plan.go", "Edit plan.go"]
+    go, why = plane.ask_judge("finish issue #127")
+    assert not go and "thrashing" in why
+    assert "GITOUT:status" in seen["prompt"] and "GITOUT:diff" in seen["prompt"]
+    assert "Edit plan.go" in seen["prompt"]
+    assert "Default to STOP" in seen["prompt"]
+
+
+def test_judge_gets_no_tools(plane, monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "claude":
+            captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, "STOP done", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    plane.ask_judge("task")
+    assert captured["cmd"][captured["cmd"].index("--allowedTools") + 1] == ""
+
+
+def test_unfinished_work_schedules_a_followup(plane) -> None:
+    """Work left in the tree is referenced by no future event, so without this
+    the plane idles holding a half-finished task."""
+    calls = _fake_sessions(plane, [_session_stream("error_max_turns") for _ in range(9)])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert plane.pending_followup is True
+    assert len(calls) == 1 + server.MAX_CONTINUATIONS
