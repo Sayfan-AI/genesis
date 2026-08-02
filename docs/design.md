@@ -156,6 +156,16 @@ The one manual step: Claude Code scopes its keychain credential to the config-di
 
 The session budget is `SESSION_MAX_TURNS` in `server.py`, held at or above `ORCHESTRATOR_TURN_FLOOR` by `tests/unit/test_server.py` — local mode is the same agent doing the same work, so it gets the same floor.
 
+**Continuation across budget deaths.** A session that ends `error_max_turns` ran out of turns mid-thought, not out of task: its reasoning is in a transcript on disk and its work is uncommitted in the tree. Local mode resumes it with `claude --resume <session_id>` and a fresh budget rather than starting over, so the next attempt finishes the work instead of re-deriving the intent behind half-written code. This is the batches-of-N shape rather than one ever-larger ceiling — raising the cap only moved the wall (20 died, then 40, then 60).
+
+Bounded three ways, because an unbounded retry loop against a paid API is a way to spend money while asleep:
+
+- `MAX_CONTINUATIONS` (2) caps the chain at three sessions.
+- One deadline covers the whole chain, so continuations can't multiply `GENESIS_SESSION_TIMEOUT`.
+- A continuation is skipped when the previous attempt made **zero tool calls** — nothing happened, so another round buys another nothing.
+
+Shutdown stops the chain immediately, and a death with no reported session id is not resumed. The progress reader is joined before the decision is made: the process exiting does not mean its output has been parsed, and reading the result too early makes a budget death look like a clean finish.
+
 **When to use local mode:**
 - Sessions that need to exceed GHA's 6-hour limit
 - Work that requires access to local services, databases, or hardware

@@ -558,3 +558,127 @@ def test_session_env_left_alone_for_personal_profile(plane) -> None:
     with patch("subprocess.Popen", return_value=fake_proc) as popen:
         plane.run_orchestrator(None)
     assert "CLAUDE_CONFIG_DIR" not in popen.call_args[1]["env"]
+
+
+# ---------- resume across budget deaths ----------
+
+
+def _session_stream(subtype: str, tool_calls: int = 1, sid: str = "sess-abc123def") -> list[str]:
+    lines = [json.dumps({"type": "system", "subtype": "init", "session_id": sid})]
+    for i in range(tool_calls):
+        lines.append(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "session_id": sid,
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "name": "Bash", "input": {"command": f"step {i}"}}
+                        ]
+                    },
+                }
+            )
+        )
+    lines.append(
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": subtype,
+                "session_id": sid,
+                "num_turns": tool_calls,
+                "total_cost_usd": 1.0,
+                "duration_ms": 1000,
+            }
+        )
+    )
+    return lines
+
+
+def _fake_sessions(plane, streams: list[list[str]]) -> list[list[str]]:
+    """Patch Popen so each launch replays the next canned stream. Returns the
+    list of argv the plane used, so tests can assert on --resume."""
+    calls: list[list[str]] = []
+    it = iter(streams)
+
+    def fake_popen(cmd, **kwargs):
+        calls.append(cmd)
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.wait.return_value = 0
+        proc.stdout = iter(next(it))
+        return proc
+
+    patcher = patch("subprocess.Popen", side_effect=fake_popen)
+    patcher.start()
+    plane._stop_patch = patcher  # noqa: SLF001 - test bookkeeping
+    return calls
+
+
+def test_max_turns_death_resumes_the_same_session(plane) -> None:
+    """The transcript and the half-finished work are both on disk; starting over
+    discards the reasoning and makes the next session re-derive intent."""
+    calls = _fake_sessions(plane, [_session_stream("error_max_turns"), _session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    assert len(calls) == 2, "should have continued after the budget death"
+    assert "--resume" not in calls[0]
+    assert calls[1][calls[1].index("--resume") + 1] == "sess-abc123def"
+    # A resumed session must not be re-fed the original prompt, or it restarts
+    # the task instead of finishing it.
+    assert "ran out of turns, not out of task" in calls[1][calls[1].index("--resume") + 2]
+
+
+def test_success_does_not_resume(plane) -> None:
+    calls = _fake_sessions(plane, [_session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1
+
+
+def test_continuations_are_capped(plane) -> None:
+    """An unbounded retry loop on a paid API spends money while you sleep."""
+    streams = [_session_stream("error_max_turns") for _ in range(server.MAX_CONTINUATIONS + 3)]
+    calls = _fake_sessions(plane, streams)
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1 + server.MAX_CONTINUATIONS
+
+
+def test_no_resume_when_attempt_did_nothing(plane) -> None:
+    """Zero tool calls means the session isn't making progress — resuming it
+    just buys another round of nothing."""
+    calls = _fake_sessions(
+        plane, [_session_stream("error_max_turns", tool_calls=0), _session_stream("success")]
+    )
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1
+
+
+def test_no_resume_without_a_session_id(plane) -> None:
+    stream = [json.dumps({"type": "result", "subtype": "error_max_turns", "num_turns": 3})]
+    calls = _fake_sessions(plane, [stream, _session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1
+
+
+def test_shutdown_stops_continuations(plane) -> None:
+    calls = _fake_sessions(plane, [_session_stream("error_max_turns"), _session_stream("success")])
+    plane.shutdown = True
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1

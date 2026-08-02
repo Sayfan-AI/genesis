@@ -72,6 +72,12 @@ DEFAULT_AGENT_HOME = Path.home() / ".config" / "genesis" / "claude-home"
 # Enforced by tests/unit/test_server.py.
 SESSION_MAX_TURNS = 40
 
+# How many times a budget death may be resumed before the run is left for the next
+# event. Three sessions of 40 is 120 turns of continuous context, which is far more
+# than any single task here has needed — and the cap matters more than the number:
+# an unbounded retry loop on a paid API is a way to spend money while asleep.
+MAX_CONTINUATIONS = 2
+
 # `Write` is required: without it the agent can edit existing files but cannot
 # create any, so any task needing a new file, test, or agent definition is
 # impossible to satisfy.
@@ -272,6 +278,10 @@ class LocalControlPlane:
     session_timeout: int = 3600
     agent: str = DEFAULT_AGENT
     claude_home: Path | None = None
+    # Written by the progress reader, read by the continuation loop after wait().
+    last_session_id: str | None = None
+    last_result_subtype: str | None = None
+    last_tool_calls: int = 0
     all_workflows: bool = False
     shutdown: bool = False
     last_event_id: str | None = None
@@ -339,7 +349,7 @@ class LocalControlPlane:
         """
         try:
             turns = 0
-            for raw in stream:
+            for raw in stream:  # noqa: PLR1702
                 line = (raw or "").strip()
                 if not line:
                     continue
@@ -348,6 +358,11 @@ class LocalControlPlane:
                 except ValueError:
                     continue
                 kind = event.get("type")
+                # Every event carries the session id; the init event is simply the
+                # first. Capturing it is what makes --resume possible at all.
+                session_id = event.get("session_id")
+                if session_id and not self.last_session_id:
+                    self.last_session_id = session_id
                 if kind == "assistant":
                     content = (event.get("message") or {}).get("content") or []
                     for block in content:
@@ -357,6 +372,10 @@ class LocalControlPlane:
                             turns += 1
                             log(f"  {turns:>3}. {block.get('name')} {_brief(block.get('input'))}")
                 elif kind == "result":
+                    self.last_result_subtype = event.get("subtype")
+                    self.last_tool_calls = turns
+                    if event.get("session_id"):
+                        self.last_session_id = event["session_id"]
                     cost = event.get("total_cost_usd") or 0
                     secs = round((event.get("duration_ms") or 0) / 1000)
                     log(
@@ -367,6 +386,20 @@ class LocalControlPlane:
             return
 
     def run_orchestrator(self, event: dict | None) -> int:
+        """Run one unit of work, continuing across budget deaths.
+
+        A session that dies at `error_max_turns` has not failed at the task — it
+        ran out of turns mid-thought, leaving its reasoning in a transcript on
+        disk and its work uncommitted in the tree. Starting over throws away the
+        first, and forces the next session to re-derive intent from the second.
+        `claude --resume` carries both forward with a fresh budget, which is the
+        "batches of N turns" shape rather than one ever-larger ceiling: raising
+        the cap moved the wall (20 died, 40 died, 60 died), it never removed it.
+
+        Bounded three ways, because an unbounded retry loop is a way to spend
+        money in your sleep: a hard continuation cap, an overall deadline shared
+        by every attempt, and a stop as soon as an attempt does nothing at all.
+        """
         prompt = _build_prompt(event, self.agent)
         if event is None:
             log("Launching orchestrator (initial run)")
@@ -376,10 +409,53 @@ class LocalControlPlane:
             event_id = event.get("id", "?")
             log(f"Launching orchestrator for {event_type}/{action} (id={event_id})")
 
-        cmd = [
-            "claude",
-            "-p",
-            prompt,
+        # One deadline for the whole chain, not per attempt — otherwise three
+        # continuations could quietly run for three times the configured timeout.
+        deadline = time.time() + self.session_timeout
+
+        rc = self._run_session(prompt, deadline)
+        for attempt in range(1, MAX_CONTINUATIONS + 1):
+            if self.shutdown or self.last_result_subtype != "error_max_turns":
+                break
+            session_id = self.last_session_id
+            if not session_id:
+                log("  hit max turns but no session id was reported — cannot resume")
+                break
+            if self.last_tool_calls == 0:
+                log("  previous attempt made no tool calls — stopping rather than looping")
+                break
+            if time.time() > deadline:
+                log("  session deadline reached — not continuing")
+                break
+            log(f"  hit max turns; resuming {session_id[:8]} "
+                f"(continuation {attempt}/{MAX_CONTINUATIONS})")
+            rc = self._run_session(None, deadline, resume=session_id)
+
+        if self.last_result_subtype == "error_max_turns":
+            log(f"  still incomplete after {MAX_CONTINUATIONS} continuations — "
+                "work is in the tree and the next event will pick it up")
+        return rc
+
+    def _run_session(
+        self, prompt: str | None, deadline: float, resume: str | None = None
+    ) -> int:
+        """Launch one `claude -p` session and wait for it, streaming progress."""
+        self.last_result_subtype = None
+        self.last_tool_calls = 0
+
+        cmd = ["claude", "-p"]
+        if resume:
+            cmd += [
+                "--resume",
+                resume,
+                # A resumed session already holds the task, the plan, and what it
+                # has done. Restating the original prompt would invite it to start
+                # the work over rather than finish it.
+                "Continue the work you were doing. You ran out of turns, not out of task.",
+            ]
+        else:
+            cmd.append(prompt or "")
+        cmd += [
             "--max-turns",
             str(SESSION_MAX_TURNS),
             "--allowedTools",
@@ -416,7 +492,6 @@ class LocalControlPlane:
         )
         reader.start()
 
-        deadline = time.time() + self.session_timeout
         try:
             while True:
                 try:
@@ -427,10 +502,16 @@ class LocalControlPlane:
                         self._kill_orch()
                         return -2
                     if time.time() > deadline:
-                        log(f"Session timeout ({self.session_timeout}s) — terminating orchestrator")
+                        log(f"Session timeout ({self.session_timeout}s total) — terminating orchestrator")
                         self._kill_orch()
                         return -1
         finally:
+            # The process exiting does not mean its output has been parsed. Without
+            # this join the continuation loop can read last_result_subtype before
+            # the reader has seen the terminal `result` event, and a budget death
+            # looks like a clean finish. Bounded so a wedged reader can't hang the
+            # plane — the progress feed is never allowed to block the run.
+            reader.join(timeout=10)
             self.orch_proc = None
 
     # ----- main loop -----
