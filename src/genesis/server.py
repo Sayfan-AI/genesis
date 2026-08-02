@@ -51,6 +51,20 @@ RELEVANT_EVENT_TYPES = frozenset(
 
 DEFAULT_AGENT = ".claude/agents/orchestrator.md"
 
+# Where the agent's own Claude Code profile lives. A local session otherwise
+# inherits the operator's ~/.claude/CLAUDE.md, which is written as guidance for a
+# human's assistant, not as policy for an autonomous system — and the agent obeys
+# it. Observed on MaKlaude: a personal convention to qualify GitHub references
+# ("issue #117") produced `Closes issue #117` in a PR body, which GitHub does not
+# parse, so a merged PR silently left its task issue open. Rules like "never merge
+# PRs" or "always commit with the gcm alias" land in the same lap.
+#
+# An isolated profile still loads the repo's own CLAUDE.md and .claude/settings.json
+# (hooks included), so project memory and activity logging are unaffected. It only
+# drops the operator's personal layer, which also makes a local run behave the same
+# as the GitHub Actions run, where no such file exists.
+DEFAULT_AGENT_HOME = Path.home() / ".config" / "genesis" / "claude-home"
+
 # Local mode runs the same agent as the GHA workflows and must respect the same
 # turn-budget floor (see ORCHESTRATOR_TURN_FLOOR in scaffold.py). This was 20 —
 # below the floor — because the floor guard only inspected workflow templates,
@@ -173,6 +187,49 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text)
 
 
+def resolve_claude_home(env: dict[str, str] | None = None) -> Path | None:
+    """Decide which Claude Code profile agent sessions should use.
+
+    Returns the config dir to isolate into, or None to inherit the operator's
+    personal profile.
+
+    The profile is opt-out, not opt-in: isolation is the right default for an
+    autonomous agent, and an operator who wants their own settings and memory in
+    the loop says so explicitly with GENESIS_CLAUDE_PROFILE=personal.
+
+    One step cannot be automated. Claude Code scopes its keychain credential to
+    the config-dir path, so a fresh profile is unauthenticated until someone runs
+    `claude` in it once and logs in — verified by elimination: symlinking the
+    credentials file, copying the account record, and even symlinking all 36
+    entries of the real profile all still report "Not logged in". So when the
+    profile isn't set up yet we print the one command needed and fall back to the
+    personal profile rather than refusing to run. A missing profile should cost a
+    warning, not a stalled dev system.
+    """
+    env = os.environ if env is None else env
+
+    if env.get("GENESIS_CLAUDE_PROFILE", "").strip().lower() == "personal":
+        return None
+
+    home = Path(env.get("GENESIS_CLAUDE_HOME") or DEFAULT_AGENT_HOME).expanduser()
+
+    # `.claude.json` is written when a profile is first authenticated, so its
+    # presence is the cheap "has anyone logged in here" check. Probing for real
+    # would cost a model call on every session.
+    if (home / ".claude.json").is_file():
+        return home
+
+    log(f"Agent Claude profile not set up at {home} — using your personal profile for now.")
+    log("  One-time setup, so agent sessions stop inheriting your ~/.claude/CLAUDE.md:")
+    log(f"    CLAUDE_CONFIG_DIR={home} claude   # then /login, then exit")
+    log("  Silence this by choosing the personal profile: GENESIS_CLAUDE_PROFILE=personal")
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        log(f"  (could not create {home}: {e})")
+    return None
+
+
 def _brief(tool_input: object, limit: int = 88) -> str:
     """Render a tool's input as one short line for the progress feed.
 
@@ -214,6 +271,7 @@ class LocalControlPlane:
     poll_interval: int = 60
     session_timeout: int = 3600
     agent: str = DEFAULT_AGENT
+    claude_home: Path | None = None
     all_workflows: bool = False
     shutdown: bool = False
     last_event_id: str | None = None
@@ -334,6 +392,10 @@ class LocalControlPlane:
             "stream-json",
             "--verbose",
         ]
+        child_env = dict(os.environ)
+        if self.claude_home is not None:
+            child_env["CLAUDE_CONFIG_DIR"] = str(self.claude_home)
+
         try:
             self.orch_proc = subprocess.Popen(
                 cmd,
@@ -341,6 +403,7 @@ class LocalControlPlane:
                 stdout=subprocess.PIPE,
                 text=True,
                 bufsize=1,
+                env=child_env,
             )
         except FileNotFoundError:
             log("Error: 'claude' command not found. Install Claude Code and ensure it's on PATH.")
@@ -570,6 +633,7 @@ def serve() -> int:
     session_timeout = int(os.environ.get("GENESIS_SESSION_TIMEOUT", "3600"))
     agent = os.environ.get("GENESIS_AGENT", DEFAULT_AGENT)
     all_workflows = os.environ.get("GENESIS_ALL_WORKFLOWS") == "1"
+    claude_home = resolve_claude_home()
 
     # Fail before disabling any workflows: a missing agent definition means every
     # session would ask Claude to run a file that isn't there.
@@ -590,6 +654,7 @@ def serve() -> int:
         poll_interval=poll_interval,
         session_timeout=session_timeout,
         agent=agent,
+        claude_home=claude_home,
         all_workflows=all_workflows,
     )
 

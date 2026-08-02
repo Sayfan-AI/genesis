@@ -145,6 +145,14 @@ The local control plane is the `genesis serve` subcommand of the genesis CLI. Th
 - `GENESIS_REPO` — owner/repo (default: detected from git remote)
 - `GENESIS_AGENT` — agent definition to run (default: `.claude/agents/orchestrator.md`). Repos with no orchestrator — genesis itself — point this at the agent they do have. `serve` refuses to start if the file is missing, before disabling anything.
 - `GENESIS_ALL_WORKFLOWS` — set to `1` to disable every workflow instead of only `genesis-*`
+- `GENESIS_CLAUDE_HOME` — config dir for the agent's own Claude Code profile (default: `~/.config/genesis/claude-home`)
+- `GENESIS_CLAUDE_PROFILE=personal` — opt out of isolation and run sessions under the operator's own profile
+
+**Why sessions get their own Claude profile.** A local session otherwise inherits the operator's `~/.claude/CLAUDE.md`, which is written as guidance for a human's assistant and is then read as policy by an autonomous system. This is not theoretical: on MaKlaude, a personal convention to qualify GitHub references produced `Closes issue #117` in a PR body, GitHub's parser only links `<keyword> #<number>`, and a merged PR silently left its task issue open. Rules like "never merge PRs" or "always commit through the `gcm` alias" land in the same lap, and the agent resolves the contradiction unpredictably. Isolation also makes a local run behave like the Actions run, where no such file exists.
+
+The isolated profile still loads the repo's `CLAUDE.md` and `.claude/settings.json`, so project memory and the activity-logging hooks are unaffected. Only the operator's personal layer is dropped.
+
+The one manual step: Claude Code scopes its keychain credential to the config-dir path, so a new profile needs `CLAUDE_CONFIG_DIR=<dir> claude` once to log in. Symlinking the credentials file, copying the account record, and symlinking the entire real profile were all tried and all still report "Not logged in". Until that login happens, `serve` prints the exact command and falls back to the personal profile — a missing profile costs a warning, not a stalled dev system.
 
 The session budget is `SESSION_MAX_TURNS` in `server.py`, held at or above `ORCHESTRATOR_TURN_FLOOR` by `tests/unit/test_server.py` — local mode is the same agent doing the same work, so it gets the same floor.
 
