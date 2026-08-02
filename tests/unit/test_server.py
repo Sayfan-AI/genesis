@@ -854,3 +854,42 @@ def test_a_session_that_ran_no_tools_is_called_out(plane, capsys) -> None:
         {"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0, "duration_ms": 1000}
     )]))
     assert "ran no tools at all" in capsys.readouterr().out
+
+
+def test_a_session_that_changed_the_repo_queues_another_pass(plane, monkeypatch) -> None:
+    """The loop's own output cannot wake it: the agent is the App, so closing an
+    issue emits a bot event and the feedback-loop filter drops it. Observed on
+    MaKlaude - a task closed at 06:31 and nothing moved until a human commented
+    16 minutes later, otherwise it would have idled until the six-hour cron."""
+    fingerprints = iter(["before", "after", "after", "after"])
+    monkeypatch.setattr(server, "repo_fingerprint", lambda: next(fingerprints, "after"))
+    calls = _fake_sessions(plane, [_session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert plane.pending_followup is True
+    assert plane.followup_chain == 1
+
+
+def test_a_session_that_changed_nothing_does_not_queue_a_pass(plane, monkeypatch) -> None:
+    monkeypatch.setattr(server, "repo_fingerprint", lambda: "same")
+    calls = _fake_sessions(plane, [_session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert plane.pending_followup is False
+
+
+def test_the_followup_chain_is_bounded(plane, monkeypatch) -> None:
+    """"Work begets work" must not become a spin."""
+    counter = iter(range(100))
+    monkeypatch.setattr(server, "repo_fingerprint", lambda: f"fp-{next(counter)}")
+    plane.followup_chain = server.MAX_FOLLOWUP_CHAIN
+    calls = _fake_sessions(plane, [_session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert plane.pending_followup is False, "chain budget exhausted, wait for a real trigger"

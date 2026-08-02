@@ -75,6 +75,11 @@ MAX_CONTINUATIONS = 6
 # bound. Env: GENESIS_COST_CEILING.
 COST_CEILING_USD = 15.0
 
+# How many times a session may chain straight into another because it changed the
+# repo. Bounded so "work begets work" cannot become a spin: after this many, the
+# loop waits for a real trigger again.
+MAX_FOLLOWUP_CHAIN = 3
+
 # Budget for the judge itself. It reads evidence handed to it and answers with one
 # word, so it needs no tools and almost no turns.
 JUDGE_MAX_TURNS = 2
@@ -371,6 +376,7 @@ class LocalControlPlane:
     recent_tools: list[str] = field(default_factory=list)
     pending_followup: bool = False
     continuation_index: int = 0
+    followup_chain: int = 0
     identity_logged: bool = False
     all_workflows: bool = False
     shutdown: bool = False
@@ -572,6 +578,22 @@ class LocalControlPlane:
             self.continuation_index = attempt
             rc = self._run_session(None, deadline, resume=session_id)
             spent += self.last_cost
+
+        # The loop's own output does not wake it: the agent authenticates as the
+        # App, so closing an issue or merging a pull request emits a *bot* event,
+        # which the feedback-loop filter drops. Observed: T1 closed at 06:31 and
+        # nothing happened until a human commented 16 minutes later - otherwise it
+        # would have idled until the six-hour cron. CI does not have this problem
+        # because genesis-merge.yml ends by dispatching the orchestrator; this is
+        # that dispatch.
+        if (
+            not self.shutdown
+            and repo_fingerprint() != before
+            and self.followup_chain < MAX_FOLLOWUP_CHAIN
+        ):
+            self.followup_chain += 1
+            self.pending_followup = True
+            log(f"  work landed; queueing a follow-up pass ({self.followup_chain}/{MAX_FOLLOWUP_CHAIN})")
 
         if _died_mid_task(self.last_result_subtype):
             # The work is real and uncommitted, and nothing else is scheduled to
@@ -1003,6 +1025,7 @@ class LocalControlPlane:
             for event in new_events:
                 if self.shutdown:
                     break
+                self.followup_chain = 0
                 self.run_orchestrator(event)
                 self.save_state()
 
