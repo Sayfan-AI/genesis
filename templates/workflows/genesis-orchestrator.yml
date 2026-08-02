@@ -45,7 +45,7 @@ jobs:
             }
           prompt: |
             Run the orchestrator agent defined in .claude/agents/orchestrator.md.
-            This is a scheduled run — assess project state and advance work.
+            This is a scheduled run - assess project state and advance work.
           # Orchestrator class — see the turn-budget floor in CLAUDE.md. Open-ended
           # work, and dispatched subagents spend from this same budget.
           # Enforced at >= 30 by tests/e2e/test_workflows.py.

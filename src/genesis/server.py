@@ -550,10 +550,10 @@ class LocalControlPlane:
                 break
             session_id = self.last_session_id
             if not session_id:
-                log("  hit max turns but no session id was reported — cannot resume")
+                log("  hit max turns but no session id was reported - cannot resume")
                 break
             if time.time() > deadline:
-                log("  session deadline reached — not continuing")
+                log("  session deadline reached - not continuing")
                 break
 
             go, why = self._should_continue(task, before, spent)
@@ -573,7 +573,7 @@ class LocalControlPlane:
                 break
 
             log(f"  hit max turns; resuming {session_id[:8]} "
-                f"(continuation {attempt}, ${spent:.2f} spent) — {why}")
+                f"(continuation {attempt}, ${spent:.2f} spent) - {why}")
             before = repo_fingerprint()
             self.continuation_index = attempt
             rc = self._run_session(None, deadline, resume=session_id)
@@ -600,7 +600,7 @@ class LocalControlPlane:
             # touch it. Without this flag the plane would sit idle holding a
             # half-finished task until some unrelated repo event happened along.
             self.pending_followup = True
-            log(f"  still incomplete (${spent:.2f} spent) — will pick it up on the next tick")
+            log(f"  still incomplete (${spent:.2f} spent) - will pick it up on the next tick")
         return rc
 
     def run_due_triggers(self, token: str) -> None:
@@ -835,11 +835,11 @@ class LocalControlPlane:
                     return self.orch_proc.wait(timeout=1)
                 except subprocess.TimeoutExpired:
                     if self.shutdown:
-                        log("Shutdown requested — terminating orchestrator")
+                        log("Shutdown requested - terminating orchestrator")
                         self._kill_orch()
                         return -2
                     if time.time() > deadline:
-                        log(f"Session timeout ({self.session_timeout}s total) — terminating orchestrator")
+                        log(f"Session timeout ({self.session_timeout}s total) - terminating orchestrator")
                         self._kill_orch()
                         return -1
         finally:
@@ -942,7 +942,7 @@ class LocalControlPlane:
                 # duplicate run this whole mechanism exists to prevent.
                 log(
                     f"Found {DISABLED_LIST_PATH} from a prior session; tracked "
-                    "workflows are still disabled — keeping them off"
+                    "workflows are still disabled - keeping them off"
                 )
             else:
                 log(
@@ -1041,7 +1041,7 @@ class LocalControlPlane:
         return self._shutdown(token_ok=True)
 
     def _shutdown(self, token_ok: bool) -> int:
-        log("Shutting down — re-enabling GitHub Actions workflows")
+        log("Shutting down - re-enabling GitHub Actions workflows")
         self._reenable_workflows_safe()
         self.release_lock()
         log("Goodbye.")
@@ -1056,7 +1056,7 @@ class LocalControlPlane:
 
 def _make_signal_handler(plane: LocalControlPlane):
     def handler(signum, frame):
-        log(f"Received signal {signum} — initiating graceful shutdown")
+        log(f"Received signal {signum} - initiating graceful shutdown")
         plane.shutdown = True
         # If orchestrator is running, kill it; the main loop will exit when wait() returns.
         if plane.orch_proc is not None:

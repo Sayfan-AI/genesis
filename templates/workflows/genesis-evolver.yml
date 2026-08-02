@@ -45,7 +45,7 @@ jobs:
             }
           prompt: |
             Run the evolver agent defined in .claude/agents/evolver.md.
-            This is a scheduled review cycle — review recent system behavior and apply improvements.
+            This is a scheduled review cycle - review recent system behavior and apply improvements.
           # Orchestrator class — see the turn-budget floor in CLAUDE.md. A review
           # cycle is broad, multi-file work (collect signals, change agents and
           # workflows, update tests, commit), which is exactly the shape that dies
