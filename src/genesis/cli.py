@@ -49,23 +49,6 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     serve_parser.add_argument(
-        "--personal-profile",
-        action="store_true",
-        help=(
-            "Run agent sessions under your own Claude Code profile instead of the "
-            "isolated agent one (env: GENESIS_CLAUDE_PROFILE=personal). By default "
-            "sessions use a separate profile so they don't inherit your personal "
-            "~/.claude/CLAUDE.md as if it were agent policy."
-        ),
-    )
-    serve_parser.add_argument(
-        "--claude-home",
-        help=(
-            "Config dir for the agent's Claude Code profile "
-            "(default: ~/.config/genesis/claude-home, env: GENESIS_CLAUDE_HOME)"
-        ),
-    )
-    serve_parser.add_argument(
         "--all-workflows",
         action="store_true",
         help=(
@@ -109,10 +92,6 @@ def main(argv: list[str] | None = None) -> int:
             os.environ["GENESIS_AGENT"] = args.agent
         if args.all_workflows:
             os.environ["GENESIS_ALL_WORKFLOWS"] = "1"
-        if args.personal_profile:
-            os.environ["GENESIS_CLAUDE_PROFILE"] = "personal"
-        if args.claude_home:
-            os.environ["GENESIS_CLAUDE_HOME"] = args.claude_home
         return serve()
 
     if args.command == "workflows":

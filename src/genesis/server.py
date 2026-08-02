@@ -55,19 +55,6 @@ RELEVANT_EVENT_TYPES = frozenset(
 
 DEFAULT_AGENT = ".claude/agents/orchestrator.md"
 
-# Where the agent's own Claude Code profile lives. A local session otherwise
-# inherits the operator's ~/.claude/CLAUDE.md, which is written as guidance for a
-# human's assistant, not as policy for an autonomous system — and the agent obeys
-# it. Observed on MaKlaude: a personal convention to qualify GitHub references
-# ("issue #117") produced `Closes issue #117` in a PR body, which GitHub does not
-# parse, so a merged PR silently left its task issue open. Rules like "never merge
-# PRs" or "always commit with the gcm alias" land in the same lap.
-#
-# An isolated profile still loads the repo's own CLAUDE.md and .claude/settings.json
-# (hooks included), so project memory and activity logging are unaffected. It only
-# drops the operator's personal layer, which also makes a local run behave the same
-# as the GitHub Actions run, where no such file exists.
-DEFAULT_AGENT_HOME = Path.home() / ".config" / "genesis" / "claude-home"
 
 # Local mode runs the same agent as the GHA workflows and must respect the same
 # turn-budget floor (see ORCHESTRATOR_TURN_FLOOR in scaffold.py). This was 20 —
@@ -206,68 +193,6 @@ def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
 
-
-def _profile_is_authenticated(home: Path) -> bool:
-    """Whether a Claude profile can actually run a session.
-
-    Checking that `.claude.json` merely *exists* is not enough, and getting this
-    wrong is expensive in a way that hides itself. The file is written the first
-    time `claude` launches in a config dir, before any login - so an operator who
-    started the login and backed out leaves a profile that looks configured and
-    authenticates against nothing. Every session then exits instantly with "Not
-    logged in", reporting `success` with one turn and $0.00, and the dev system
-    becomes a loop that does nothing while looking healthy.
-
-    `oauthAccount` is written only once a login completes, so it is the field that
-    answers the question actually being asked.
-    """
-    try:
-        data = json.loads((home / ".claude.json").read_text())
-    except (OSError, ValueError):
-        return False
-    return isinstance(data, dict) and bool(data.get("oauthAccount"))
-
-
-def resolve_claude_home(env: dict[str, str] | None = None) -> Path | None:
-    """Decide which Claude Code profile agent sessions should use.
-
-    Returns the config dir to isolate into, or None to inherit the operator's
-    personal profile.
-
-    The profile is opt-out, not opt-in: isolation is the right default for an
-    autonomous agent, and an operator who wants their own settings and memory in
-    the loop says so explicitly with GENESIS_CLAUDE_PROFILE=personal.
-
-    One step cannot be automated. Claude Code scopes its keychain credential to
-    the config-dir path, so a fresh profile is unauthenticated until someone runs
-    `claude` in it once and logs in — verified by elimination: symlinking the
-    credentials file, copying the account record, and even symlinking all 36
-    entries of the real profile all still report "Not logged in". So when the
-    profile isn't set up yet we print the one command needed and fall back to the
-    personal profile rather than refusing to run. A missing profile should cost a
-    warning, not a stalled dev system.
-    """
-    env = os.environ if env is None else env
-
-    if env.get("GENESIS_CLAUDE_PROFILE", "").strip().lower() == "personal":
-        return None
-
-    home = Path(env.get("GENESIS_CLAUDE_HOME") or DEFAULT_AGENT_HOME).expanduser()
-
-    if _profile_is_authenticated(home):
-        return home
-
-    started = (home / ".claude.json").is_file()
-    detail = "started but never logged in" if started else "not set up"
-    log(f"Agent Claude profile {detail} at {home} — using your personal profile for now.")
-    log("  One-time setup, so agent sessions stop inheriting your ~/.claude/CLAUDE.md:")
-    log(f"    CLAUDE_CONFIG_DIR={home} claude   # then /login, then exit")
-    log("  Silence this by choosing the personal profile: GENESIS_CLAUDE_PROFILE=personal")
-    try:
-        home.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        log(f"  (could not create {home}: {e})")
-    return None
 
 
 def _project_name() -> str:
@@ -438,7 +363,6 @@ class LocalControlPlane:
     poll_interval: int = 60
     session_timeout: int = 3600
     agent: str = DEFAULT_AGENT
-    claude_home: Path | None = None
     # Written by the progress reader, read by the continuation loop after wait().
     last_session_id: str | None = None
     last_result_subtype: str | None = None
@@ -718,8 +642,6 @@ class LocalControlPlane:
         judging still ran as the operator.
         """
         env = dict(os.environ)
-        if self.claude_home is not None:
-            env["CLAUDE_CONFIG_DIR"] = str(self.claude_home)
 
         # Act as the GitHub App, like the Actions path does, so the agent is a
         # distinguishable identity rather than a second copy of the operator.
@@ -1129,7 +1051,6 @@ def serve() -> int:
     session_timeout = int(os.environ.get("GENESIS_SESSION_TIMEOUT", "3600"))
     agent = os.environ.get("GENESIS_AGENT", DEFAULT_AGENT)
     all_workflows = os.environ.get("GENESIS_ALL_WORKFLOWS") == "1"
-    claude_home = resolve_claude_home()
 
     # Fail before disabling any workflows: a missing agent definition means every
     # session would ask Claude to run a file that isn't there.
@@ -1150,7 +1071,6 @@ def serve() -> int:
         poll_interval=poll_interval,
         session_timeout=session_timeout,
         agent=agent,
-        claude_home=claude_home,
         all_workflows=all_workflows,
     )
 

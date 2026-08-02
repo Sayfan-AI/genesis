@@ -509,57 +509,6 @@ def test_run_orchestrator_requests_streaming_output(plane) -> None:
     assert popen.call_args[1]["stdout"] is subprocess.PIPE
 
 
-# ---------- agent Claude profile isolation ----------
-
-
-def test_resolve_claude_home_uses_agent_profile_when_set_up(tmp_path) -> None:
-    home = tmp_path / "claude-home"
-    home.mkdir()
-    (home / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "u"}}))
-    assert server.resolve_claude_home({"GENESIS_CLAUDE_HOME": str(home)}) == home
-
-
-def test_resolve_claude_home_falls_back_when_profile_not_logged_in(tmp_path, capsys) -> None:
-    """A profile nobody has logged into yet must warn, not block the dev system."""
-    home = tmp_path / "claude-home"
-    assert server.resolve_claude_home({"GENESIS_CLAUDE_HOME": str(home)}) is None
-    out = capsys.readouterr().out
-    assert "CLAUDE_CONFIG_DIR" in out and "/login" in out
-    assert home.is_dir()  # created, ready for the one-time login
-
-
-def test_resolve_claude_home_honours_personal_opt_in(tmp_path) -> None:
-    home = tmp_path / "claude-home"
-    home.mkdir()
-    (home / ".claude.json").write_text("{}")
-    env = {"GENESIS_CLAUDE_HOME": str(home), "GENESIS_CLAUDE_PROFILE": "personal"}
-    assert server.resolve_claude_home(env) is None
-
-
-def test_session_env_isolates_the_profile(plane, tmp_path) -> None:
-    """The child must be told which profile to use, or it silently reads the
-    operator's ~/.claude/CLAUDE.md and treats personal preferences as policy."""
-    plane.claude_home = tmp_path / "claude-home"
-    fake_proc = MagicMock()
-    fake_proc.wait.return_value = 0
-    fake_proc.pid = 12345
-    fake_proc.stdout = iter([])
-    with patch("subprocess.Popen", return_value=fake_proc) as popen:
-        plane.run_orchestrator(None)
-    assert popen.call_args[1]["env"]["CLAUDE_CONFIG_DIR"] == str(tmp_path / "claude-home")
-
-
-def test_session_env_left_alone_for_personal_profile(plane) -> None:
-    plane.claude_home = None
-    fake_proc = MagicMock()
-    fake_proc.wait.return_value = 0
-    fake_proc.pid = 12345
-    fake_proc.stdout = iter([])
-    with patch("subprocess.Popen", return_value=fake_proc) as popen:
-        plane.run_orchestrator(None)
-    assert "CLAUDE_CONFIG_DIR" not in popen.call_args[1]["env"]
-
-
 # ---------- resume across budget deaths ----------
 
 
@@ -895,27 +844,6 @@ def test_trigger_restores_the_planes_default_agent(plane, monkeypatch) -> None:
     original = plane.agent
     plane.run_due_triggers("tok")
     assert plane.agent == original
-
-
-def test_an_unfinished_login_is_not_a_usable_profile(tmp_path, capsys) -> None:
-    """`.claude.json` is written the first time claude launches, before any login.
-    Treating its existence as "set up" made every session exit instantly with
-    "Not logged in" while reporting success with one turn and $0.00 - a loop that
-    does nothing and looks healthy."""
-    home = tmp_path / "claude-home"
-    home.mkdir()
-    (home / ".claude.json").write_text(json.dumps({"userID": "abc"}))  # launched, never logged in
-    assert server.resolve_claude_home({"GENESIS_CLAUDE_HOME": str(home)}) is None
-    assert "started but never logged in" in capsys.readouterr().out
-
-
-def test_a_completed_login_is_a_usable_profile(tmp_path) -> None:
-    home = tmp_path / "claude-home"
-    home.mkdir()
-    (home / ".claude.json").write_text(
-        json.dumps({"userID": "abc", "oauthAccount": {"accountUuid": "u"}})
-    )
-    assert server.resolve_claude_home({"GENESIS_CLAUDE_HOME": str(home)}) == home
 
 
 def test_a_session_that_ran_no_tools_is_called_out(plane, capsys) -> None:
