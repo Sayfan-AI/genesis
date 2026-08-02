@@ -135,3 +135,74 @@ def test_works_with_no_stdin_context(repo: Path, fake_loki: tuple[str, list[dict
     line = entry(pushes[0])[1]
     assert f"project={PROJECT}" in line
     assert "session=" not in line
+
+
+# ---------- what a tool call actually did ----------
+
+
+def test_line_records_the_command_not_just_the_tool_name(
+    repo: Path, fake_loki: tuple[str, list[dict]]
+) -> None:
+    """`tool=Bash` alone tells you nothing. The command is the whole point."""
+    url, pushes = fake_loki
+    run_hook(repo, url, "pre-tool-use", {"tool_name": "Bash", "tool_input": {"command": "go test ./..."}})
+    assert 'target="go test ./..."' in entry(pushes[0])[1]
+
+
+def test_file_tools_record_the_path(repo: Path, fake_loki: tuple[str, list[dict]]) -> None:
+    url, pushes = fake_loki
+    run_hook(repo, url, "post-tool-use", {"tool_name": "Edit", "tool_input": {"file_path": "/repo/plan.go"}})
+    assert "target=/repo/plan.go" in entry(pushes[0])[1]
+
+
+def test_failed_call_records_status_and_reason(repo: Path, fake_loki: tuple[str, list[dict]]) -> None:
+    url, pushes = fake_loki
+    run_hook(
+        repo,
+        url,
+        "post-tool-use-failure",
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "go build ./..."},
+            "tool_response": {"is_error": True, "error": "exit status 2"},
+        },
+    )
+    line = entry(pushes[0])[1]
+    assert "status=error" in line and 'error="exit status 2"' in line
+
+
+def test_successful_call_records_ok(repo: Path, fake_loki: tuple[str, list[dict]]) -> None:
+    url, pushes = fake_loki
+    run_hook(repo, url, "post-tool-use", {"tool_name": "Read", "tool_input": {"file_path": "/a"}, "tool_response": {"is_error": False}})
+    assert "status=ok" in entry(pushes[0])[1]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl -u 1694942:glc_livetokenvalue https://logs-prod-021.grafana.net",
+        "export ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijk && go run .",
+        "gh auth login --with-token ghp_aBcDeFgHiJkLmNoPqRsT",
+        "curl https://user:hunter2@example.com/api",
+        "aws configure set aws_access_key_id AKIAIOSFODNN7EXAMPLE",
+    ],
+)
+def test_credentials_never_reach_the_log(
+    repo: Path, fake_loki: tuple[str, list[dict]], command: str
+) -> None:
+    """Commands are the most useful field and the most likely to carry a secret.
+    Loki has no delete, so anything that lands here is permanent."""
+    url, pushes = fake_loki
+    run_hook(repo, url, "pre-tool-use", {"tool_name": "Bash", "tool_input": {"command": command}})
+    line = entry(pushes[0])[1]
+    for secret in ("glc_livetokenvalue", "sk-ant-api03-abcdefghijk", "ghp_aBcDeFgHiJkLmNoPqRsT", "hunter2", "AKIAIOSFODNN7EXAMPLE"):
+        assert secret not in line, f"leaked {secret}"
+    assert "<redacted>" in line
+
+
+def test_long_input_is_truncated(repo: Path, fake_loki: tuple[str, list[dict]]) -> None:
+    """A Write tool's input is an entire file; logging it verbatim would balloon
+    both the bill and the blast radius."""
+    url, pushes = fake_loki
+    run_hook(repo, url, "pre-tool-use", {"tool_name": "Write", "tool_input": {"file_path": "/x", "content": "y" * 5000}})
+    assert len(entry(pushes[0])[1]) < 400
