@@ -386,7 +386,11 @@ Hook events describe what an agent *did*; they say nothing about how a run *ende
 
 Before these existed, that telemetry lived only as stdout in whoever's terminal was running the plane, so the numbers a spending decision depends on vanished with the window.
 
-`templates/dashboards/genesis-activity.json` is an importable Grafana dashboard over both: spend in range, sessions by end state, cost per session, tool calls by tool, continuation decisions, and a raw activity feed. Import via Dashboards → New → Import.
+`templates/dashboards/genesis-activity.json` is a Grafana dashboard over both: spend in range, sessions by end state, cost per session, tool calls by tool, continuation decisions, and a raw activity feed.
+
+Upload it with `scripts/upload-dashboard.sh` rather than the import UI. It is idempotent — the dashboard's own `uid` plus `overwrite: true` means re-running updates in place — and it waits out the 503s a sleeping free-tier stack returns while waking.
+
+It needs `GRAFANA_URL` and a **service account** token in `GRAFANA_TOKEN`. The Loki push credential does not work: `glc_` access-policy tokens authenticate to Loki and to grafana.com, and the stack's own API answers `401 Invalid API key`. Minting a service account from the Cloud API needs a scope that token doesn't carry either (`403`), so the token is created once in Grafana → Administration → Users and access → Service accounts (role Editor), added to `~/.config/genesis/.env`, and never touched again.
 
 One gotcha when first wiring this up: a brand-new label combination is visible to **log** queries immediately but not to **metric** queries, because those go through the index. Expect `count_over_time`/`sum_over_time` panels to read zero for a while after the first push, even though `{hook_event="session-outcome"}` clearly returns lines.
 
