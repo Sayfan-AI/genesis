@@ -247,6 +247,80 @@ def resolve_claude_home(env: dict[str, str] | None = None) -> Path | None:
     return None
 
 
+def _project_name() -> str:
+    """Project label, matching what log.sh derives, so hook lines and outcome
+    lines land in the same stream namespace and can be joined in one query."""
+    path = Path(".genesis/config.toml")
+    try:
+        for line in path.read_text().splitlines():
+            if line.startswith("name"):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return "unknown"
+
+
+def loki_push(hook_event: str, fields: dict[str, object]) -> bool:
+    """Ship one logfmt line to Loki. Best-effort, never raises.
+
+    Session outcomes — how a run ended, what it cost, how many turns it burned —
+    previously existed only as stdout in whoever's terminal was running `serve`.
+    Close the window and the record was gone, which made the most decision-
+    relevant telemetry the system produces the one thing it could not query.
+
+    Labels stay low-cardinality (project, hook_event, service_name); everything
+    else is a logfmt field, promoted at query time with `| logfmt`.
+    """
+    url = os.environ.get("GENESIS_LOKI_URL", "").strip()
+    if not url:
+        return False
+
+    ns = time.time_ns()
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ns // 1_000_000_000))
+    ordered = {"ts": f"{stamp}.{ns % 1_000_000_000 // 1_000_000:03d}Z", "event": hook_event}
+    ordered.update({k: v for k, v in fields.items() if v is not None})
+
+    def fmt(value: object) -> str:
+        text = str(value)
+        return json.dumps(text) if any(c in text for c in ' "=\\') else text
+
+    line = " ".join(f"{k}={fmt(v)}" for k, v in ordered.items())
+    project = _project_name()
+    payload = json.dumps(
+        {
+            "streams": [
+                {
+                    "stream": {
+                        "project": project,
+                        "hook_event": hook_event,
+                        "service_name": project,
+                    },
+                    "values": [[str(ns), line]],
+                }
+            ]
+        }
+    ).encode()
+
+    req = urllib.request.Request(
+        f"{url.rstrip('/')}/loki/api/v1/push",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    user = os.environ.get("GENESIS_LOKI_USER", "")
+    token = os.environ.get("GENESIS_LOKI_TOKEN", "")
+    if user and token:
+        import base64
+
+        cred = base64.b64encode(f"{user}:{token}".encode()).decode()
+        req.add_header("Authorization", f"Basic {cred}")
+    try:
+        with urllib.request.urlopen(req, timeout=5):
+            return True
+    except Exception:  # noqa: BLE001 - telemetry must never break the run
+        return False
+
+
 def _cost_ceiling() -> float:
     """Spend allowed per unit of work before continuations stop, whatever anyone
     thinks. Env override so an operator can tighten it without editing code."""
@@ -331,6 +405,7 @@ class LocalControlPlane:
     last_cost: float = 0.0
     recent_tools: list[str] = field(default_factory=list)
     pending_followup: bool = False
+    continuation_index: int = 0
     all_workflows: bool = False
     shutdown: bool = False
     last_event_id: str | None = None
@@ -428,6 +503,19 @@ class LocalControlPlane:
                             del self.recent_tools[:-12]
                 elif kind == "result":
                     self.last_result_subtype = event.get("subtype")
+                    loki_push(
+                        "session-outcome",
+                        {
+                            "level": "error" if event.get("is_error") else "info",
+                            "subtype": event.get("subtype"),
+                            "turns": event.get("num_turns"),
+                            "cost_usd": round(float(event.get("total_cost_usd") or 0), 4),
+                            "duration_s": round((event.get("duration_ms") or 0) / 1000),
+                            "tool_calls": turns,
+                            "session": event.get("session_id"),
+                            "continuation": self.continuation_index,
+                        },
+                    )
                     self.last_tool_calls = turns
                     self.last_cost = float(event.get("total_cost_usd") or 0)
                     if event.get("session_id"):
@@ -470,6 +558,7 @@ class LocalControlPlane:
         deadline = time.time() + self.session_timeout
 
         task = prompt.splitlines()[0] if prompt else "the current unit of work"
+        self.continuation_index = 0
         before = repo_fingerprint()
         rc = self._run_session(prompt, deadline)
         spent = self.last_cost
@@ -486,6 +575,17 @@ class LocalControlPlane:
                 break
 
             go, why = self._should_continue(task, before, spent)
+            loki_push(
+                "continuation-decision",
+                {
+                    "level": "info" if go else "warn",
+                    "decision": "continue" if go else "stop",
+                    "reason": why,
+                    "spent_usd": round(spent, 4),
+                    "attempt": attempt,
+                    "session": session_id,
+                },
+            )
             if not go:
                 log(f"  not continuing: {why}")
                 break
@@ -493,6 +593,7 @@ class LocalControlPlane:
             log(f"  hit max turns; resuming {session_id[:8]} "
                 f"(continuation {attempt}, ${spent:.2f} spent) — {why}")
             before = repo_fingerprint()
+            self.continuation_index = attempt
             rc = self._run_session(None, deadline, resume=session_id)
             spent += self.last_cost
 

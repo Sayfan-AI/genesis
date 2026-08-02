@@ -377,6 +377,19 @@ Not yet captured (each needs a hook payload field the logger doesn't read yet): 
 
 Entries use `time.time_ns()`. This is load-bearing, not a detail: Loki silently drops an entry whose `(timestamp, line)` already exists in that stream, so a second-resolution stamp makes two same-second `Bash` calls byte-identical and the second one vanishes - acknowledged with HTTP 204. Measured on a real Grafana Cloud stack: 6 identical pushes, 1 line stored. `date +%s%N` is not portable (BSD `date` on macOS has no `%N`), which is why the timestamp comes from the same python3 call that parses the hook JSON. Guarded by `tests/unit/test_log_script.py`.
 
+### Session outcomes and the dashboard
+
+Hook events describe what an agent *did*; they say nothing about how a run *ended* or what it cost. `genesis serve` therefore pushes two more event types directly:
+
+- `session-outcome` — `subtype` (notably `error_max_turns`), `turns`, `cost_usd`, `duration_s`, `tool_calls`, `session`, `continuation`
+- `continuation-decision` — `decision`, `reason` (the rung that decided, or the judge's own words), `spent_usd`, `attempt`
+
+Before these existed, that telemetry lived only as stdout in whoever's terminal was running the plane, so the numbers a spending decision depends on vanished with the window.
+
+`templates/dashboards/genesis-activity.json` is an importable Grafana dashboard over both: spend in range, sessions by end state, cost per session, tool calls by tool, continuation decisions, and a raw activity feed. Import via Dashboards → New → Import.
+
+One gotcha when first wiring this up: a brand-new label combination is visible to **log** queries immediately but not to **metric** queries, because those go through the index. Expect `count_over_time`/`sum_over_time` panels to read zero for a while after the first push, even though `{hook_event="session-outcome"}` clearly returns lines.
+
 ### Grafana Cloud Free Tier Limits (reference)
 - Logs: 50 GB/month, 14 days retention
 - Metrics: 10,000 active series/month, 14 days retention
