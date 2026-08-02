@@ -207,6 +207,27 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text)
 
 
+def _profile_is_authenticated(home: Path) -> bool:
+    """Whether a Claude profile can actually run a session.
+
+    Checking that `.claude.json` merely *exists* is not enough, and getting this
+    wrong is expensive in a way that hides itself. The file is written the first
+    time `claude` launches in a config dir, before any login - so an operator who
+    started the login and backed out leaves a profile that looks configured and
+    authenticates against nothing. Every session then exits instantly with "Not
+    logged in", reporting `success` with one turn and $0.00, and the dev system
+    becomes a loop that does nothing while looking healthy.
+
+    `oauthAccount` is written only once a login completes, so it is the field that
+    answers the question actually being asked.
+    """
+    try:
+        data = json.loads((home / ".claude.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and bool(data.get("oauthAccount"))
+
+
 def resolve_claude_home(env: dict[str, str] | None = None) -> Path | None:
     """Decide which Claude Code profile agent sessions should use.
 
@@ -233,13 +254,12 @@ def resolve_claude_home(env: dict[str, str] | None = None) -> Path | None:
 
     home = Path(env.get("GENESIS_CLAUDE_HOME") or DEFAULT_AGENT_HOME).expanduser()
 
-    # `.claude.json` is written when a profile is first authenticated, so its
-    # presence is the cheap "has anyone logged in here" check. Probing for real
-    # would cost a model call on every session.
-    if (home / ".claude.json").is_file():
+    if _profile_is_authenticated(home):
         return home
 
-    log(f"Agent Claude profile not set up at {home} — using your personal profile for now.")
+    started = (home / ".claude.json").is_file()
+    detail = "started but never logged in" if started else "not set up"
+    log(f"Agent Claude profile {detail} at {home} — using your personal profile for now.")
     log("  One-time setup, so agent sessions stop inheriting your ~/.claude/CLAUDE.md:")
     log(f"    CLAUDE_CONFIG_DIR={home} claude   # then /login, then exit")
     log("  Silence this by choosing the personal profile: GENESIS_CLAUDE_PROFILE=personal")

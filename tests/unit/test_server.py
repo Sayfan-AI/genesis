@@ -515,7 +515,7 @@ def test_run_orchestrator_requests_streaming_output(plane) -> None:
 def test_resolve_claude_home_uses_agent_profile_when_set_up(tmp_path) -> None:
     home = tmp_path / "claude-home"
     home.mkdir()
-    (home / ".claude.json").write_text("{}")
+    (home / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "u"}}))
     assert server.resolve_claude_home({"GENESIS_CLAUDE_HOME": str(home)}) == home
 
 
@@ -895,3 +895,24 @@ def test_trigger_restores_the_planes_default_agent(plane, monkeypatch) -> None:
     original = plane.agent
     plane.run_due_triggers("tok")
     assert plane.agent == original
+
+
+def test_an_unfinished_login_is_not_a_usable_profile(tmp_path, capsys) -> None:
+    """`.claude.json` is written the first time claude launches, before any login.
+    Treating its existence as "set up" made every session exit instantly with
+    "Not logged in" while reporting success with one turn and $0.00 - a loop that
+    does nothing and looks healthy."""
+    home = tmp_path / "claude-home"
+    home.mkdir()
+    (home / ".claude.json").write_text(json.dumps({"userID": "abc"}))  # launched, never logged in
+    assert server.resolve_claude_home({"GENESIS_CLAUDE_HOME": str(home)}) is None
+    assert "started but never logged in" in capsys.readouterr().out
+
+
+def test_a_completed_login_is_a_usable_profile(tmp_path) -> None:
+    home = tmp_path / "claude-home"
+    home.mkdir()
+    (home / ".claude.json").write_text(
+        json.dumps({"userID": "abc", "oauthAccount": {"accountUuid": "u"}})
+    )
+    assert server.resolve_claude_home({"GENESIS_CLAUDE_HOME": str(home)}) == home
