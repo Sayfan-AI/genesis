@@ -31,6 +31,9 @@ if [ -f "$ENV_FILE" ]; then
     while IFS='=' read -r key value; do
         case "$key" in
             GRAFANA_URL | GRAFANA_TOKEN) export "$key=$value" ;;
+            # Accept the longer name too — a token named after the service account
+            # it came from ("Genesis Editor") is a reasonable thing to write down.
+            GRAFANA_EDITOR_API_TOKEN) export "GRAFANA_TOKEN=$value" ;;
         esac
     done < "$ENV_FILE"
 fi
@@ -86,10 +89,29 @@ fi
 URL_PATH="$(printf '%s' "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('url',''))" 2>/dev/null)"
 echo "Uploaded: ${GRAFANA_URL}${URL_PATH}"
 
-# Read it back: a 200 on POST means accepted, not necessarily retrievable.
+# Read it back: a 200 on POST means accepted, not necessarily present.
+#
+# Deliberately /api/search rather than /api/dashboards/uid/<uid>. The latter needs
+# read permission on the dashboard's folder, which an Editor service account is
+# not automatically granted — it answers 403 for a dashboard the same token just
+# wrote. Search is visible to Editor and answers the only question that matters:
+# is it there?
 if [ -n "$UID_VALUE" ]; then
-    verify="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
-        -H "Authorization: Bearer $GRAFANA_TOKEN" "$GRAFANA_URL/api/dashboards/uid/$UID_VALUE")"
-    [ "$verify" = "200" ] && echo "Verified: uid=$UID_VALUE is retrievable" \
-        || echo "WARNING: uid=$UID_VALUE not retrievable (HTTP $verify)" >&2
+    found="$(curl -s --max-time 30 -H "Authorization: Bearer $GRAFANA_TOKEN" \
+        "$GRAFANA_URL/api/search?type=dash-db&limit=5000" \
+        | python3 -c "
+import json, sys
+uid = sys.argv[1]
+try:
+    hits = json.load(sys.stdin)
+except ValueError:
+    print('')
+    sys.exit()
+print(next((d.get('title', '') for d in hits if d.get('uid') == uid), ''))
+" "$UID_VALUE")"
+    if [ -n "$found" ]; then
+        echo "Verified: \"$found\" (uid=$UID_VALUE) is present"
+    else
+        echo "WARNING: uid=$UID_VALUE was accepted but does not appear in search" >&2
+    fi
 fi
