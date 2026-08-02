@@ -811,7 +811,7 @@ def test_only_one_scheduled_trigger_fires_per_tick(plane, monkeypatch, tmp_path)
     monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
     launched: list[str] = []
     monkeypatch.setattr(
-        plane, "run_orchestrator", lambda event, prompt=None: launched.append(prompt or "")
+        plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
     )
     plane.run_due_triggers("tok")
     assert len(launched) == 1, "at most one session per tick"
@@ -828,7 +828,7 @@ def test_ci_failure_takes_priority_over_the_cron(plane, monkeypatch, tmp_path) -
     )
     launched: list[str] = []
     monkeypatch.setattr(
-        plane, "run_orchestrator", lambda event, prompt=None: launched.append(prompt or "")
+        plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
     )
     plane.run_due_triggers("tok")
     assert "A required check failed" in launched[0]
@@ -840,7 +840,7 @@ def test_trigger_restores_the_planes_default_agent(plane, monkeypatch) -> None:
     monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
     monkeypatch.setattr(server.triggers, "save_state", lambda *a, **k: None)
     monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
-    monkeypatch.setattr(plane, "run_orchestrator", lambda event, prompt=None: 0)
+    monkeypatch.setattr(plane, "run_orchestrator", lambda event, prompt=None, label=None: 0)
     original = plane.agent
     plane.run_due_triggers("tok")
     assert plane.agent == original

@@ -348,7 +348,7 @@ def _build_prompt(event: dict | None, agent: str = DEFAULT_AGENT) -> str:
     if event is None:
         return (
             f"Run the agent defined in {agent}. "
-            "This is a local control plane initial run — assess project state and advance work."
+            "This is a local control plane initial run - assess project state and advance work."
         )
     event_type = event.get("type", "UnknownEvent")
     action = event.get("payload", {}).get("action", "unknown")
@@ -511,7 +511,9 @@ class LocalControlPlane:
         except Exception:  # noqa: BLE001 - reporting must never break the run
             return
 
-    def run_orchestrator(self, event: dict | None, prompt: str | None = None) -> int:
+    def run_orchestrator(
+        self, event: dict | None, prompt: str | None = None, label: str | None = None
+    ) -> int:
         """Run one unit of work, continuing across budget deaths.
 
         A session that dies at `error_max_turns` has not failed at the task — it
@@ -528,7 +530,10 @@ class LocalControlPlane:
         """
         prompt = prompt or _build_prompt(event, self.agent)
         if event is None:
-            log("Launching orchestrator (initial run)")
+            # Several paths run without an event: startup, a due trigger, and the
+            # follow-up pass. Labelling them all "initial run" made a mid-session
+            # follow-up read like a restart.
+            log(f"Launching orchestrator ({label or 'initial run'})")
         else:
             event_type = event.get("type", "?")
             action = event.get("payload", {}).get("action", "?")
@@ -628,7 +633,7 @@ class LocalControlPlane:
         previous_agent = self.agent
         self.agent = due.agent
         try:
-            self.run_orchestrator(None, prompt=due.prompt)
+            self.run_orchestrator(None, prompt=due.prompt, label=f"{due.name} trigger")
         finally:
             self.agent = previous_agent
 
@@ -1034,8 +1039,7 @@ class LocalControlPlane:
             # for unrelated repo activity to happen along.
             if self.pending_followup and not new_events and not self.shutdown:
                 self.pending_followup = False
-                log("Resuming unfinished work from the previous run")
-                self.run_orchestrator(None)
+                self.run_orchestrator(None, label="follow-up pass, work from the previous run is unfinished")
                 self.save_state()
 
         return self._shutdown(token_ok=True)
