@@ -850,3 +850,48 @@ def test_merge_sweep_failure_never_kills_the_plane(plane, monkeypatch) -> None:
         raise RuntimeError("gh went missing")
     monkeypatch.setattr(server, "merge_ready", boom)
     assert plane.merge_ready_prs() == []
+
+
+def test_only_one_scheduled_trigger_fires_per_tick(plane, monkeypatch, tmp_path) -> None:
+    """A laptop closed overnight leaves several schedules due at once. Firing all
+    of them on the first tick would be a surprising way to spend an afternoon."""
+    monkeypatch.setattr(server.triggers, "STATE_PATH", tmp_path / "state")
+    monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
+    saved: list[dict] = []
+    monkeypatch.setattr(server.triggers, "save_state", lambda st, *a: saved.append(st))
+    monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
+    launched: list[str] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda event, prompt=None: launched.append(prompt or "")
+    )
+    plane.run_due_triggers("tok")
+    assert len(launched) == 1, "at most one session per tick"
+    assert "scheduled run" in launched[0]
+
+
+def test_ci_failure_takes_priority_over_the_cron(plane, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
+    monkeypatch.setattr(server.triggers, "save_state", lambda *a, **k: None)
+    monkeypatch.setattr(
+        server.triggers,
+        "failed_runs",
+        lambda *a, **k: [{"name": "CI", "headBranch": "main", "url": "u", "createdAt": "2026-08-02T01:00:00Z"}],
+    )
+    launched: list[str] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda event, prompt=None: launched.append(prompt or "")
+    )
+    plane.run_due_triggers("tok")
+    assert "A required check failed" in launched[0]
+
+
+def test_trigger_restores_the_planes_default_agent(plane, monkeypatch) -> None:
+    """The evolver trigger swaps the agent for one session. If that leaked, every
+    later event-driven run would silently run the wrong agent."""
+    monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
+    monkeypatch.setattr(server.triggers, "save_state", lambda *a, **k: None)
+    monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
+    monkeypatch.setattr(plane, "run_orchestrator", lambda event, prompt=None: 0)
+    original = plane.agent
+    plane.run_due_triggers("tok")
+    assert plane.agent == original

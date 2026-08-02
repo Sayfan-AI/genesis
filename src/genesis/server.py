@@ -37,6 +37,7 @@ from typing import Iterable
 
 from genesis.appauth import mint_installation_token
 from genesis.automerge import merge_ready
+from genesis import triggers
 from genesis.workflows import (
     DISABLED_LIST_PATH,
     disable_workflows,
@@ -550,7 +551,7 @@ class LocalControlPlane:
         except Exception:  # noqa: BLE001 - reporting must never break the run
             return
 
-    def run_orchestrator(self, event: dict | None) -> int:
+    def run_orchestrator(self, event: dict | None, prompt: str | None = None) -> int:
         """Run one unit of work, continuing across budget deaths.
 
         A session that dies at `error_max_turns` has not failed at the task — it
@@ -565,7 +566,7 @@ class LocalControlPlane:
         money in your sleep: a hard continuation cap, an overall deadline shared
         by every attempt, and a stop as soon as an attempt does nothing at all.
         """
-        prompt = _build_prompt(event, self.agent)
+        prompt = prompt or _build_prompt(event, self.agent)
         if event is None:
             log("Launching orchestrator (initial run)")
         else:
@@ -625,6 +626,41 @@ class LocalControlPlane:
             self.pending_followup = True
             log(f"  still incomplete (${spent:.2f} spent) — will pick it up on the next tick")
         return rc
+
+    def run_due_triggers(self, token: str) -> None:
+        """Fire the workflow triggers that have no event to hang off.
+
+        A cron has no event at all and a `workflow_run` conclusion is not in the
+        repo events feed, so the two schedules and CI-failure triage have to be
+        polled. Only one fires per tick: these launch full sessions, and stacking
+        three of them because a laptop was closed overnight would be a surprising
+        way to spend an afternoon's budget.
+        """
+        state = triggers.load_state()
+        now = time.time()
+
+        runs = triggers.failed_runs(self.repo, state.get("ci_failure_seen"), token)
+        due = (
+            triggers.ci_failure_due(runs)
+            or triggers.scheduled_due(state, now)
+            or triggers.evolver_due(state, now, Path(".claude/agents/evolver.md").is_file())
+        )
+        if due is None:
+            return
+
+        log(f"Trigger due: {due.name}")
+        previous_agent = self.agent
+        self.agent = due.agent
+        try:
+            self.run_orchestrator(None, prompt=due.prompt)
+        finally:
+            self.agent = previous_agent
+
+        if due.name == "ci-failure" and runs:
+            state["ci_failure_seen"] = runs[-1].get("createdAt")
+        else:
+            state[due.name] = now
+        triggers.save_state(state)
 
     def merge_ready_prs(self) -> list[int]:
         """Land any bot pull request whose checks are all green.
@@ -999,13 +1035,18 @@ class LocalControlPlane:
                 log(f"Network error polling events: {e}")
                 continue
 
-            # A pull request going green is not an event this poller can see, and
-            # the agent's own pull requests are bot-authored so they are filtered
-            # out too. Without this sweep the local loop can open work it can
-            # never land - which is exactly what genesis-merge.yml does in CI, on
-            # a trigger local mode does not have.
+            # genesis-merge.yml's job. A pull request going green is not an event
+            # this poller can see, and the agent's own pull requests are bot-
+            # authored so they are filtered out too. Without this sweep the local
+            # loop can open work it is structurally unable to land.
             if self.merge_ready_prs():
                 self.pending_followup = True
+
+            # genesis-ci-failure.yml's job. A workflow_run conclusion is not in the
+            # repo events feed either, so a red check is invisible to local mode
+            # until a human notices.
+            if not new_events and not self.shutdown:
+                self.run_due_triggers(token)
 
             for event in new_events:
                 if self.shutdown:

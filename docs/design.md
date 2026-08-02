@@ -135,6 +135,21 @@ The local control plane is the `genesis serve` subcommand of the genesis CLI. Th
 
 **Secrets:** Needs `gh` CLI authentication for the GitHub API, and nothing else. `claude -p` uses whatever the local CLI is already logged in with, so a Claude subscription is enough and no `ANTHROPIC_API_KEY` is required. That is local mode's strongest argument: the GHA path needs a model credential stored in the repo, this path needs none.
 
+**Local mode reproduces the workflow triggers, not just the orchestrator.** Each seeded workflow is a pair - a condition GitHub detects and an agent it runs - so a local plane that only polls issue events silently loses capabilities the same dev system has in CI.
+
+| Workflow | Condition | Local equivalent |
+|---|---|---|
+| `genesis-events` | issue / PR / comment activity | repo events poll |
+| `genesis-orchestrator` | cron, every 6 hours | elapsed-time trigger |
+| `genesis-evolver` | cron, daily | elapsed-time trigger, skipped if the repo has no evolver |
+| `genesis-merge` | CI completed green on a bot PR | deterministic merge sweep |
+| `genesis-ci-failure` | a required check failed | polled `gh run list --status failure` |
+| `genesis-push-trigger` | push to main | a merge sets the follow-up flag |
+
+Two of those conditions can never arrive as events, which is why this is a trigger table rather than a longer list of event types: a cron has no event at all, and a `workflow_run` conclusion is not carried in the repo events feed. Once local sessions authenticate as the App, a third joins them - the agent's own pull requests become bot-authored and are dropped by the feedback-loop filter.
+
+At most one scheduled trigger fires per tick. A laptop closed overnight leaves several due at once, and starting three full sessions on the first poll would be a surprising way to spend an afternoon's budget. CI-failure triage takes priority over the cron, because a red check is more urgent than a routine sweep. State lives in `.genesis/.trigger-state`, and an unreadable file means "due now" rather than "never" - failing toward doing the work.
+
 **Merging in local mode.** `serve` sweeps for mergeable pull requests on every poll tick and squash-merges any that are bot-authored, non-draft, and green on every check. This is the local equivalent of `genesis-merge.yml`, which local mode disables.
 
 It has to be a state-derived sweep rather than an event handler, for two reasons that compound. CI-completion is not among the events the poller reads (`IssuesEvent`, `IssueCommentEvent`, `PullRequestEvent`), so "checks just went green" can never wake anything. And once local sessions began authenticating as the App, the agent's own pull requests became bot-authored, so the feedback-loop filter drops those events too. Without the sweep the loop can open work it is structurally unable to land.
