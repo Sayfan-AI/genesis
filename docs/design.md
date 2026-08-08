@@ -360,7 +360,7 @@ All agent activity is logged to **[Grafana Cloud Loki](https://grafana.com/prici
 
 Genesis seeds `.claude/settings.json` with `command` hooks that call `.genesis/scripts/log.sh`, which POSTs a structured log entry to Grafana Cloud Loki. No agent-side logging code.
 
-Credentials live in the environment (`GENESIS_LOKI_URL` / `GENESIS_LOKI_USER` / `GENESIS_LOKI_TOKEN`), never in the committed `config.toml`. Two paths get them there: `activate.sh` seeds them as repo secrets from `~/.config/genesis/.env`, and each `genesis-*` workflow forwards those secrets to Claude Code through the action's `settings` env block. That forwarding is load-bearing — a step-level `env:` block is not documented as reaching the CLI, and without it every hook in an Actions run silently degrades to stderr.
+Credentials live in the environment (`GENESIS_LOKI_URL` / `GENESIS_LOKI_USER` / `GENESIS_LOKI_TOKEN`), never in the committed `config.toml`. Two paths get them there: `activate.sh` seeds them as repo secrets from `~/.config/genesis/.env`, and each `genesis-*` workflow forwards those secrets to Claude Code through the action's `settings` env block. That forwarding is load-bearing: a step-level `env:` block isn't documented as reaching the CLI, and without it every hook in an Actions run silently skips the push. Claude Code captures hook stderr into its own transcript, so nothing reaches the run log either.
 
 **Key hook events used:**
 
@@ -435,7 +435,7 @@ Shell scripts that provide core capabilities to every dev system. No binary dist
 
 ### Scripts
 
-- **`log.sh`** — called by CC hooks. Reads hook stdin JSON, pushes structured logs to Loki via curl. Falls back to stderr if Loki is not configured.
+- **`log.sh`** — called by CC hooks. Reads hook stdin JSON, pushes structured logs to Loki via curl. Without Loki configured it only echoes to stderr, which Claude Code captures into its own transcript — no per-tool-call trail in an Actions run (the Actions tab still records that the run happened).
 - **`issues.sh`** — thin wrapper around `gh` CLI. Provides `create`, `list`, `close`, `assign` subcommands.
 
 Local mode (`genesis serve`) is a subcommand of the genesis CLI itself, not a script seeded into the dev repo. See **Execution Model > Local Mode**.

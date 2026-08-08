@@ -112,9 +112,12 @@ printf '%s' "$GENESIS_GITHUB_APP_ID"     | gh secret set GENESIS_APP_ID
 printf '%s' "$GENESIS_GITHUB_APP_SECRET" | gh secret set GENESIS_APP_PRIVATE_KEY
 
 # --- 4. seed the OPTIONAL Loki secrets ------------------------------------------
-# Activity logging is opt-in: without these, log.sh writes to stderr only (still
-# visible in run logs) and everything else works. All three or none — a URL with
-# no credentials would just collect 401s that curl silently swallows.
+# Activity logging is opt-in: without these, log.sh skips the push and everything
+# else works. There's no stderr consolation prize in Actions — Claude Code
+# captures hook stderr into its own transcript, so unconfigured Loki means no
+# activity trail in Actions runs. All three or none — a URL without credentials
+# would just collect 401s, and log.sh's failure warning lands in that same
+# invisible transcript.
 loki_missing=()
 for v in GENESIS_LOKI_URL GENESIS_LOKI_USER GENESIS_LOKI_TOKEN; do
     is_placeholder "${!v:-}" && loki_missing+=("$v")
@@ -125,7 +128,7 @@ if [ "${#loki_missing[@]}" -eq 0 ]; then
     printf '%s' "$GENESIS_LOKI_TOKEN" | gh secret set GENESIS_LOKI_TOKEN
     echo "Loki activity logging enabled (3 secrets seeded)."
 elif [ "${#loki_missing[@]}" -eq 3 ]; then
-    echo "Loki not configured — activity logs go to stderr in the run logs only."
+    echo "Loki not configured — Actions runs will have no activity trail (hook stderr never reaches the run logs)."
 else
     echo "WARNING: partial Loki config, skipping. Missing: ${loki_missing[*]}" >&2
     echo "         Set all three in $ENV_FILE and re-run to enable logging." >&2

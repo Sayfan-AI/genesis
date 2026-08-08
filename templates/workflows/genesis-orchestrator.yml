@@ -34,7 +34,9 @@ jobs:
           allowed_bots: "genesis-dev-bot[bot]"
           # Reaches the activity-logging hooks in .claude/settings.json. The
           # `settings` input MERGES with the repo's settings, so the hooks survive.
-          # Unset secrets render as empty strings and log.sh falls back to stderr.
+          # Unset secrets render as empty strings and log.sh skips the push. There is
+          # no stderr consolation prize: Claude Code captures hook stderr into its
+          # own transcript, so unconfigured Loki means no activity trail at all.
           settings: |
             {
               "env": {

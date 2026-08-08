@@ -70,7 +70,7 @@ Every dev system gets a scaffold that it can evolve:
 
 - **Seed agents** — three to start: orchestrator, human interaction, and evolver. The orchestrator also plays project manager, onboarder, and health-checker until the system earns the evidence to split those into their own agents.
 - **Orchestrator workflows** — GitHub Actions (cron + event-triggered) launching Claude Agent SDK sessions
-- **Observability** — Claude Code hooks that automatically log all agent activity to Grafana Loki
+- **Observability** — Claude Code hooks that log all agent activity to Grafana Loki (opt-in — without the Loki secrets, Actions runs leave no activity trail)
 - **Scripts** — shell scripts for issue management and structured logging (zero binary distribution overhead)
 - **Meta-concepts** — principles the dev system operates by (see below)
 

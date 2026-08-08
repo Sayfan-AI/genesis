@@ -112,8 +112,8 @@ def test_new_repo_has_genesis_config(tmp_dir: Path) -> None:
 
 def test_new_repo_workflows_forward_loki_secrets(tmp_dir: Path) -> None:
     """Every workflow that runs Claude must pass the Loki creds through the
-    action's `settings` env block, or the activity-logging hooks silently
-    degrade to stderr on every Actions run."""
+    action's `settings` env block, or every Actions run loses its activity
+    trail — hook stderr lands in Claude Code's transcript, not the run log."""
     repo = tmp_dir / PROJECT
     scaffold_new_repo(repo, GOAL, PROJECT)
 
