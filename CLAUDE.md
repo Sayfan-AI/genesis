@@ -53,6 +53,11 @@ These are seeded as starting patterns. The dev system evolves them:
 - **Both modes** can run together, coordinated via GitHub issues with a cross-mode concurrency guard.
 - **Genesis itself:** TBD — CLI tool, Claude Code skill, or both
 
+## Observability
+
+- Grafana Cloud stack: <https://bouncymillet382.grafana.net>. The "Genesis dev system activity" dashboard is at `/d/genesis-activity`, defined in `templates/dashboards/genesis-activity.json` and uploaded with `scripts/upload-dashboard.sh`.
+- Loki push endpoint: `https://logs-prod-021.grafana.net` (instance `1694942`). Credentials live in `~/.config/genesis/.env`, never in the repo: `GRAFANA_TOKEN` is a `glsa_` service-account token for the dashboard API, the `GENESIS_LOKI_*` trio uses a `glc_` access-policy token for pushes. The two token kinds aren't interchangeable.
+
 ## Claude Code Hooks Format
 
 The correct hooks format in `.claude/settings.json` requires a `matcher` + `hooks` array structure. Each hook event entry must look like:
