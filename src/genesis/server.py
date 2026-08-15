@@ -73,7 +73,18 @@ MAX_CONTINUATIONS = 6
 # a single task was observed spending $10.09 across three sessions while making
 # real progress the whole time. Dollars are what an operator actually wants to
 # bound. Env: GENESIS_COST_CEILING.
-COST_CEILING_USD = 15.0
+#
+# Raised from 15 to 50 after the first task large enough to trip it. A trust-model
+# change touching five packages ran five sessions and $22.32 without finishing,
+# and each fresh chain pays a re-orientation tax first: it re-reads the branch,
+# the issue and the diff before writing anything new. At 15 a redesign-class task
+# spends much of every chain remembering where it was, so the ceiling stopped
+# bounding waste and started buying it.
+#
+# Note what the ceiling is not: spend is checked *between* sessions, so the run
+# that crosses the line still finishes. $22.32 against a $15 ceiling is the
+# mechanism working, not leaking. It is a tripwire, not a wall.
+COST_CEILING_USD = 50.0
 
 # How many times a session may chain straight into another because it changed the
 # repo. Bounded so "work begets work" cannot become a spin: after this many, the
