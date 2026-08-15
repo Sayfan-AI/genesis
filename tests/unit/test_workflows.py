@@ -115,13 +115,20 @@ def test_disable_merges_with_existing_tracked_state(monkeypatch) -> None:
     ]
 
 
-def test_disable_no_active_does_not_create_tracking_file(monkeypatch) -> None:
+def test_disable_no_active_still_writes_an_empty_tracking_file(monkeypatch) -> None:
+    """This used to assert the file was *not* written, which was the bug.
+
+    A missing file means "tracking lost" and sends `enable_workflows` into
+    recovery mode, where it enables everything disabled. Writing an empty list
+    says "this session disabled nothing", so shutdown restores nothing.
+    """
     fake = FakeRun(
         [[{"id": 1, "name": "old", "state": "disabled_manually", "path": ".github/workflows/genesis-old.yml"}]]
     )
     monkeypatch.setattr(subprocess, "run", fake)
     assert workflows.disable_workflows() == []
-    assert not workflows.DISABLED_LIST_PATH.exists()
+    assert workflows.DISABLED_LIST_PATH.exists()
+    assert json.loads(workflows.DISABLED_LIST_PATH.read_text()) == []
 
 
 def test_enable_targeted_only_restores_tracked_workflows(monkeypatch) -> None:
@@ -369,3 +376,46 @@ def test_tracked_all_disabled_false_when_one_was_re_enabled(monkeypatch) -> None
     )
     monkeypatch.setattr(subprocess, "run", fake)
     assert workflows.tracked_all_disabled() is False
+
+
+def test_a_session_that_disables_nothing_enables_nothing_on_shutdown(monkeypatch) -> None:
+    """The regression that re-armed GitHub Actions on a graceful shutdown.
+
+    Every genesis workflow was already `disabled_manually` from a prior local-mode
+    run, so `disable_workflows` skipped all of them and (before the fix) wrote no
+    tracking file. `enable_workflows` then read a missing file as "tracking lost",
+    dropped into recovery mode, and enabled all six on the way out. A workflow the
+    operator had disabled must never be enabled by serve, even temporarily.
+    """
+    already_off = [
+        {"id": 1, "name": "events", "state": "disabled_manually", "path": ".github/workflows/genesis-events.yml"},
+        {"id": 2, "name": "scheduled", "state": "disabled_manually", "path": ".github/workflows/genesis-scheduled.yml"},
+    ]
+    fake = FakeRun([already_off, already_off])
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    assert workflows.disable_workflows() == []
+    # The file must exist and be empty: "disabled nothing", not "lost the file".
+    assert workflows.DISABLED_LIST_PATH.exists()
+    assert json.loads(workflows.DISABLED_LIST_PATH.read_text()) == []
+
+    assert workflows.enable_workflows() == []
+    assert fake.enable_calls == []
+
+
+def test_empty_tracking_file_needs_no_reconcile(monkeypatch) -> None:
+    """`serve` reconciles when the tracking file disagrees with reality. An empty
+    file agrees with any reality, so reconciling would enable untracked workflows."""
+    workflows._persist_disabled([])
+    fake = FakeRun([[{"id": 1, "name": "events", "state": "disabled_manually", "path": ".github/workflows/genesis-events.yml"}]])
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert workflows.tracked_all_disabled() is True
+
+
+def test_missing_tracking_file_still_reaches_recovery_mode(monkeypatch) -> None:
+    """The manual hatch has to keep working: no file at all means enable everything."""
+    assert not workflows.DISABLED_LIST_PATH.exists()
+    fake = FakeRun([[{"id": 9, "name": "ci", "state": "disabled_manually", "path": ".github/workflows/ci.yml"}]])
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert workflows.enable_workflows() == ["ci"]
+    assert workflows.tracked_all_disabled.__doc__ is not None

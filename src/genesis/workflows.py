@@ -77,12 +77,20 @@ def disable_workflows(repo: str | None = None, genesis_only: bool = True) -> lis
     tracking file already exists from a prior session, new disables are
     appended to it.
 
+    The file is written even when nothing needed disabling. An empty list and a
+    missing file mean different things to [enable_workflows]: empty means "this
+    session disabled nothing, so restore nothing", while missing sends it into
+    recovery mode. Skipping the write let a session that found every workflow
+    already disabled re-enable all of them on the way out, which is the one
+    thing shutdown must never do.
+
     Returns the names of newly-disabled workflows.
     """
     existing = _load_disabled() or []
     tracked_ids = {wf["id"] for wf in existing}
     disabled = list(existing)
     new_names: list[str] = []
+    _persist_disabled(disabled)
     for wf in list_workflows(repo):
         if wf["state"] != "active":
             continue
@@ -111,10 +119,16 @@ def tracked_all_disabled(repo: str | None = None) -> bool:
     False when the tracking file is absent or any tracked workflow has been
     re-enabled behind our back, in which case the caller should reconcile by
     enabling and re-disabling.
+
+    An empty tracking list returns True: the previous session disabled nothing,
+    so there is nothing to heal, and reconciling would enable workflows this
+    tool never touched.
     """
     tracked = _load_disabled()
-    if not tracked:
+    if tracked is None:
         return False
+    if not tracked:
+        return True
     states = {wf["id"]: wf["state"] for wf in list_workflows(repo)}
     return all(states.get(wf["id"]) == "disabled_manually" for wf in tracked)
 
@@ -127,9 +141,13 @@ def enable_workflows(repo: str | None = None) -> list[str]:
     graceful-shutdown path — preserves user-intent for workflows the user had
     paused before running `genesis serve`.
 
-    Recovery mode: if the tracking file is missing (e.g. the file was lost or
-    `genesis workflows enable` is being used as a recovery hatch), fall back
-    to enabling everything currently `disabled_manually`.
+    A tracked list that is empty enables nothing, which is the correct restore
+    for a session that found everything already disabled.
+
+    Recovery mode: only when the tracking file is missing entirely (the file was
+    lost, or `genesis workflows enable` is being used as a manual recovery
+    hatch) does this fall back to enabling everything currently
+    `disabled_manually`. Never reach recovery mode from a normal shutdown.
 
     Returns the names of newly-enabled workflows.
     """
