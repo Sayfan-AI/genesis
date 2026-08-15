@@ -206,3 +206,59 @@ def test_long_input_is_truncated(repo: Path, fake_loki: tuple[str, list[dict]]) 
     url, pushes = fake_loki
     run_hook(repo, url, "pre-tool-use", {"tool_name": "Write", "tool_input": {"file_path": "/x", "content": "y" * 5000}})
     assert len(entry(pushes[0])[1]) < 400
+
+
+# ---------- host-guard.sh ----------
+
+def _guard(payload: str) -> int:
+    """Run host-guard.sh with a hook payload on stdin, return its exit code."""
+    import subprocess
+    from pathlib import Path
+
+    script = Path(__file__).parents[2] / "templates" / "scripts" / "host-guard.sh"
+    return subprocess.run(
+        ["bash", str(script)], input=payload, text=True, capture_output=True
+    ).returncode
+
+
+def test_guard_blocks_the_command_that_actually_happened() -> None:
+    """An agent hunting for a shell alias globbed the operator's dotfiles.
+
+    Nothing was exfiltrated and nothing was even looked for, but the glob covered
+    a file holding work credentials and matched lines would have reached a
+    transcript and a log sink. This is the case the guard exists for.
+    """
+    payload = (
+        '{"tool_name":"Bash","tool_input":{"command":'
+        '"grep -rn \\"gci\\" ~/.zshrc ~/.dotfiles.local/*.sh"}}'
+    )
+    assert _guard(payload) == 2
+
+
+def test_guard_blocks_credential_paths() -> None:
+    for command in ("cat ~/.ssh/id_rsa", "cat $HOME/.aws/credentials",
+                    "ls ~/.gnupg", "cat ~/.netrc", "cat ~/.claude.json"):
+        payload = '{"tool_name":"Bash","tool_input":{"command":"%s"}}' % command
+        assert _guard(payload) == 2, f"should have blocked: {command}"
+
+
+def test_guard_allows_ordinary_work() -> None:
+    """A guard that blocks real work gets removed, so the false-positive cost is
+    higher than the marginal security. ~/.kube is deliberately not on the list:
+    cluster kubeconfigs are referenced by explicit path and blocking them would
+    break the product's actual job."""
+    for command in ("go test ./...", "gh pr list", "git status --short",
+                    "kubectl --kubeconfig ./clusters/dev.yaml get pods"):
+        payload = '{"tool_name":"Bash","tool_input":{"command":"%s"}}' % command
+        assert _guard(payload) == 0, f"should have allowed: {command}"
+
+
+def test_guard_ignores_non_bash_tools() -> None:
+    assert _guard('{"tool_name":"Read","tool_input":{"file_path":"~/.ssh/id_rsa"}}') == 0
+
+
+def test_guard_fails_open_on_a_broken_payload() -> None:
+    """A bug in the guard must not wedge the loop. That trade is why this is a
+    tripwire and not a boundary, and it is stated in the script's header."""
+    for payload in ("", "not json", "{}", '{"tool_name":"Bash"}'):
+        assert _guard(payload) == 0

@@ -419,3 +419,41 @@ def test_missing_tracking_file_still_reaches_recovery_mode(monkeypatch) -> None:
     monkeypatch.setattr(subprocess, "run", fake)
     assert workflows.enable_workflows() == ["ci"]
     assert workflows.tracked_all_disabled.__doc__ is not None
+
+
+def test_every_hook_script_is_in_the_seed_manifest() -> None:
+    """A settings.json hook naming a script the scaffolder never copies is worse
+    than a missing feature: the hook fires on every tool call and fails.
+
+    This is the manifest gap that shipped once already. `genesis-merge.yml`
+    existed as a template and was never added to the list of workflows the
+    scaffolder copies, so the first dev system was born unable to merge its own
+    pull requests and nobody noticed until a green PR sat unmerged. The class is
+    "referenced but not shipped", so assert the two lists agree rather than
+    remembering to update both.
+    """
+    import json
+    from pathlib import Path
+
+    from genesis import scaffold
+
+    settings = json.loads((scaffold.TEMPLATES_DIR / "settings.json").read_text())
+    referenced = set()
+    for matchers in (settings.get("hooks") or {}).values():
+        for matcher in matchers:
+            for hook in matcher.get("hooks", []):
+                for token in hook.get("command", "").split():
+                    if token.startswith(".genesis/scripts/"):
+                        referenced.add(Path(token).name)
+
+    missing = sorted(referenced - set(scaffold.SEED_SCRIPTS))
+    assert not missing, (
+        f"settings.json hooks reference {missing}, which SEED_SCRIPTS does not "
+        "copy into a new project. Add them to SEED_SCRIPTS or stop referencing them."
+    )
+
+    for script in referenced:
+        assert (scaffold.TEMPLATES_DIR / "scripts" / script).exists(), (
+            f"{script} is referenced by a hook and listed in SEED_SCRIPTS but "
+            "does not exist in templates/scripts/"
+        )
