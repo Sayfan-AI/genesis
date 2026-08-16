@@ -125,6 +125,21 @@ class TestProseIsNotARead:
         code, _ = run_guard(command)
         assert code == ALLOWED
 
+    def test_a_heredoc_inside_a_substitution_is_allowed(self):
+        """The single most common way an agent writes prose about this guard.
+
+        The line starts with `gh`, but the body is consumed by `cat` inside a
+        command substitution. Classifying by the first word of the line gets this
+        wrong, which is why the check finds the command that owns the `<<`.
+        """
+        command = (
+            'gh pr create --body "$(cat <<\'EOF\'\n'
+            "The guard refuses commands reaching for ~/.ssh and ~/.aws.\n"
+            'EOF\n)"'
+        )
+        code, err = run_guard(command)
+        assert code == ALLOWED, f"substitution shape refused: {err}"
+
     def test_an_indented_heredoc_terminator_is_understood(self):
         """<<- strips leading tabs, so the terminator is matched after stripping."""
         command = "cat <<-'EOF'\n\tmentions ~/.ssh in prose\n\tEOF"
@@ -160,10 +175,22 @@ class TestTheExemptionCannotBeUsedAsABypass:
         code, _ = run_guard(command)
         assert code == BLOCKED, "bypass: write-then-execute chain"
 
-    def test_command_substitution_keeps_the_body_in_scope(self):
-        command = "cat > $(echo /tmp/x.sh) <<'EOF'\ncat ~/.ssh/id_rsa\nEOF"
+    def test_an_interpreter_inside_a_substitution_is_still_code(self):
+        """The cost of allowing the `$(cat <<EOF)` shape.
+
+        Once a substitution can own a heredoc, the owning command inside it has to
+        be checked as carefully as one at the start of a line, or the fix for the
+        prose false positive hands back the same bypass through a different door.
+        """
+        command = 'gh pr create --body "$(bash <<\'EOF\'\ncat ~/.ssh/id_rsa\nEOF\n)"'
         code, _ = run_guard(command)
-        assert code == BLOCKED, "bypass: substitution in the opener"
+        assert code == BLOCKED, "bypass: interpreter owning a heredoc inside $()"
+
+    @pytest.mark.parametrize("interp", ["sh", "python3", "node"])
+    def test_no_interpreter_inside_a_substitution_gets_the_exemption(self, interp):
+        command = f"echo \"$({interp} <<'EOF'\ncat ~/.ssh/id_rsa\nEOF\n)\""
+        code, _ = run_guard(command)
+        assert code == BLOCKED, f"bypass via $({interp} <<EOF)"
 
     def test_an_unterminated_heredoc_strips_nothing(self):
         """Not a well-formed heredoc, so there is no body to classify.
