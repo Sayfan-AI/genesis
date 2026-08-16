@@ -452,8 +452,27 @@ def test_every_hook_script_is_in_the_seed_manifest() -> None:
         "copy into a new project. Add them to SEED_SCRIPTS or stop referencing them."
     )
 
+    import subprocess
+
+    tracked = set(
+        subprocess.run(
+            ["git", "ls-files", "templates/scripts/"],
+            capture_output=True, text=True, check=True,
+            cwd=Path(scaffold.__file__).parents[2],
+        ).stdout.split()
+    )
+    tracked_names = {Path(p).name for p in tracked}
+
     for script in referenced:
-        assert (scaffold.TEMPLATES_DIR / "scripts" / script).exists(), (
-            f"{script} is referenced by a hook and listed in SEED_SCRIPTS but "
-            "does not exist in templates/scripts/"
+        # Existence on disk is not enough, and checking only that is how this
+        # test passed while the bug it exists for shipped. `gcm` is
+        # `git commit -a`, which stages modified TRACKED files and silently skips
+        # a brand-new one, so the manifest entry, the hook reference and this
+        # assertion all landed in a commit that did not contain the script. It
+        # passed locally forever and would fail on any fresh clone.
+        assert script in tracked_names, (
+            f"{script} is referenced by a hook and listed in SEED_SCRIPTS, and it "
+            "exists on this machine, but git does not track it. A fresh clone gets "
+            "a hook pointing at a missing file. Run `git add templates/scripts/"
+            f"{script}`."
         )
