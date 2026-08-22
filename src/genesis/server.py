@@ -368,18 +368,71 @@ def _git(args: list[str]) -> str:
         return ""
 
 
-def repo_fingerprint() -> str:
-    """A cheap hash of what the repo actually looks like right now.
+# Reflog subjects that mean "a commit was created here, locally". A pull writes
+# `pull --ff-only: Fast-forward` and a checkout writes `checkout: moving from ...`,
+# neither of which is work this machine did.
+#
+# `merge` is deliberately absent even though a non-fast-forward merge of a local
+# branch is local work: a pull that has to merge also writes `merge origin/main:
+# ...`, and the two are not distinguishable from the subject alone. Leaving it out
+# costs a judge call on a rare shape; including it would reinstate exactly the
+# false positive this exists to remove.
+LOCAL_COMMIT_REFLOG_PREFIXES = ("commit", "rebase", "cherry-pick")
 
-    This is the evidence the continuation decision rests on, and it is deliberately
-    not the agent's own account of what it did. Within one hour we watched a worker
-    report it had not merged a PR it had merged, and an orchestrator conclude that
-    auto-merge had closed an issue a human closed by hand. Self-reports are a
-    narrative; HEAD and the working tree are facts.
+
+def session_work_marker() -> str:
+    """A cheap hash of the work *this machine* has done, for before/after comparison.
+
+    Still evidence rather than self-report, which is the part that must not change:
+    within one hour we watched a worker report it had not merged a PR it had merged,
+    and an orchestrator conclude that auto-merge had closed an issue a human closed
+    by hand. HEAD and the working tree are facts; a narrative isn't.
+
+    What changed is the question being asked. Hashing `HEAD + git status` answers
+    "did this repository change", and the ladder was reading it as "did this session
+    accomplish something". Those coincide only when the session is the sole writer,
+    and it never is: a human merging a pull request mid-session, auto-merge landing
+    a bot PR, or the session's own opening `git pull` all move HEAD without the
+    session having produced anything. Measured (#47) — a session that ran 38 reads
+    and greps, wrote nothing, pulled somebody else's squash-merge once, and was
+    scored as having landed work.
+
+    Three components, all narrow on purpose:
+
+    - Reflog entries that record a commit being *created here*. A fetched commit
+      never gets one; `git commit` always does, and it survives the subsequent push.
+    - Commits reachable from HEAD but from no remote-tracking ref, so an unpushed
+      commit still counts if the reflog is off (`core.logAllRefUpdates=false`) and
+      a pulled commit still doesn't, since it arrives already reachable from one.
+    - Tracked-file modifications, **excluding untracked files**. A stray temporary
+      file left by a tool is indistinguishable from a new source file by path alone,
+      so untracked-only churn is treated as ambiguous rather than as progress, and
+      the judge — which is handed `git status --porcelain` as evidence — decides.
+
+    The residual gap is a session that commits *and* pushes within one attempt while
+    the reflog is disabled: nothing local remains to point at. That reads as
+    ambiguous and costs one judge call, which is the safe direction. Scoring it as
+    progress is the direction that bills.
     """
     return hashlib.sha256(
-        "\n".join([_git(["rev-parse", "HEAD"]), _git(["status", "--porcelain"])]).encode()
+        "\n".join(
+            [
+                _local_commit_reflog(),
+                _git(["rev-list", "HEAD", "--not", "--remotes"]),
+                _git(["status", "--porcelain", "--untracked-files=no"]),
+            ]
+        ).encode()
     ).hexdigest()[:16]
+
+
+def _local_commit_reflog() -> str:
+    """Reflog entries for commits created on this machine, newest first."""
+    entries = _git(["reflog", "show", "HEAD", "--format=%H %gs"])
+    return "\n".join(
+        line
+        for line in entries.splitlines()
+        if line.partition(" ")[2].startswith(LOCAL_COMMIT_REFLOG_PREFIXES)
+    )
 
 
 def _brief(tool_input: object, limit: int = 88) -> str:
@@ -638,7 +691,7 @@ class LocalControlPlane:
 
         task = prompt.splitlines()[0] if prompt else "the current unit of work"
         self.continuation_index = 0
-        before = repo_fingerprint()
+        before = session_work_marker()
         rc = self._run_session(prompt, deadline)
         # Two accumulators, updated together at every point a session's cost is
         # final: `spent` is this chain's, `run_spent` is the process's. If you add
@@ -682,7 +735,7 @@ class LocalControlPlane:
 
             log(f"  hit max turns; resuming {session_id[:8]} "
                 f"(continuation {attempt}, ${spent:.2f} spent) - {why}")
-            before = repo_fingerprint()
+            before = session_work_marker()
             self.continuation_index = attempt
             rc = self._run_session(None, deadline, resume=session_id)
             spent += self.last_cost
@@ -697,12 +750,13 @@ class LocalControlPlane:
         # that dispatch.
         if (
             not self.shutdown
-            and repo_fingerprint() != before
+            and session_work_marker() != before
             and self.followup_chain < MAX_FOLLOWUP_CHAIN
         ):
             self.followup_chain += 1
             self.pending_followup = True
-            log(f"  work landed; queueing a follow-up pass ({self.followup_chain}/{MAX_FOLLOWUP_CHAIN})")
+            log(f"  this session changed the repo; queueing a follow-up pass "
+                f"({self.followup_chain}/{MAX_FOLLOWUP_CHAIN})")
 
         if _died_mid_task(self.last_result_subtype):
             # The work is real and uncommitted, and nothing else is scheduled to
@@ -931,8 +985,8 @@ class LocalControlPlane:
             return False, f"task cost ceiling reached (${spent:.2f} >= ${ceiling:.2f})"
         if self.last_tool_calls == 0:
             return False, "the attempt made no tool calls"
-        if repo_fingerprint() != before:
-            return True, "work landed in the repo"
+        if session_work_marker() != before:
+            return True, "this session changed the repo"
         return self.ask_judge(task)
 
     def _run_session(

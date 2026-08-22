@@ -18,19 +18,97 @@ from genesis import server
 def test_brain_death_resumes_while_work_lands_then_stops(plane, script, sessions_run, monkeypatch):
     """A session dying at max-turns should be resumed only while it makes progress.
 
-    Rung 3 continues on a changed repo fingerprint. When the fingerprint stops
-    moving the chain has to end, or a task that dies the same way forever bills
-    forever.
+    Rung 3 continues when the session itself changed the repo. When it stops
+    changing anything the chain has to end, or a task that dies the same way
+    forever bills forever.
+
+    The landing sessions *commit*. They used to only `touch` an untracked file,
+    which scored as progress back when the signal hashed `git status --porcelain`
+    - the same leniency that let a stray temporary file stand in for work (#47).
     """
     monkeypatch.setenv("GENESIS_COST_CEILING", "100")
     script([
-        {"tools": 5, "subtype": "error_max_turns", "turns": 41, "cost": 1.0, "touch": "a.txt"},
-        {"tools": 5, "subtype": "error_max_turns", "turns": 41, "cost": 1.0, "touch": "b.txt"},
+        {"tools": 5, "subtype": "error_max_turns", "turns": 41, "cost": 1.0, "commit": "a.txt"},
+        {"tools": 5, "subtype": "error_max_turns", "turns": 41, "cost": 1.0, "commit": "b.txt"},
         {"tools": 5, "subtype": "error_max_turns", "turns": 41, "cost": 1.0},
     ], judge="STOP")
     plane.run_orchestrator(None)
     assert plane.continuation_index >= 2, "should have resumed while work was landing"
     assert sessions_run() <= server.MAX_CONTINUATIONS + 2, "chain must be bounded"
+
+
+def test_a_commit_the_session_authored_is_progress(plane, script, monkeypatch):
+    """The positive control for the two negatives below.
+
+    Narrowing what counts as progress is only correct if it still counts the
+    real thing - a fix that simply disabled rung 3 would pass both negative
+    tests. This is a single session so the follow-up check, which compares
+    against the state before the *last* attempt, sees the commit.
+    """
+    monkeypatch.setenv("GENESIS_COST_CEILING", "100")
+    script([{"tools": 3, "subtype": "success", "turns": 5, "cost": 1.0, "commit": "feature.py"}])
+
+    plane.run_orchestrator(None)
+
+    assert plane.followup_chain == 1, "a session that committed should wake the loop again"
+
+
+def test_somebody_elses_merge_is_not_this_sessions_progress(
+    plane, script, outside_writer, monkeypatch
+):
+    """The measured false positive (#47), reproduced end to end.
+
+    A human merged a pull request while a session ran; the session pulled it,
+    then spent an hour on reads and greps and produced nothing. HEAD had moved,
+    so rung 3 scored it as work landing and the loop queued a follow-up pass on
+    the strength of somebody else's commit.
+
+    The judge says STOP here on purpose: a chain that stops for the right reason
+    and one that stops for the wrong reason look identical from the outside, so
+    the assertion is on *which rung answered*, not merely on stopping.
+    """
+    monkeypatch.setenv("GENESIS_COST_CEILING", "100")
+    outside_writer("a human merged PR #215")
+    script([
+        {"tools": 5, "subtype": "error_max_turns", "turns": 41, "cost": 1.0, "pull": True},
+        {"tools": 5, "subtype": "error_max_turns", "turns": 41, "cost": 1.0},
+    ], judge="STOP not converging")
+
+    plane.run_orchestrator(None)
+
+    assert server._git(["log", "--oneline", "-1"]).endswith("a human merged PR #215"), (
+        "the scenario is only meaningful if HEAD actually moved"
+    )
+    assert plane.continuation_index == 0, (
+        "rung 3 must not resume on somebody else's commit; the judge decides here"
+    )
+    assert plane.followup_chain == 0, (
+        "pulling somebody else's merge must not queue a follow-up pass"
+    )
+
+
+def test_a_stray_untracked_file_is_not_progress(plane, script, monkeypatch):
+    """`git status --porcelain` reports untracked files, so a temporary file left
+    by a tool was indistinguishable from a new source file.
+
+    It's genuinely ambiguous - a new test file looks the same until it's added -
+    so it falls to the judge rather than being scored either way outright.
+    """
+    monkeypatch.setenv("GENESIS_COST_CEILING", "100")
+    script([
+        {"tools": 5, "subtype": "error_max_turns", "turns": 41, "cost": 1.0, "touch": "tmp.log"},
+        {"tools": 5, "subtype": "error_max_turns", "turns": 41, "cost": 1.0},
+    ], judge="STOP nothing durable")
+
+    plane.run_orchestrator(None)
+
+    assert (repo_tmp := server._git(["status", "--porcelain"])) and "tmp.log" in repo_tmp, (
+        "the scenario is only meaningful if the stray file is actually there"
+    )
+    assert plane.continuation_index == 0, (
+        "rung 3 must not resume on a stray file; the judge decides here"
+    )
+    assert plane.followup_chain == 0, "an untracked stray must not queue a follow-up pass"
 
 
 def test_a_session_that_runs_no_tools_stops_the_chain(plane, script, sessions_run, monkeypatch):

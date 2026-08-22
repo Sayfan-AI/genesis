@@ -23,7 +23,9 @@ Per-session keys:
     subtype  terminal result subtype: success, error_max_turns, error_during_execution
     turns    num_turns to report
     cost     total_cost_usd to report
-    touch    write this file in cwd, so the repo fingerprint changes
+    touch    write an untracked file in cwd (ambiguous churn, not progress)
+    commit   write AND commit this file, which is progress the session authored
+    pull     fast-forward from origin, i.e. somebody else's work arriving
     hang     sleep forever instead of finishing, to exercise the deadline
     crash    exit non-zero without emitting a result event
     garbage  emit an unparseable line before the result
@@ -32,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -52,11 +55,20 @@ def main() -> int:
     argv = sys.argv[1:]
 
     # The judge is the one session launched with no tools and a tiny budget. It
-    # answers in prose rather than stream-json, so it is handled separately.
+    # answers with a single JSON envelope rather than a stream-json feed, so it is
+    # handled separately. Emitting the envelope rather than bare prose matters:
+    # server.py reads `total_cost_usd` out of it to charge the judge to both cost
+    # accumulators, and a harness that printed prose would exercise only the
+    # fallback and leave the accounting untested.
     if "--max-turns" in argv:
         budget = int(argv[argv.index("--max-turns") + 1])
         if budget <= 2:
-            print(spec.get("judge", "STOP"))
+            print(json.dumps({
+                "type": "result",
+                "subtype": "success",
+                "result": spec.get("judge", "STOP"),
+                "total_cost_usd": float(spec.get("judge_cost", 0.0)),
+            }))
             return 0
 
     counter = Path(spec_path + ".n")
@@ -82,6 +94,25 @@ def main() -> int:
 
     if step.get("touch"):
         Path(step["touch"]).write_text(f"session {n}\n")
+
+    # Work that actually lands, as distinct from `touch`, which leaves an untracked
+    # file. The two used to be interchangeable because the progress signal hashed
+    # `git status --porcelain`, so a stray temporary file scored the same as a
+    # commit. They are no longer interchangeable, which is the point (#47).
+    if step.get("commit"):
+        Path(step["commit"]).write_text(f"session {n}\n")
+        subprocess.run(["git", "add", "--", step["commit"]], check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=f@x", "-c", "user.name=fake",
+             "commit", "-qm", f"session {n} work"],
+            check=True,
+        )
+
+    # An outside writer: somebody else's commit arriving over the wire, which is
+    # what a human merging a pull request mid-session looks like from here. The
+    # session did not author it and must not be credited with it.
+    if step.get("pull"):
+        subprocess.run(["git", "pull", "-q", "--ff-only", "origin", "main"], check=True)
 
     if step.get("garbage"):
         print("this is not json", flush=True)
