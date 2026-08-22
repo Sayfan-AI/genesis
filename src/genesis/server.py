@@ -432,6 +432,15 @@ class LocalControlPlane:
     # `spent` in run_orchestrator resets on each fresh chain by design; this does
     # not, which is the whole difference between the two bounds (#46).
     run_spent: float = 0.0
+    # What the last `_should_continue` call spent on judges, folded into both
+    # accumulators by run_orchestrator. Reported rather than self-accumulated so
+    # that the "both accumulators move together, in one place" invariant below
+    # holds for judge sessions too.
+    last_judge_cost: float = 0.0
+    # Set when a judge session's cost could not be read, which makes every figure
+    # downstream a lower bound rather than an exact total. Surfaced at shutdown,
+    # because a bound an operator trusts has to say when it is guessing.
+    cost_is_lower_bound: bool = False
     recent_tools: list[str] = field(default_factory=list)
     pending_followup: bool = False
     continuation_index: int = 0
@@ -599,7 +608,7 @@ class LocalControlPlane:
         # worse than not stopping.
         budget = _run_cost_budget()
         if self.run_spent >= budget:
-            log(f"Run cost budget reached (${self.run_spent:.2f} >= ${budget:.2f}) "
+            log(f"Run cost budget reached ({self._spend(self.run_spent)} >= ${budget:.2f}) "
                 f"- not launching, shutting down")
             loki_push(
                 "run-budget-stop",
@@ -649,6 +658,12 @@ class LocalControlPlane:
                 break
 
             go, why = self._should_continue(task, before, spent)
+            # The judge is a real `claude` session and its cost is real. It bypasses
+            # `_run_session`, so nothing else adds it, and it is consulted on the
+            # ambiguous rung a thrashing chain keeps landing on - the accounting was
+            # systematically low exactly where the bounds matter (#50).
+            spent += self.last_judge_cost
+            self.run_spent += self.last_judge_cost
             loki_push(
                 "continuation-decision",
                 {
@@ -656,6 +671,7 @@ class LocalControlPlane:
                     "decision": "continue" if go else "stop",
                     "reason": why,
                     "spent_usd": round(spent, 4),
+                    "judge_cost_usd": round(self.last_judge_cost, 4),
                     "attempt": attempt,
                     "session": session_id,
                 },
@@ -781,6 +797,39 @@ class LocalControlPlane:
             self.identity_logged = True
         return env
 
+    def _spend(self, amount: float) -> str:
+        """Format a running total, saying so when it is known to be incomplete.
+
+        A bound is only worth what an operator's trust in it is worth, so a total
+        that has lost a judge session's cost has to read differently from one that
+        hasn't. "$52.11" and "at least $52.11" lead to different decisions.
+        """
+        return f"{'at least ' if self.cost_is_lower_bound else ''}${amount:.2f}"
+
+    def _read_judge_output(self, stdout: str | None) -> tuple[str, float]:
+        """Pull the judge's one-word verdict and its cost out of `--output-format json`.
+
+        Falls back to reading the payload as prose. That fallback is not defensive
+        padding: a judge that stops parsing is a judge that always fails closed,
+        which silently converts every ambiguous continuation into a stop and idles
+        the dev system. Losing the cost figure is the smaller harm, so an
+        unreadable envelope costs accuracy, not the verdict - and it sets
+        `cost_is_lower_bound` so the totals stop claiming to be exact (#50).
+        """
+        text = (stdout or "").strip()
+        if not text:
+            return "", 0.0
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict) or "result" not in payload:
+            self.cost_is_lower_bound = True
+            log("  WARNING: judge output was not the expected JSON envelope - "
+                "its cost is unaccounted, so the totals below are a lower bound")
+            return text, 0.0
+        return str(payload.get("result") or "").strip(), float(payload.get("total_cost_usd") or 0)
+
     def ask_judge(self, task: str) -> tuple[bool, str]:
         """Ask a fresh session whether a stalled run deserves another continuation.
 
@@ -793,6 +842,7 @@ class LocalControlPlane:
         because the failure mode of a broken judge should be an idle dev system,
         not an open-ended spend.
         """
+        self.last_judge_cost = 0.0
         evidence = "\n".join(
             [
                 f"Task: {task}",
@@ -833,6 +883,13 @@ class LocalControlPlane:
             str(JUDGE_MAX_TURNS),
             "--allowedTools",
             "",
+            # Asked for so the judge's own spend can be read back. Without it
+            # `claude -p` prints bare prose, nothing carries `total_cost_usd`, and
+            # both bounds undercount by one judge session per continuation
+            # decision (#50) - precisely on the ambiguous rung a thrashing chain
+            # keeps landing on, so the calls cluster where spend already matters.
+            "--output-format",
+            "json",
         ]
         child_env = self._session_env()
         try:
@@ -842,7 +899,7 @@ class LocalControlPlane:
         except (OSError, subprocess.SubprocessError) as e:
             return False, f"judge unavailable ({e})"
 
-        answer = (out.stdout or "").strip()
+        answer, self.last_judge_cost = self._read_judge_output(out.stdout)
         head = answer.upper()[:40]
         if head.startswith("CONTINUE"):
             return True, answer.splitlines()[0][:160]
@@ -859,12 +916,16 @@ class LocalControlPlane:
         but nothing landed — because every other rung is answerable by git or by a
         counter, and paying for an opinion you can compute is waste.
         """
+        # Zeroed here, not only in ask_judge: most rungs answer without paying for
+        # a judge at all, and a stale figure from the previous decision would be
+        # charged again by the caller.
+        self.last_judge_cost = 0.0
         # The wider bound is checked first, and each message names WHICH bound
         # fired. "cost ceiling reached" said neither which one nor what it was the
         # ceiling of, so a reader could not tell a task tripwire from a run stop.
         budget = _run_cost_budget()
         if self.run_spent >= budget:
-            return False, f"run cost budget reached (${self.run_spent:.2f} >= ${budget:.2f})"
+            return False, f"run cost budget reached ({self._spend(self.run_spent)} >= ${budget:.2f})"
         ceiling = _task_cost_ceiling()
         if spent >= ceiling:
             return False, f"task cost ceiling reached (${spent:.2f} >= ${ceiling:.2f})"
