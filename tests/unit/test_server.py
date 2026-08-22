@@ -514,7 +514,7 @@ def test_run_orchestrator_requests_streaming_output(plane) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_real_git(monkeypatch):
-    """Keep repo_fingerprint away from subprocess.
+    """Keep session_work_marker away from subprocess.
 
     `subprocess.run` builds a Popen internally, and these tests patch Popen to
     fake claude sessions — so a real git call would be handed a MagicMock and
@@ -527,7 +527,7 @@ def _no_real_git(monkeypatch):
         counter["n"] += 1
         return f"fp-{counter['n']}"
 
-    monkeypatch.setattr(server, "repo_fingerprint", fingerprint)
+    monkeypatch.setattr(server, "session_work_marker", fingerprint)
 
 
 def _session_stream(subtype: str, tool_calls: int = 1, sid: str = "sess-abc123def") -> list[str]:
@@ -662,18 +662,18 @@ def _judge_json(verdict: str, cost: float = 0.0) -> str:
 
 
 def test_landed_work_continues_without_paying_a_judge(plane, monkeypatch) -> None:
-    """Cheapest rung: git already answers "did anything happen", so don't buy an
-    opinion you can compute."""
+    """Cheapest rung: git already answers "did this session do anything", so don't
+    buy an opinion you can compute."""
     called = []
     monkeypatch.setattr(plane, "ask_judge", lambda task: called.append(task) or (False, "x"))
     plane.last_tool_calls = 5
     go, why = plane._should_continue("task", before="OLD", spent=1.0)
-    assert go and "landed" in why
+    assert go and "changed the repo" in why
     assert called == [], "judge must not be consulted when progress is visible"
 
 
 def test_stalled_attempt_consults_the_judge(plane, monkeypatch) -> None:
-    monkeypatch.setattr(server, "repo_fingerprint", lambda: "SAME")
+    monkeypatch.setattr(server, "session_work_marker", lambda: "SAME")
     monkeypatch.setattr(plane, "ask_judge", lambda task: (True, "converging on a fix"))
     plane.last_tool_calls = 9
     go, why = plane._should_continue("task", before="SAME", spent=1.0)
@@ -869,7 +869,7 @@ def test_a_session_that_changed_the_repo_queues_another_pass(plane, monkeypatch)
     MaKlaude - a task closed at 06:31 and nothing moved until a human commented
     16 minutes later, otherwise it would have idled until the six-hour cron."""
     fingerprints = iter(["before", "after", "after", "after"])
-    monkeypatch.setattr(server, "repo_fingerprint", lambda: next(fingerprints, "after"))
+    monkeypatch.setattr(server, "session_work_marker", lambda: next(fingerprints, "after"))
     calls = _fake_sessions(plane, [_session_stream("success")])
     try:
         plane.run_orchestrator(None)
@@ -880,7 +880,7 @@ def test_a_session_that_changed_the_repo_queues_another_pass(plane, monkeypatch)
 
 
 def test_a_session_that_changed_nothing_does_not_queue_a_pass(plane, monkeypatch) -> None:
-    monkeypatch.setattr(server, "repo_fingerprint", lambda: "same")
+    monkeypatch.setattr(server, "session_work_marker", lambda: "same")
     calls = _fake_sessions(plane, [_session_stream("success")])
     try:
         plane.run_orchestrator(None)
@@ -892,7 +892,7 @@ def test_a_session_that_changed_nothing_does_not_queue_a_pass(plane, monkeypatch
 def test_the_followup_chain_is_bounded(plane, monkeypatch) -> None:
     """"Work begets work" must not become a spin."""
     counter = iter(range(100))
-    monkeypatch.setattr(server, "repo_fingerprint", lambda: f"fp-{next(counter)}")
+    monkeypatch.setattr(server, "session_work_marker", lambda: f"fp-{next(counter)}")
     plane.followup_chain = server.MAX_FOLLOWUP_CHAIN
     calls = _fake_sessions(plane, [_session_stream("success")])
     try:
@@ -913,7 +913,7 @@ def test_judge_cost_lands_in_both_accumulators(plane, monkeypatch) -> None:
     the systematically-low direction, and it is worst on the ambiguous rung a
     thrashing chain lands on over and over.
     """
-    monkeypatch.setattr(server, "repo_fingerprint", lambda: "SAME")
+    monkeypatch.setattr(server, "session_work_marker", lambda: "SAME")
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -933,7 +933,7 @@ def test_judge_cost_lands_in_both_accumulators(plane, monkeypatch) -> None:
 
 def test_a_chain_pays_for_every_judge_it_consults(plane, monkeypatch) -> None:
     """N continuation decisions must account for N judge sessions, not zero."""
-    monkeypatch.setattr(server, "repo_fingerprint", lambda: "SAME")
+    monkeypatch.setattr(server, "session_work_marker", lambda: "SAME")
     judges: list[str] = []
 
     def fake_run(cmd, **kwargs):
@@ -961,7 +961,7 @@ def test_a_chain_pays_for_every_judge_it_consults(plane, monkeypatch) -> None:
 def test_a_rung_answered_without_a_judge_charges_nothing(plane, monkeypatch) -> None:
     """Most rungs are answered by git or a counter. A stale figure from the
     previous decision would be charged again by the caller."""
-    monkeypatch.setattr(server, "repo_fingerprint", lambda: "NEW")
+    monkeypatch.setattr(server, "session_work_marker", lambda: "NEW")
     plane.last_judge_cost = 0.99
     plane.last_tool_calls = 3
 

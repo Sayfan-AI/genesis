@@ -29,20 +29,65 @@ FAKE = Path(__file__).parent / "fake_claude.py"
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
-    """A throwaway git repo laid out like a dev system, and cwd pointed at it."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / ".genesis").mkdir()
-    (tmp_path / ".genesis" / "config.toml").write_text('name = "chaos"\n')
-    (tmp_path / ".claude" / "agents").mkdir(parents=True)
-    (tmp_path / ".claude" / "agents" / "orchestrator.md").write_text("# orchestrator\n")
-    subprocess.run(["git", "init", "-q", "."], check=True)
-    (tmp_path / "seed.txt").write_text("seed\n")
+    """A throwaway git repo laid out like a dev system, and cwd pointed at it.
+
+    It has a real `origin` because the progress signal asks whether a commit is
+    reachable from a remote-tracking ref, and a repo with no remote answers "no"
+    for everything. Without an origin the outside-writer scenario cannot be
+    written at all - somebody else's merge arriving over the wire is precisely
+    what rung 3 used to score as this session's work (#47).
+    """
+    # The working repo is a *subdirectory* of tmp_path, not tmp_path itself, so
+    # origin and the outsider clone have somewhere private to live. Putting them
+    # in tmp_path.parent instead would share one origin across every test in the
+    # session, and the second push would be rejected as non-fast-forward.
+    work = tmp_path / "repo"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    (work / ".genesis").mkdir()
+    (work / ".genesis" / "config.toml").write_text('name = "chaos"\n')
+    (work / ".claude" / "agents").mkdir(parents=True)
+    (work / ".claude" / "agents" / "orchestrator.md").write_text("# orchestrator\n")
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], check=True)
+    (work / "seed.txt").write_text("seed\n")
     subprocess.run(["git", "add", "-A"], check=True)
     subprocess.run(
         ["git", "-c", "user.email=c@x", "-c", "user.name=c", "commit", "-qm", "seed"],
         check=True,
     )
-    return tmp_path
+
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "main"], check=True)
+    return work
+
+
+@pytest.fixture
+def outside_writer(repo, tmp_path):
+    """Land a commit on origin that this repo did not author.
+
+    A human merging a pull request while a session runs, or auto-merge landing a
+    bot PR in the GitHub Actions mode. The session sees it only once it pulls.
+    """
+    clone = tmp_path / "outsider"
+
+    def land(message: str = "somebody else's merge") -> None:
+        if not clone.exists():
+            subprocess.run(
+                ["git", "clone", "-q", str(tmp_path / "origin.git"), str(clone)],
+                check=True,
+            )
+        (clone / "outsider.txt").write_text(message + "\n")
+        subprocess.run(["git", "-C", str(clone), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(clone), "-c", "user.email=o@x", "-c", "user.name=outsider",
+             "commit", "-qm", message],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(clone), "push", "-q", "origin", "main"], check=True)
+
+    return land
 
 
 @pytest.fixture
