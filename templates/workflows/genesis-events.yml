@@ -19,7 +19,7 @@ jobs:
     # Skip events from bots to prevent loops
     if: github.actor != 'github-actions[bot]' && github.actor != 'genesis-dev-bot[bot]' && github.actor != 'claude[bot]'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/create-github-app-token@v3
         id: app-token
