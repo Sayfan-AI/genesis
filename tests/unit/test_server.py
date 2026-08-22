@@ -654,6 +654,13 @@ def test_shutdown_stops_continuations(plane) -> None:
 # ---------- dynamic continuation: the decision ladder ----------
 
 
+def _judge_json(verdict: str, cost: float = 0.0) -> str:
+    """What `claude -p --output-format json` actually hands back."""
+    return json.dumps(
+        {"type": "result", "subtype": "success", "result": verdict, "total_cost_usd": cost}
+    )
+
+
 def test_landed_work_continues_without_paying_a_judge(plane, monkeypatch) -> None:
     """Cheapest rung: git already answers "did anything happen", so don't buy an
     opinion you can compute."""
@@ -685,7 +692,7 @@ def test_cost_ceiling_overrides_everything(plane, monkeypatch) -> None:
 def test_judge_fails_closed_on_garbage(plane, monkeypatch) -> None:
     """A broken judge should leave an idle dev system, not an open-ended spend."""
     monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "maybe?", "")
+        subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, _judge_json("maybe?"), "")
     )
     go, why = plane.ask_judge("task")
     assert not go and "no clear verdict" in why
@@ -700,7 +707,7 @@ def test_judge_reads_evidence_not_self_report(plane, monkeypatch) -> None:
         if cmd[0] == "git":
             return subprocess.CompletedProcess(cmd, 0, f"GITOUT:{cmd[1]}", "")
         seen["prompt"] = cmd[cmd.index("-p") + 1]
-        return subprocess.CompletedProcess(cmd, 0, "STOP thrashing on the same file", "")
+        return subprocess.CompletedProcess(cmd, 0, _judge_json("STOP thrashing on the same file"), "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     plane.recent_tools = ["Edit plan.go", "Edit plan.go"]
@@ -717,7 +724,7 @@ def test_judge_gets_no_tools(plane, monkeypatch) -> None:
     def fake_run(cmd, **kwargs):
         if cmd[0] == "claude":
             captured["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, 0, "STOP done", "")
+        return subprocess.CompletedProcess(cmd, 0, _judge_json("STOP done"), "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     plane.ask_judge("task")
@@ -893,3 +900,130 @@ def test_the_followup_chain_is_bounded(plane, monkeypatch) -> None:
     finally:
         plane._stop_patch.stop()
     assert plane.pending_followup is False, "chain budget exhausted, wait for a real trigger"
+
+
+# ---------- the judge's own spend (#50) ----------
+
+
+def test_judge_cost_lands_in_both_accumulators(plane, monkeypatch) -> None:
+    """The judge is a real session and its dollars are real dollars.
+
+    It bypasses `_run_session`, so before this nothing added it: both the task
+    ceiling and the run budget read zero for every judge ever consulted. That is
+    the systematically-low direction, and it is worst on the ambiguous rung a
+    thrashing chain lands on over and over.
+    """
+    monkeypatch.setattr(server, "repo_fingerprint", lambda: "SAME")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, _judge_json("CONTINUE nearly done", 0.25), ""),
+    )
+    plane.last_tool_calls = 4
+    plane.run_spent = 0.0
+
+    go, why = plane._should_continue("task", before="SAME", spent=1.0)
+
+    assert go and "nearly done" in why
+    assert plane.last_judge_cost == 0.25
+    # `_should_continue` reports; `run_orchestrator` is the one place that charges
+    # both accumulators, so the chain-level total is asserted below.
+    assert plane.run_spent == 0.0
+
+
+def test_a_chain_pays_for_every_judge_it_consults(plane, monkeypatch) -> None:
+    """N continuation decisions must account for N judge sessions, not zero."""
+    monkeypatch.setattr(server, "repo_fingerprint", lambda: "SAME")
+    judges: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        judges.append(cmd[0])
+        return subprocess.CompletedProcess(cmd, 0, _judge_json("CONTINUE keep going", 0.10), "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    # Three sessions: the first plus two continuations, so two judge calls. The
+    # third death is left un-continued by capping MAX_CONTINUATIONS for the test.
+    monkeypatch.setattr(server, "MAX_CONTINUATIONS", 2)
+    calls = _fake_sessions(plane, [_session_stream("error_max_turns") for _ in range(3)])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    assert len(calls) == 3, "one initial session plus two continuations"
+    assert len(judges) == 2, "one judge per continuation decision"
+    # 3 sessions at $1.00 (see _session_stream) + 2 judges at $0.10.
+    assert plane.run_spent == pytest.approx(3.20)
+
+
+def test_a_rung_answered_without_a_judge_charges_nothing(plane, monkeypatch) -> None:
+    """Most rungs are answered by git or a counter. A stale figure from the
+    previous decision would be charged again by the caller."""
+    monkeypatch.setattr(server, "repo_fingerprint", lambda: "NEW")
+    plane.last_judge_cost = 0.99
+    plane.last_tool_calls = 3
+
+    go, _ = plane._should_continue("task", before="OLD", spent=1.0)
+
+    assert go
+    assert plane.last_judge_cost == 0.0
+
+
+def test_unreadable_judge_output_keeps_the_verdict_and_flags_the_total(plane, monkeypatch) -> None:
+    """Losing the cost figure is the smaller harm.
+
+    A judge that stops parsing is a judge that always fails closed, which turns
+    every ambiguous continuation into a stop and idles the dev system. So an
+    envelope that isn't JSON is still read as prose - but the totals stop
+    claiming to be exact, because a bound is only worth the trust in it.
+    """
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, "CONTINUE looks close", ""),
+    )
+
+    go, why = plane.ask_judge("task")
+
+    assert go and "looks close" in why
+    assert plane.last_judge_cost == 0.0
+    assert plane.cost_is_lower_bound is True
+    assert plane._spend(52.11) == "at least $52.11"
+
+
+def test_a_complete_total_is_not_hedged(plane) -> None:
+    assert plane.cost_is_lower_bound is False
+    assert plane._spend(52.11) == "$52.11"
+
+
+def test_judge_asks_for_json_so_its_cost_can_be_read(plane, monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "claude":
+            captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, _judge_json("STOP done"), "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    plane.ask_judge("task")
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--output-format") + 1] == "json"
+
+
+def test_no_claude_invocation_bypasses_the_accumulators() -> None:
+    """A third `claude` call site would silently undercount the same way.
+
+    `run_orchestrator` says "if you add a third _run_session call site, it needs
+    both lines" - this is the same guard one level up, for a call that skips
+    `_run_session` altogether, which is exactly how the judge went unaccounted.
+    """
+    source = Path(server.__file__).read_text()
+    launches = source.count('"claude",\n') + source.count('cmd = ["claude", "-p"]')
+    assert launches == 2, (
+        "server.py launches a number of `claude` sessions other than the two that "
+        "are accounted for (_run_session and ask_judge). A new one must add its "
+        "cost to both `spent` and `run_spent`."
+    )
