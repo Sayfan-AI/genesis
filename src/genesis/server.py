@@ -68,11 +68,11 @@ SESSION_MAX_TURNS = 40
 # decision logic cannot loop forever. See _should_continue for the real ladder.
 MAX_CONTINUATIONS = 6
 
-# The ceiling that actually binds. A turn count measures effort spent, not work
-# completed, which is why raising it never helped: 20 died, 40 died, 60 died, and
-# a single task was observed spending $10.09 across three sessions while making
-# real progress the whole time. Dollars are what an operator actually wants to
-# bound. Env: GENESIS_COST_CEILING.
+# The per-task ceiling. A turn count measures effort spent, not work completed,
+# which is why raising it never helped: 20 died, 40 died, 60 died, and a single
+# task was observed spending $10.09 across three sessions while making real
+# progress the whole time. Dollars are what an operator actually wants to bound.
+# Env: GENESIS_TASK_COST_CEILING (GENESIS_COST_CEILING still honoured).
 #
 # Raised from 15 to 50 after the first task large enough to trip it. A trust-model
 # change touching five packages ran five sessions and $22.32 without finishing,
@@ -81,10 +81,33 @@ MAX_CONTINUATIONS = 6
 # spends much of every chain remembering where it was, so the ceiling stopped
 # bounding waste and started buying it.
 #
-# Note what the ceiling is not: spend is checked *between* sessions, so the run
-# that crosses the line still finishes. $22.32 against a $15 ceiling is the
-# mechanism working, not leaking. It is a tripwire, not a wall.
-COST_CEILING_USD = 50.0
+# Note what the ceiling is not: spend is checked *between* sessions, so the
+# session that crosses the line still finishes. $22.32 against a $15 ceiling is
+# the mechanism working, not leaking. It is a tripwire, not a wall.
+#
+# Renamed from COST_CEILING_USD (#46). The bare name read like a budget for the
+# whole run and bounded one continuation chain, which is a different promise.
+TASK_COST_CEILING_USD = 50.0
+
+# The run-scoped budget: every dollar this process launches, across every chain.
+# Env: GENESIS_RUN_COST_BUDGET.
+#
+# The per-task ceiling above cannot bound a run, because a fresh chain starts a
+# fresh accumulator. Measured on MaKlaude (#46): 11 sessions over about 3 hours,
+# 6 success / 4 error_max_turns / 1 error_during_execution, $52.11 cumulative,
+# with the $50 ceiling never firing because no single chain came close. The run
+# stopped only because a human sent SIGTERM. Without this bound the total is
+# unbounded no matter how long the run goes.
+#
+# Default is three task ceilings, so a night can still finish several
+# redesign-class tasks, and a loop that has stopped converging stops at a number
+# an operator can absorb rather than discovering it in a bill.
+#
+# Deliberately NOT persisted across restarts (it is absent from save_state). An
+# operator who restarts `serve` after a budget stop intends a fresh budget; a
+# budget that survived would make the restart silently no-op. Stating the choice
+# because the alternative is defensible and should not be reached by accident.
+RUN_COST_BUDGET_USD = 150.0
 
 # How many times a session may chain straight into another because it changed the
 # repo. Bounded so "work begets work" cannot become a spin: after this many, the
@@ -303,14 +326,35 @@ def _died_mid_task(subtype: str | None) -> bool:
     return bool(subtype) and subtype != "success"
 
 
-def _cost_ceiling() -> float:
+def _task_cost_ceiling() -> float:
     """Spend allowed per unit of work before continuations stop, whatever anyone
-    thinks. Env override so an operator can tighten it without editing code."""
-    raw = os.environ.get("GENESIS_COST_CEILING", "").strip()
+    thinks. Env override so an operator can tighten it without editing code.
+
+    GENESIS_COST_CEILING is still read, second, because that is the name every
+    existing operator config uses and silently ignoring it would loosen a bound
+    somebody had deliberately tightened.
+    """
+    for var in ("GENESIS_TASK_COST_CEILING", "GENESIS_COST_CEILING"):
+        raw = os.environ.get(var, "").strip()
+        if raw:
+            try:
+                return float(raw)
+            except ValueError:
+                return TASK_COST_CEILING_USD
+    return TASK_COST_CEILING_USD
+
+
+def _run_cost_budget() -> float:
+    """Total spend allowed across every chain this process launches.
+
+    Read fresh on each check rather than captured at startup, matching
+    _task_cost_ceiling, so an operator can tighten a running loop.
+    """
+    raw = os.environ.get("GENESIS_RUN_COST_BUDGET", "").strip()
     try:
-        return float(raw) if raw else COST_CEILING_USD
+        return float(raw) if raw else RUN_COST_BUDGET_USD
     except ValueError:
-        return COST_CEILING_USD
+        return RUN_COST_BUDGET_USD
 
 
 def _git(args: list[str]) -> str:
@@ -384,6 +428,10 @@ class LocalControlPlane:
     last_result_subtype: str | None = None
     last_tool_calls: int = 0
     last_cost: float = 0.0
+    # Every dollar this process has launched, across every chain. The chain-local
+    # `spent` in run_orchestrator resets on each fresh chain by design; this does
+    # not, which is the whole difference between the two bounds (#46).
+    run_spent: float = 0.0
     recent_tools: list[str] = field(default_factory=list)
     pending_followup: bool = False
     continuation_index: int = 0
@@ -540,6 +588,30 @@ class LocalControlPlane:
         by every attempt, and a stop as soon as an attempt does nothing at all.
         """
         prompt = prompt or _build_prompt(event, self.agent)
+
+        # The run budget is checked HERE, before launching, not only inside
+        # _should_continue. A chain that ends normally exits the ladder without
+        # consulting it, and the next event starts a fresh chain with a fresh
+        # accumulator - which is exactly how $52.11 accrued against a $50 bound.
+        # Setting `shutdown` rather than just returning means the poll loop exits
+        # through _shutdown and re-enables the workflows it disabled, the same
+        # path SIGTERM takes. A budget stop that left GitHub Actions off would be
+        # worse than not stopping.
+        budget = _run_cost_budget()
+        if self.run_spent >= budget:
+            log(f"Run cost budget reached (${self.run_spent:.2f} >= ${budget:.2f}) "
+                f"- not launching, shutting down")
+            loki_push(
+                "run-budget-stop",
+                {
+                    "level": "warn",
+                    "run_spent_usd": round(self.run_spent, 4),
+                    "budget_usd": budget,
+                },
+            )
+            self.shutdown = True
+            return 0
+
         if event is None:
             # Several paths run without an event: startup, a due trigger, and the
             # follow-up pass. Labelling them all "initial run" made a mid-session
@@ -559,7 +631,11 @@ class LocalControlPlane:
         self.continuation_index = 0
         before = repo_fingerprint()
         rc = self._run_session(prompt, deadline)
+        # Two accumulators, updated together at every point a session's cost is
+        # final: `spent` is this chain's, `run_spent` is the process's. If you add
+        # a third _run_session call site, it needs both lines.
         spent = self.last_cost
+        self.run_spent += self.last_cost
 
         for attempt in range(1, MAX_CONTINUATIONS + 1):
             if self.shutdown or not _died_mid_task(self.last_result_subtype):
@@ -594,6 +670,7 @@ class LocalControlPlane:
             self.continuation_index = attempt
             rc = self._run_session(None, deadline, resume=session_id)
             spent += self.last_cost
+            self.run_spent += self.last_cost
 
         # The loop's own output does not wake it: the agent authenticates as the
         # App, so closing an issue or merging a pull request emits a *bot* event,
@@ -782,9 +859,15 @@ class LocalControlPlane:
         but nothing landed — because every other rung is answerable by git or by a
         counter, and paying for an opinion you can compute is waste.
         """
-        ceiling = _cost_ceiling()
+        # The wider bound is checked first, and each message names WHICH bound
+        # fired. "cost ceiling reached" said neither which one nor what it was the
+        # ceiling of, so a reader could not tell a task tripwire from a run stop.
+        budget = _run_cost_budget()
+        if self.run_spent >= budget:
+            return False, f"run cost budget reached (${self.run_spent:.2f} >= ${budget:.2f})"
+        ceiling = _task_cost_ceiling()
         if spent >= ceiling:
-            return False, f"cost ceiling reached (${spent:.2f} >= ${ceiling:.2f})"
+            return False, f"task cost ceiling reached (${spent:.2f} >= ${ceiling:.2f})"
         if self.last_tool_calls == 0:
             return False, "the attempt made no tool calls"
         if repo_fingerprint() != before:
