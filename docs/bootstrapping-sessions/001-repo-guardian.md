@@ -13,7 +13,7 @@ Used `scaffold_external_dev_repo()` with target repos `the-gigi/*` and `Sayfan-A
 
 ### 2. GitHub repo creation
 
-Created `Sayfan-AI/repo-guardian` (private). Required using the `the-gigi` GitHub account since `the-work-account` (active account) doesn't have permission to create repos under Sayfan-AI.
+Created `Sayfan-AI/repo-guardian` (private). Required using the `the-gigi` GitHub account since the then-active account doesn't have permission to create repos under Sayfan-AI.
 
 **Multi-account trick:**
 ```bash

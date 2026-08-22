@@ -75,6 +75,7 @@ SEED_SCRIPTS = [
     "log.sh",
     "issues.sh",
     "activate.sh",
+    "host-guard.sh",
 ]
 
 # Turn-budget classes for the Claude-invoking workflow templates.

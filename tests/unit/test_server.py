@@ -358,3 +358,538 @@ def test_serve_skips_self_heal_when_no_stale_file(plane, monkeypatch) -> None:
     assert disable_called.called
     # If self-heal had run, enable would be called >= 2 times (heal + cleanup).
     assert enable_called.call_count == 1
+
+
+# ---------- budget / toolset / agent guards ----------
+
+
+def test_local_mode_respects_the_orchestrator_turn_floor() -> None:
+    """Local mode runs the same agent as the workflows and must honour the same
+    floor. It sat at 20 — below the floor — because the floor guard only
+    inspected workflow templates, so this execution path silently kept the
+    budget that had already killed two runs.
+    """
+    from genesis.scaffold import ORCHESTRATOR_TURN_FLOOR
+
+    assert server.SESSION_MAX_TURNS >= ORCHESTRATOR_TURN_FLOOR
+
+
+def test_local_mode_allows_the_write_tool() -> None:
+    """Without Write the agent can edit files but never create one, so any task
+    needing a new file, test, or agent definition is unsatisfiable."""
+    assert "Write" in server.ALLOWED_TOOLS.split(",")
+
+
+def test_run_orchestrator_uses_the_declared_budget_and_tools(plane) -> None:
+    fake_proc = MagicMock()
+    fake_proc.wait.return_value = 0
+    fake_proc.pid = 12345
+    with patch("subprocess.Popen", return_value=fake_proc) as popen:
+        plane.run_orchestrator(None)
+    cmd = popen.call_args[0][0]
+    assert cmd[cmd.index("--max-turns") + 1] == str(server.SESSION_MAX_TURNS)
+    assert cmd[cmd.index("--allowedTools") + 1] == server.ALLOWED_TOOLS
+
+
+def test_build_prompt_defaults_to_the_orchestrator() -> None:
+    assert server.DEFAULT_AGENT in server._build_prompt(None)
+
+
+def test_build_prompt_honours_a_custom_agent() -> None:
+    """Repos without an orchestrator — genesis itself — point at another agent."""
+    prompt = server._build_prompt(None, ".claude/agents/evolver.md")
+    assert ".claude/agents/evolver.md" in prompt
+    assert "orchestrator.md" not in prompt
+
+
+def test_run_orchestrator_prompt_carries_the_planes_agent(plane) -> None:
+    plane.agent = ".claude/agents/evolver.md"
+    fake_proc = MagicMock()
+    fake_proc.wait.return_value = 0
+    fake_proc.pid = 12345
+    with patch("subprocess.Popen", return_value=fake_proc) as popen:
+        plane.run_orchestrator(None)
+    cmd = popen.call_args[0][0]
+    assert ".claude/agents/evolver.md" in cmd[cmd.index("-p") + 1]
+
+
+def test_serve_handles_sighup(monkeypatch, tmp_path) -> None:
+    """Closing the terminal sends SIGHUP. Unhandled, it skips cleanup and leaves
+    the repo's workflows disabled with a stale tracking file."""
+    registered: dict[int, object] = {}
+    monkeypatch.setattr(
+        server.signal, "signal", lambda sig, h: registered.__setitem__(sig, h)
+    )
+    monkeypatch.setattr(server, "_get_repo", lambda: "alice/foo")
+    monkeypatch.chdir(tmp_path)
+    agent = tmp_path / "agent.md"
+    agent.write_text("# agent")
+    monkeypatch.setenv("GENESIS_AGENT", str(agent))
+    monkeypatch.setattr(server.LocalControlPlane, "serve", lambda self: 0)
+
+    assert server.serve() == 0
+    for sig in (server.signal.SIGINT, server.signal.SIGTERM, server.signal.SIGHUP):
+        assert sig in registered, f"{sig!r} not handled"
+
+
+# ---------- progress feed ----------
+
+
+def test_stream_progress_renders_tool_calls_and_result(plane, capsys) -> None:
+    """`claude -p` buffers until the session ends, so without this a 25-minute
+    run prints nothing. Hook stderr doesn't fill the gap — Claude Code captures
+    it into its own transcript."""
+    stream = [
+        json.dumps({"type": "system", "subtype": "init"}),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "thinking"},
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "go test ./...", "description": "run tests"},
+                        },
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Edit",
+                            "input": {"file_path": "/repo/internal/kube/client.go"},
+                        }
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "num_turns": 12,
+                "total_cost_usd": 1.2345,
+                "duration_ms": 61000,
+            }
+        ),
+    ]
+    plane._stream_progress(iter(stream))
+    out = capsys.readouterr().out
+
+    assert "1. Bash go test ./..." in out
+    assert "2. Edit /repo/internal/kube/client.go" in out
+    assert "session ended: success turns=12 cost=$1.23 61s" in out
+
+
+def test_stream_progress_survives_garbage(plane, capsys) -> None:
+    """Progress reporting must never be able to take down the run it reports on."""
+    plane._stream_progress(iter(["not json", "", json.dumps({"type": "other"})]))
+    plane._stream_progress(None)  # non-iterable
+    assert "Traceback" not in capsys.readouterr().out
+
+
+def test_run_orchestrator_requests_streaming_output(plane) -> None:
+    fake_proc = MagicMock()
+    fake_proc.wait.return_value = 0
+    fake_proc.pid = 12345
+    fake_proc.stdout = iter([])
+    with patch("subprocess.Popen", return_value=fake_proc) as popen:
+        plane.run_orchestrator(None)
+    cmd = popen.call_args[0][0]
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in cmd
+    # A piped stdout must be drained or the child blocks when the pipe fills.
+    assert popen.call_args[1]["stdout"] is subprocess.PIPE
+
+
+# ---------- resume across budget deaths ----------
+
+
+@pytest.fixture(autouse=True)
+def _no_real_git(monkeypatch):
+    """Keep repo_fingerprint away from subprocess.
+
+    `subprocess.run` builds a Popen internally, and these tests patch Popen to
+    fake claude sessions — so a real git call would be handed a MagicMock and
+    fail deep inside subprocess. Default is a fresh value per call, i.e. "work
+    landed"; tests that care about the stalled case pin it themselves.
+    """
+    counter = {"n": 0}
+
+    def fingerprint():
+        counter["n"] += 1
+        return f"fp-{counter['n']}"
+
+    monkeypatch.setattr(server, "repo_fingerprint", fingerprint)
+
+
+def _session_stream(subtype: str, tool_calls: int = 1, sid: str = "sess-abc123def") -> list[str]:
+    lines = [json.dumps({"type": "system", "subtype": "init", "session_id": sid})]
+    for i in range(tool_calls):
+        lines.append(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "session_id": sid,
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "name": "Bash", "input": {"command": f"step {i}"}}
+                        ]
+                    },
+                }
+            )
+        )
+    lines.append(
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": subtype,
+                "session_id": sid,
+                "num_turns": tool_calls,
+                "total_cost_usd": 1.0,
+                "duration_ms": 1000,
+            }
+        )
+    )
+    return lines
+
+
+def _fake_sessions(plane, streams: list[list[str]]) -> list[list[str]]:
+    """Patch Popen so each launch replays the next canned stream. Returns the
+    list of argv the plane used, so tests can assert on --resume."""
+    calls: list[list[str]] = []
+    it = iter(streams)
+
+    def fake_popen(cmd, **kwargs):
+        calls.append(cmd)
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.wait.return_value = 0
+        proc.stdout = iter(next(it))
+        return proc
+
+    patcher = patch("subprocess.Popen", side_effect=fake_popen)
+    patcher.start()
+    plane._stop_patch = patcher  # noqa: SLF001 - test bookkeeping
+    return calls
+
+
+def test_max_turns_death_resumes_the_same_session(plane) -> None:
+    """The transcript and the half-finished work are both on disk; starting over
+    discards the reasoning and makes the next session re-derive intent."""
+    calls = _fake_sessions(plane, [_session_stream("error_max_turns"), _session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    assert len(calls) == 2, "should have continued after the budget death"
+    assert "--resume" not in calls[0]
+    assert calls[1][calls[1].index("--resume") + 1] == "sess-abc123def"
+    # A resumed session must not be re-fed the original prompt, or it restarts
+    # the task instead of finishing it.
+    assert "ran out of turns, not out of task" in calls[1][calls[1].index("--resume") + 2]
+
+
+def test_success_does_not_resume(plane) -> None:
+    calls = _fake_sessions(plane, [_session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1
+
+
+def test_continuations_are_capped(plane) -> None:
+    """An unbounded retry loop on a paid API spends money while you sleep."""
+    streams = [_session_stream("error_max_turns") for _ in range(server.MAX_CONTINUATIONS + 3)]
+    calls = _fake_sessions(plane, streams)
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1 + server.MAX_CONTINUATIONS
+
+
+def test_no_resume_when_attempt_did_nothing(plane) -> None:
+    """Zero tool calls means the session isn't making progress — resuming it
+    just buys another round of nothing."""
+    calls = _fake_sessions(
+        plane, [_session_stream("error_max_turns", tool_calls=0), _session_stream("success")]
+    )
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1
+
+
+def test_no_resume_without_a_session_id(plane) -> None:
+    stream = [json.dumps({"type": "result", "subtype": "error_max_turns", "num_turns": 3})]
+    calls = _fake_sessions(plane, [stream, _session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1
+
+
+def test_shutdown_stops_continuations(plane) -> None:
+    calls = _fake_sessions(plane, [_session_stream("error_max_turns"), _session_stream("success")])
+    plane.shutdown = True
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1
+
+
+# ---------- dynamic continuation: the decision ladder ----------
+
+
+def test_landed_work_continues_without_paying_a_judge(plane, monkeypatch) -> None:
+    """Cheapest rung: git already answers "did anything happen", so don't buy an
+    opinion you can compute."""
+    called = []
+    monkeypatch.setattr(plane, "ask_judge", lambda task: called.append(task) or (False, "x"))
+    plane.last_tool_calls = 5
+    go, why = plane._should_continue("task", before="OLD", spent=1.0)
+    assert go and "landed" in why
+    assert called == [], "judge must not be consulted when progress is visible"
+
+
+def test_stalled_attempt_consults_the_judge(plane, monkeypatch) -> None:
+    monkeypatch.setattr(server, "repo_fingerprint", lambda: "SAME")
+    monkeypatch.setattr(plane, "ask_judge", lambda task: (True, "converging on a fix"))
+    plane.last_tool_calls = 9
+    go, why = plane._should_continue("task", before="SAME", spent=1.0)
+    assert go and why == "converging on a fix"
+
+
+def test_cost_ceiling_overrides_everything(plane, monkeypatch) -> None:
+    """A judge that can always grant one more round is an unbounded spend loop."""
+    monkeypatch.setenv("GENESIS_COST_CEILING", "5")
+    monkeypatch.setattr(plane, "ask_judge", lambda task: (True, "just one more"))
+    plane.last_tool_calls = 9
+    go, why = plane._should_continue("task", before="OLD", spent=5.01)
+    assert not go and "cost ceiling" in why
+
+
+def test_judge_fails_closed_on_garbage(plane, monkeypatch) -> None:
+    """A broken judge should leave an idle dev system, not an open-ended spend."""
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "maybe?", "")
+    )
+    go, why = plane.ask_judge("task")
+    assert not go and "no clear verdict" in why
+
+
+def test_judge_reads_evidence_not_self_report(plane, monkeypatch) -> None:
+    """Agent self-reports were observed wrong twice in one hour; the judge gets
+    git state and the actual tool calls instead."""
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return subprocess.CompletedProcess(cmd, 0, f"GITOUT:{cmd[1]}", "")
+        seen["prompt"] = cmd[cmd.index("-p") + 1]
+        return subprocess.CompletedProcess(cmd, 0, "STOP thrashing on the same file", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    plane.recent_tools = ["Edit plan.go", "Edit plan.go"]
+    go, why = plane.ask_judge("finish issue #127")
+    assert not go and "thrashing" in why
+    assert "GITOUT:status" in seen["prompt"] and "GITOUT:diff" in seen["prompt"]
+    assert "Edit plan.go" in seen["prompt"]
+    assert "Default to STOP" in seen["prompt"]
+
+
+def test_judge_gets_no_tools(plane, monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "claude":
+            captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, "STOP done", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    plane.ask_judge("task")
+    assert captured["cmd"][captured["cmd"].index("--allowedTools") + 1] == ""
+
+
+def test_unfinished_work_schedules_a_followup(plane) -> None:
+    """Work left in the tree is referenced by no future event, so without this
+    the plane idles holding a half-finished task."""
+    calls = _fake_sessions(plane, [_session_stream("error_max_turns") for _ in range(9)])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert plane.pending_followup is True
+    assert len(calls) == 1 + server.MAX_CONTINUATIONS
+
+
+def test_app_private_key_never_reaches_the_agent(plane, monkeypatch) -> None:
+    """The PEM can mint tokens for every repo the App is installed on, forever.
+    The hour-long token it produces is the only thing a session should hold."""
+    monkeypatch.setattr(server, "mint_installation_token", lambda repo, env: "ghs_minted")
+    monkeypatch.setenv("GENESIS_GITHUB_APP_SECRET", "-----BEGIN RSA PRIVATE KEY-----")
+    monkeypatch.setenv("GENESIS_GITHUB_APP_ID", "12345")
+    fake_proc = MagicMock()
+    fake_proc.wait.return_value = 0
+    fake_proc.pid = 1
+    fake_proc.stdout = iter([])
+    with patch("subprocess.Popen", return_value=fake_proc) as popen:
+        plane.run_orchestrator(None)
+    env = popen.call_args[1]["env"]
+    assert env["GH_TOKEN"] == "ghs_minted"
+    assert "GENESIS_GITHUB_APP_SECRET" not in env
+    assert "GENESIS_GITHUB_APP_ID" not in env
+
+
+def test_any_abnormal_ending_resumes_not_just_max_turns(plane) -> None:
+    """Observed in production: a session died `error_during_execution` at turn 41
+    with real work uncommitted, and the chain stopped because the subtype string
+    didn't match. Every abnormal ending strands work the same way."""
+    calls = _fake_sessions(
+        plane, [_session_stream("error_during_execution"), _session_stream("success")]
+    )
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 2, "an execution error should resume like a budget death"
+    assert "--resume" in calls[1]
+
+
+def test_success_still_ends_the_chain(plane) -> None:
+    calls = _fake_sessions(plane, [_session_stream("success"), _session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert len(calls) == 1
+
+
+def test_poll_loop_sweeps_for_mergeable_prs(plane, monkeypatch) -> None:
+    """CI going green is not an event the poller sees, and the agent's own PRs are
+    bot-authored so the actor filter drops them. Without the sweep the loop can
+    open work it can never land."""
+    monkeypatch.setattr(plane, "merge_ready_prs", lambda: [7])
+    assert plane.merge_ready_prs() == [7]
+
+
+def test_merge_sweep_can_be_turned_off(plane, monkeypatch) -> None:
+    monkeypatch.setenv("GENESIS_AUTO_MERGE", "off")
+    monkeypatch.setattr(server, "merge_ready", lambda *a, **k: [1, 2, 3])
+    assert plane.merge_ready_prs() == []
+
+
+def test_merge_sweep_failure_never_kills_the_plane(plane, monkeypatch) -> None:
+    monkeypatch.delenv("GENESIS_AUTO_MERGE", raising=False)
+    monkeypatch.setattr(server, "mint_installation_token", lambda *a, **k: "tok")
+    def boom(*a, **k):
+        raise RuntimeError("gh went missing")
+    monkeypatch.setattr(server, "merge_ready", boom)
+    assert plane.merge_ready_prs() == []
+
+
+def test_only_one_scheduled_trigger_fires_per_tick(plane, monkeypatch, tmp_path) -> None:
+    """A laptop closed overnight leaves several schedules due at once. Firing all
+    of them on the first tick would be a surprising way to spend an afternoon."""
+    monkeypatch.setattr(server.triggers, "STATE_PATH", tmp_path / "state")
+    monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
+    saved: list[dict] = []
+    monkeypatch.setattr(server.triggers, "save_state", lambda st, *a: saved.append(st))
+    monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
+    launched: list[str] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
+    )
+    plane.run_due_triggers("tok")
+    assert len(launched) == 1, "at most one session per tick"
+    assert "scheduled run" in launched[0]
+
+
+def test_ci_failure_takes_priority_over_the_cron(plane, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
+    monkeypatch.setattr(server.triggers, "save_state", lambda *a, **k: None)
+    monkeypatch.setattr(
+        server.triggers,
+        "failed_runs",
+        lambda *a, **k: [{"name": "CI", "headBranch": "main", "url": "u", "createdAt": "2026-08-02T01:00:00Z"}],
+    )
+    launched: list[str] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
+    )
+    plane.run_due_triggers("tok")
+    assert "A required check failed" in launched[0]
+
+
+def test_trigger_restores_the_planes_default_agent(plane, monkeypatch) -> None:
+    """The evolver trigger swaps the agent for one session. If that leaked, every
+    later event-driven run would silently run the wrong agent."""
+    monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
+    monkeypatch.setattr(server.triggers, "save_state", lambda *a, **k: None)
+    monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
+    monkeypatch.setattr(plane, "run_orchestrator", lambda event, prompt=None, label=None: 0)
+    original = plane.agent
+    plane.run_due_triggers("tok")
+    assert plane.agent == original
+
+
+def test_a_session_that_ran_no_tools_is_called_out(plane, capsys) -> None:
+    """The failure that motivated this: an unauthenticated profile made every run
+    exit in one turn for $0.00 reporting success, eating the event backlog while
+    looking healthy."""
+    plane._stream_progress(iter([json.dumps(
+        {"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0, "duration_ms": 1000}
+    )]))
+    assert "ran no tools at all" in capsys.readouterr().out
+
+
+def test_a_session_that_changed_the_repo_queues_another_pass(plane, monkeypatch) -> None:
+    """The loop's own output cannot wake it: the agent is the App, so closing an
+    issue emits a bot event and the feedback-loop filter drops it. Observed on
+    MaKlaude - a task closed at 06:31 and nothing moved until a human commented
+    16 minutes later, otherwise it would have idled until the six-hour cron."""
+    fingerprints = iter(["before", "after", "after", "after"])
+    monkeypatch.setattr(server, "repo_fingerprint", lambda: next(fingerprints, "after"))
+    calls = _fake_sessions(plane, [_session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert plane.pending_followup is True
+    assert plane.followup_chain == 1
+
+
+def test_a_session_that_changed_nothing_does_not_queue_a_pass(plane, monkeypatch) -> None:
+    monkeypatch.setattr(server, "repo_fingerprint", lambda: "same")
+    calls = _fake_sessions(plane, [_session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert plane.pending_followup is False
+
+
+def test_the_followup_chain_is_bounded(plane, monkeypatch) -> None:
+    """"Work begets work" must not become a spin."""
+    counter = iter(range(100))
+    monkeypatch.setattr(server, "repo_fingerprint", lambda: f"fp-{next(counter)}")
+    plane.followup_chain = server.MAX_FOLLOWUP_CHAIN
+    calls = _fake_sessions(plane, [_session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+    assert plane.pending_followup is False, "chain budget exhausted, wait for a real trigger"

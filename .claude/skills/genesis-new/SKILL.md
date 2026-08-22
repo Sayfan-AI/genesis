@@ -119,4 +119,4 @@ Tell the user what was created:
 
 Remind them:
 - **The repo and issue #1 are created, but the autonomous loop is inert until secrets are set.** Read the **Setup** section in the new repo's `README.md` and follow it — it lists the three required GitHub Actions secrets (`ANTHROPIC_API_KEY`, `GENESIS_APP_ID`, `GENESIS_APP_PRIVATE_KEY`) and the Genesis GitHub App install step.
-- Optional: configure `.genesis/config.toml` with Loki credentials for observability, and the A2H gateway if they want Slack/email notifications.
+- Optional: add the three `GENESIS_LOKI_*` values to `~/.config/genesis/.env` **before** running `activate.sh` so activity logs ship to Loki — credentials never go in the committed `config.toml`. Configure the A2H gateway if they want Slack/email notifications.

@@ -34,7 +34,9 @@ jobs:
           allowed_bots: "genesis-dev-bot[bot]"
           # Reaches the activity-logging hooks in .claude/settings.json. The
           # `settings` input MERGES with the repo's settings, so the hooks survive.
-          # Unset secrets render as empty strings and log.sh falls back to stderr.
+          # Unset secrets render as empty strings and log.sh skips the push. There is
+          # no stderr consolation prize: Claude Code captures hook stderr into its
+          # own transcript, so unconfigured Loki means no activity trail at all.
           settings: |
             {
               "env": {
@@ -45,7 +47,7 @@ jobs:
             }
           prompt: |
             Run the orchestrator agent defined in .claude/agents/orchestrator.md.
-            This is a scheduled run — assess project state and advance work.
+            This is a scheduled run - assess project state and advance work.
           # Orchestrator class — see the turn-budget floor in CLAUDE.md. Open-ended
           # work, and dispatched subagents spend from this same budget.
           # Enforced at >= 30 by tests/e2e/test_workflows.py.

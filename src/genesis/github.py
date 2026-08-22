@@ -6,6 +6,7 @@ Handles repo creation, pushing, and issue management via the gh CLI.
 import json
 import subprocess
 import time
+import urllib.parse
 from pathlib import Path
 
 from genesis.scaffold import SEED_WORKFLOWS
@@ -40,12 +41,51 @@ def _run_git(repo_path: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def ssh_remote_url(repo_url: str) -> str:
+    """The SSH form of a GitHub repo URL, for use as a git remote.
+
+    Every repo genesis creates gets an SSH `origin`, never HTTPS, and the reason
+    is specific rather than stylistic. An HTTPS remote authenticates through
+    git's credential helper, which on a developer machine is usually
+    `gh auth git-credential` - so the push borrows whichever `gh` account happens
+    to be ACTIVE, not the one that owns the repo. With several accounts logged in
+    (a work one and a personal one is the common case) that push fails with
+    `Permission to <org>/<repo>.git denied to <wrong-account>`, and it fails at the
+    end of a run rather than at setup. Worse, when the wrong account *does* have
+    write access, the push silently lands under the wrong identity.
+
+    An SSH remote is pinned to the key on disk, so it behaves the same whatever
+    `gh` is doing. Measured on `Sayfan-AI/MaKlaude`, whose HTTPS origin (created by
+    this function) denied a push until the active account was switched by hand.
+
+    Idempotent, and accepts either form as input so it can normalise an existing
+    remote as readily as a fresh URL.
+    """
+    if repo_url.startswith("git@"):
+        return repo_url if repo_url.endswith(".git") else f"{repo_url}.git"
+
+    parsed = urllib.parse.urlparse(repo_url)
+    host = parsed.netloc or "github.com"
+    path = parsed.path.strip("/")
+    if not path:
+        raise GitHubError(f"cannot derive an SSH remote from {repo_url!r}")
+    if path.endswith(".git"):
+        path = path[: -len(".git")]
+    return f"git@{host}:{path}.git"
+
+
 def create_github_repo(
     project_name: str,
     org: str | None = None,
     private: bool = True,
 ) -> str:
-    """Create a new GitHub repo. Returns the repo URL."""
+    """Create a new GitHub repo. Returns the browsable HTTPS URL.
+
+    HTTPS on purpose: this value is shown to a person and pasted into issues, so
+    it needs to be clickable. The git remote is derived from it by
+    [ssh_remote_url] at the point it is used, which is the only place the
+    distinction matters.
+    """
     repo_name = f"{org}/{project_name}" if org else project_name
     args = ["repo", "create", repo_name]
     if private:
@@ -61,12 +101,29 @@ def create_github_repo(
 
 
 def push_to_github(repo_path: Path, repo_url: str) -> None:
-    """Add remote and push the repo to GitHub."""
-    # Check if remote already exists
+    """Point `origin` at the repo over SSH and push main. See [ssh_remote_url]."""
+    ssh_url = ssh_remote_url(repo_url)
+
     try:
-        _run_git(repo_path, "remote", "get-url", "origin")
+        existing = _run_git(repo_path, "remote", "get-url", "origin")
     except GitHubError:
-        _run_git(repo_path, "remote", "add", "origin", f"{repo_url}.git")
+        existing = ""
+
+    if not existing:
+        _run_git(repo_path, "remote", "add", "origin", ssh_url)
+    elif ssh_remote_url(existing) != ssh_url:
+        # A remote pointing at a DIFFERENT repo is a conflict, not something to
+        # overwrite. Silently repointing it would push this project's history at
+        # somebody else's repo, which is the one outcome here worth refusing.
+        raise GitHubError(
+            f"origin already points at {existing!r}, not {ssh_url!r}; "
+            "remove or fix the remote before publishing"
+        )
+    elif existing != ssh_url:
+        # Same repo, wrong transport - an HTTPS origin from an older genesis, or
+        # from a re-run of this flow before the SSH change. Upgrade it in place so
+        # the end state does not depend on when the repo was scaffolded.
+        _run_git(repo_path, "remote", "set-url", "origin", ssh_url)
 
     _run_git(repo_path, "push", "-u", "origin", "main")
 

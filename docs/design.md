@@ -133,14 +133,62 @@ The local control plane is the `genesis serve` subcommand of the genesis CLI. Th
 3. **Launch** — on first start (initial assessment) and whenever new activity is detected, launches `claude -p` with the orchestrator prompt. Same agent definition, same logic as GHA mode. The orchestrator reads full issue state when it runs.
 4. **Concurrency guard** — `.genesis/.orchestrator.lock` (PID-based) prevents multiple `genesis serve` instances on the same repo. If a session exceeds its timeout, the entire process tree is killed. Intermediate work is already in GitHub issues or committed files — the next run picks up.
 
-**Secrets:** Needs `ANTHROPIC_API_KEY` (for Claude) and `gh` CLI authentication (for GitHub API). The user already has both if they're running Claude Code locally. No additional secrets infrastructure needed — the user's machine is a trusted environment.
+**Secrets:** Needs `gh` CLI authentication for the GitHub API, and nothing else. `claude -p` uses whatever the local CLI is already logged in with, so a Claude subscription is enough and no `ANTHROPIC_API_KEY` is required. That is local mode's strongest argument: the GHA path needs a model credential stored in the repo, this path needs none.
+
+**Local mode reproduces the workflow triggers, not just the orchestrator.** Each seeded workflow is a pair - a condition GitHub detects and an agent it runs - so a local plane that only polls issue events silently loses capabilities the same dev system has in CI.
+
+| Workflow | Condition | Local equivalent |
+|---|---|---|
+| `genesis-events` | issue / PR / comment activity | repo events poll |
+| `genesis-orchestrator` | cron, every 6 hours | elapsed-time trigger |
+| `genesis-evolver` | cron, daily | elapsed-time trigger, skipped if the repo has no evolver |
+| `genesis-merge` | CI completed green on a bot PR | deterministic merge sweep |
+| `genesis-ci-failure` | a required check failed | polled `gh run list --status failure` |
+| `genesis-push-trigger` | push to main | a merge sets the follow-up flag |
+
+Two of those conditions can never arrive as events, which is why this is a trigger table rather than a longer list of event types: a cron has no event at all, and a `workflow_run` conclusion is not carried in the repo events feed. Once local sessions authenticate as the App, a third joins them - the agent's own pull requests become bot-authored and are dropped by the feedback-loop filter.
+
+At most one scheduled trigger fires per tick. A laptop closed overnight leaves several due at once, and starting three full sessions on the first poll would be a surprising way to spend an afternoon's budget. CI-failure triage takes priority over the cron, because a red check is more urgent than a routine sweep. State lives in `.genesis/.trigger-state`, and an unreadable file means "due now" rather than "never" - failing toward doing the work.
+
+**Merging in local mode.** `serve` sweeps for mergeable pull requests on every poll tick and squash-merges any that are bot-authored, non-draft, and green on every check. This is the local equivalent of `genesis-merge.yml`, which local mode disables.
+
+It has to be a state-derived sweep rather than an event handler, for two reasons that compound. CI-completion is not among the events the poller reads (`IssuesEvent`, `IssueCommentEvent`, `PullRequestEvent`), so "checks just went green" can never wake anything. And once local sessions began authenticating as the App, the agent's own pull requests became bot-authored, so the feedback-loop filter drops those events too. Without the sweep the loop can open work it is structurally unable to land.
+
+Deterministic on purpose: the merge rule is a predicate, not a judgement, and a merge step that cannot exhaust a turn budget is one less way for the loop to stall. `mergeStateStatus == CLEAN` is deliberately *not* trusted on its own, because GitHub reports CLEAN when no branch protection requires the failing check. Disable with `GENESIS_AUTO_MERGE=off`.
+
+**Scope of the workflow disable:** only genesis-owned workflows (`genesis-*.yml`) are disabled, so CI and other gates keep running. Disabling everything broke the merge agent, whose precondition is "all CI checks passing" — a disabled workflow can never report that. Pass `--all-workflows` for the old behaviour.
 
 **Sandboxing:** The orchestrator session can run with Claude Code's built-in sandboxing. For stronger isolation, the user can run `genesis serve` inside Docker.
 
-**Configuration** (environment variables):
+**Configuration** (environment variables, each with a matching `genesis serve` flag):
 - `GENESIS_POLL_INTERVAL` — seconds between polls (default: 60)
 - `GENESIS_SESSION_TIMEOUT` — max seconds per orchestrator session (default: 3600)
 - `GENESIS_REPO` — owner/repo (default: detected from git remote)
+- `GENESIS_AGENT` — agent definition to run (default: `.claude/agents/orchestrator.md`). Repos with no orchestrator — genesis itself — point this at the agent they do have. `serve` refuses to start if the file is missing, before disabling anything.
+- `GENESIS_ALL_WORKFLOWS` — set to `1` to disable every workflow instead of only `genesis-*`
+- `GENESIS_AGENT_IDENTITY=personal` — opt out of App authentication and let sessions use the operator's own `gh` credential
+
+**Why sessions authenticate as the GitHub App.** In Actions the agent is `genesis-dev-bot[bot]`, because `actions/create-github-app-token` mints a token per run. Locally there was no equivalent, so sessions inherited the operator's `gh` credential and the agent became indistinguishable from the human — same login on its commits, comments, merges, and approvals.
+
+That collapse is not cosmetic. An approval gate's premise is that the approver is not the actor, and it cannot check what it cannot distinguish; "only merge PRs created by the bot" becomes vacuous; and the operator loses the ability to read their own repo history. Observed on MaKlaude: PRs reading `author=the-gigi mergedBy=the-gigi` where both were the agent, and an orchestrator that explained a merge it had not performed by inventing auto-merge as the cause.
+
+There is no stored token to reuse — Actions mints one every run — so local mode performs the same exchange from the App ID and private key already in `~/.config/genesis/.env`: sign a JWT, resolve the installation, trade it for a one-hour token. Minting happens per session, since a plane running all afternoon would otherwise hold a dead credential after the first hour. Every failure falls back to the ambient credential: worse attribution beats a dev system that will not start because a token exchange hiccuped.
+
+**Why sessions get their own Claude profile.** A local session otherwise inherits the operator's `~/.claude/CLAUDE.md`, which is written as guidance for a human's assistant and is then read as policy by an autonomous system. This is not theoretical: on MaKlaude, a personal convention to qualify GitHub references produced `Closes issue #117` in a PR body, GitHub's parser only links `<keyword> #<number>`, and a merged PR silently left its task issue open. Rules like "never merge PRs" or "always commit through the `gcm` alias" land in the same lap, and the agent resolves the contradiction unpredictably. Isolation also makes a local run behave like the Actions run, where no such file exists.
+
+The isolated profile still loads the repo's `CLAUDE.md` and `.claude/settings.json`, so project memory and the activity-logging hooks are unaffected. Only the operator's personal layer is dropped.
+
+The session budget is `SESSION_MAX_TURNS` in `server.py`, held at or above `ORCHESTRATOR_TURN_FLOOR` by `tests/unit/test_server.py` — local mode is the same agent doing the same work, so it gets the same floor.
+
+**Continuation across budget deaths.** A session that ends `error_max_turns` ran out of turns mid-thought, not out of task: its reasoning is in a transcript on disk and its work is uncommitted in the tree. Local mode resumes it with `claude --resume <session_id>` and a fresh budget rather than starting over, so the next attempt finishes the work instead of re-deriving the intent behind half-written code. This is the batches-of-N shape rather than one ever-larger ceiling — raising the cap only moved the wall (20 died, then 40, then 60).
+
+Bounded three ways, because an unbounded retry loop against a paid API is a way to spend money while asleep:
+
+- `MAX_CONTINUATIONS` (2) caps the chain at three sessions.
+- One deadline covers the whole chain, so continuations can't multiply `GENESIS_SESSION_TIMEOUT`.
+- A continuation is skipped when the previous attempt made **zero tool calls** — nothing happened, so another round buys another nothing.
+
+Shutdown stops the chain immediately, and a death with no reported session id is not resumed. The progress reader is joined before the decision is made: the process exiting does not mean its output has been parsed, and reading the result too early makes a budget death look like a clean finish.
 
 **When to use local mode:**
 - Sessions that need to exceed GHA's 6-hour limit
@@ -312,7 +360,7 @@ All agent activity is logged to **[Grafana Cloud Loki](https://grafana.com/prici
 
 Genesis seeds `.claude/settings.json` with `command` hooks that call `.genesis/scripts/log.sh`, which POSTs a structured log entry to Grafana Cloud Loki. No agent-side logging code.
 
-Credentials live in the environment (`GENESIS_LOKI_URL` / `GENESIS_LOKI_USER` / `GENESIS_LOKI_TOKEN`), never in the committed `config.toml`. Two paths get them there: `activate.sh` seeds them as repo secrets from `~/.config/genesis/.env`, and each `genesis-*` workflow forwards those secrets to Claude Code through the action's `settings` env block. That forwarding is load-bearing — a step-level `env:` block is not documented as reaching the CLI, and without it every hook in an Actions run silently degrades to stderr.
+Credentials live in the environment (`GENESIS_LOKI_URL` / `GENESIS_LOKI_USER` / `GENESIS_LOKI_TOKEN`), never in the committed `config.toml`. Two paths get them there: `activate.sh` seeds them as repo secrets from `~/.config/genesis/.env`, and each `genesis-*` workflow forwards those secrets to Claude Code through the action's `settings` env block. That forwarding is load-bearing: a step-level `env:` block isn't documented as reaching the CLI, and without it every hook in an Actions run silently skips the push. Claude Code captures hook stderr into its own transcript, so nothing reaches the run log either.
 
 **Key hook events used:**
 
@@ -353,6 +401,23 @@ Not yet captured (each needs a hook payload field the logger doesn't read yet): 
 
 Entries use `time.time_ns()`. This is load-bearing, not a detail: Loki silently drops an entry whose `(timestamp, line)` already exists in that stream, so a second-resolution stamp makes two same-second `Bash` calls byte-identical and the second one vanishes - acknowledged with HTTP 204. Measured on a real Grafana Cloud stack: 6 identical pushes, 1 line stored. `date +%s%N` is not portable (BSD `date` on macOS has no `%N`), which is why the timestamp comes from the same python3 call that parses the hook JSON. Guarded by `tests/unit/test_log_script.py`.
 
+### Session outcomes and the dashboard
+
+Hook events describe what an agent *did*; they say nothing about how a run *ended* or what it cost. `genesis serve` therefore pushes two more event types directly:
+
+- `session-outcome` — `subtype` (notably `error_max_turns`), `turns`, `cost_usd`, `duration_s`, `tool_calls`, `session`, `continuation`
+- `continuation-decision` — `decision`, `reason` (the rung that decided, or the judge's own words), `spent_usd`, `attempt`
+
+Before these existed, that telemetry lived only as stdout in whoever's terminal was running the plane, so the numbers a spending decision depends on vanished with the window.
+
+`templates/dashboards/genesis-activity.json` is a Grafana dashboard over both: spend in range, sessions by end state, cost per session, tool calls by tool, continuation decisions, and a raw activity feed.
+
+Upload it with `scripts/upload-dashboard.sh` rather than the import UI. It is idempotent — the dashboard's own `uid` plus `overwrite: true` means re-running updates in place — and it waits out the 503s a sleeping free-tier stack returns while waking.
+
+It needs `GRAFANA_URL` and a **service account** token in `GRAFANA_TOKEN`. The Loki push credential does not work: `glc_` access-policy tokens authenticate to Loki and to grafana.com, and the stack's own API answers `401 Invalid API key`. Minting a service account from the Cloud API needs a scope that token doesn't carry either (`403`), so the token is created once in Grafana → Administration → Users and access → Service accounts (role Editor), added to `~/.config/genesis/.env`, and never touched again.
+
+One gotcha when first wiring this up: a brand-new label combination is visible to **log** queries immediately but not to **metric** queries, because those go through the index. Expect `count_over_time`/`sum_over_time` panels to read zero for a while after the first push, even though `{hook_event="session-outcome"}` clearly returns lines.
+
 ### Grafana Cloud Free Tier Limits (reference)
 - Logs: 50 GB/month, 14 days retention
 - Metrics: 10,000 active series/month, 14 days retention
@@ -370,7 +435,7 @@ Shell scripts that provide core capabilities to every dev system. No binary dist
 
 ### Scripts
 
-- **`log.sh`** — called by CC hooks. Reads hook stdin JSON, pushes structured logs to Loki via curl. Falls back to stderr if Loki is not configured.
+- **`log.sh`** — called by CC hooks. Reads hook stdin JSON, pushes structured logs to Loki via curl. Without Loki configured it only echoes to stderr, which Claude Code captures into its own transcript — no per-tool-call trail in an Actions run (the Actions tab still records that the run happened).
 - **`issues.sh`** — thin wrapper around `gh` CLI. Provides `create`, `list`, `close`, `assign` subcommands.
 
 Local mode (`genesis serve`) is a subcommand of the genesis CLI itself, not a script seeded into the dev repo. See **Execution Model > Local Mode**.

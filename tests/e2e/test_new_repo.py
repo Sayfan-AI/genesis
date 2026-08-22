@@ -93,8 +93,22 @@ def test_new_repo_has_settings_with_hooks(tmp_dir: Path) -> None:
         assert hook in hooks, f"Missing hook: {hook}"
         assert len(hooks[hook]) > 0
         # Format: [{"matcher": "", "hooks": [{"type": "command", "command": "..."}]}]
-        inner = hooks[hook][0]["hooks"]
-        assert "log.sh" in inner[0]["command"]
+        # Every event logs, but don't assume logging is the FIRST entry. This
+        # assertion used to read inner[0] and broke the moment PreToolUse gained
+        # the host-guard in front of the logger, which is a test failing on
+        # ordering rather than on behavior.
+        commands = [h["command"] for entry in hooks[hook] for h in entry["hooks"]]
+        assert any("log.sh" in c for c in commands), f"{hook} does not log: {commands}"
+
+    # The host-guard is what keeps a session out of ~/.ssh and friends, and it is
+    # inert unless it is declared here. It also has to precede the logger on
+    # PreToolUse: a guard that runs after the call it was meant to block is a
+    # comment.
+    pre = [h["command"] for entry in hooks["PreToolUse"] for h in entry["hooks"]]
+    assert any("host-guard.sh" in c for c in pre), f"host-guard not wired: {pre}"
+    guard_at = next(i for i, c in enumerate(pre) if "host-guard.sh" in c)
+    log_at = next(i for i, c in enumerate(pre) if "log.sh" in c)
+    assert guard_at < log_at, f"host-guard must run before the logger: {pre}"
 
 
 def test_new_repo_has_genesis_config(tmp_dir: Path) -> None:
@@ -112,8 +126,8 @@ def test_new_repo_has_genesis_config(tmp_dir: Path) -> None:
 
 def test_new_repo_workflows_forward_loki_secrets(tmp_dir: Path) -> None:
     """Every workflow that runs Claude must pass the Loki creds through the
-    action's `settings` env block, or the activity-logging hooks silently
-    degrade to stderr on every Actions run."""
+    action's `settings` env block, or every Actions run loses its activity
+    trail — hook stderr lands in Claude Code's transcript, not the run log."""
     repo = tmp_dir / PROJECT
     scaffold_new_repo(repo, GOAL, PROJECT)
 

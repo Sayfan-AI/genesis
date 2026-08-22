@@ -135,3 +135,130 @@ def test_works_with_no_stdin_context(repo: Path, fake_loki: tuple[str, list[dict
     line = entry(pushes[0])[1]
     assert f"project={PROJECT}" in line
     assert "session=" not in line
+
+
+# ---------- what a tool call actually did ----------
+
+
+def test_line_records_the_command_not_just_the_tool_name(
+    repo: Path, fake_loki: tuple[str, list[dict]]
+) -> None:
+    """`tool=Bash` alone tells you nothing. The command is the whole point."""
+    url, pushes = fake_loki
+    run_hook(repo, url, "pre-tool-use", {"tool_name": "Bash", "tool_input": {"command": "go test ./..."}})
+    assert 'target="go test ./..."' in entry(pushes[0])[1]
+
+
+def test_file_tools_record_the_path(repo: Path, fake_loki: tuple[str, list[dict]]) -> None:
+    url, pushes = fake_loki
+    run_hook(repo, url, "post-tool-use", {"tool_name": "Edit", "tool_input": {"file_path": "/repo/plan.go"}})
+    assert "target=/repo/plan.go" in entry(pushes[0])[1]
+
+
+def test_failed_call_records_status_and_reason(repo: Path, fake_loki: tuple[str, list[dict]]) -> None:
+    url, pushes = fake_loki
+    run_hook(
+        repo,
+        url,
+        "post-tool-use-failure",
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "go build ./..."},
+            "tool_response": {"is_error": True, "error": "exit status 2"},
+        },
+    )
+    line = entry(pushes[0])[1]
+    assert "status=error" in line and 'error="exit status 2"' in line
+
+
+def test_successful_call_records_ok(repo: Path, fake_loki: tuple[str, list[dict]]) -> None:
+    url, pushes = fake_loki
+    run_hook(repo, url, "post-tool-use", {"tool_name": "Read", "tool_input": {"file_path": "/a"}, "tool_response": {"is_error": False}})
+    assert "status=ok" in entry(pushes[0])[1]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl -u 1694942:glc_livetokenvalue https://logs-prod-021.grafana.net",
+        "export ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijk && go run .",
+        "gh auth login --with-token ghp_aBcDeFgHiJkLmNoPqRsT",
+        "curl https://user:hunter2@example.com/api",
+        "aws configure set aws_access_key_id AKIAIOSFODNN7EXAMPLE",
+    ],
+)
+def test_credentials_never_reach_the_log(
+    repo: Path, fake_loki: tuple[str, list[dict]], command: str
+) -> None:
+    """Commands are the most useful field and the most likely to carry a secret.
+    Loki has no delete, so anything that lands here is permanent."""
+    url, pushes = fake_loki
+    run_hook(repo, url, "pre-tool-use", {"tool_name": "Bash", "tool_input": {"command": command}})
+    line = entry(pushes[0])[1]
+    for secret in ("glc_livetokenvalue", "sk-ant-api03-abcdefghijk", "ghp_aBcDeFgHiJkLmNoPqRsT", "hunter2", "AKIAIOSFODNN7EXAMPLE"):
+        assert secret not in line, f"leaked {secret}"
+    assert "<redacted>" in line
+
+
+def test_long_input_is_truncated(repo: Path, fake_loki: tuple[str, list[dict]]) -> None:
+    """A Write tool's input is an entire file; logging it verbatim would balloon
+    both the bill and the blast radius."""
+    url, pushes = fake_loki
+    run_hook(repo, url, "pre-tool-use", {"tool_name": "Write", "tool_input": {"file_path": "/x", "content": "y" * 5000}})
+    assert len(entry(pushes[0])[1]) < 400
+
+
+# ---------- host-guard.sh ----------
+
+def _guard(payload: str) -> int:
+    """Run host-guard.sh with a hook payload on stdin, return its exit code."""
+    import subprocess
+    from pathlib import Path
+
+    script = Path(__file__).parents[2] / "templates" / "scripts" / "host-guard.sh"
+    return subprocess.run(
+        ["bash", str(script)], input=payload, text=True, capture_output=True
+    ).returncode
+
+
+def test_guard_blocks_the_command_that_actually_happened() -> None:
+    """An agent hunting for a shell alias globbed the operator's dotfiles.
+
+    Nothing was exfiltrated and nothing was even looked for, but the glob covered
+    a file holding work credentials and matched lines would have reached a
+    transcript and a log sink. This is the case the guard exists for.
+    """
+    payload = (
+        '{"tool_name":"Bash","tool_input":{"command":'
+        '"grep -rn \\"gci\\" ~/.zshrc ~/.dotfiles.local/*.sh"}}'
+    )
+    assert _guard(payload) == 2
+
+
+def test_guard_blocks_credential_paths() -> None:
+    for command in ("cat ~/.ssh/id_rsa", "cat $HOME/.aws/credentials",
+                    "ls ~/.gnupg", "cat ~/.netrc", "cat ~/.claude.json"):
+        payload = '{"tool_name":"Bash","tool_input":{"command":"%s"}}' % command
+        assert _guard(payload) == 2, f"should have blocked: {command}"
+
+
+def test_guard_allows_ordinary_work() -> None:
+    """A guard that blocks real work gets removed, so the false-positive cost is
+    higher than the marginal security. ~/.kube is deliberately not on the list:
+    cluster kubeconfigs are referenced by explicit path and blocking them would
+    break the product's actual job."""
+    for command in ("go test ./...", "gh pr list", "git status --short",
+                    "kubectl --kubeconfig ./clusters/dev.yaml get pods"):
+        payload = '{"tool_name":"Bash","tool_input":{"command":"%s"}}' % command
+        assert _guard(payload) == 0, f"should have allowed: {command}"
+
+
+def test_guard_ignores_non_bash_tools() -> None:
+    assert _guard('{"tool_name":"Read","tool_input":{"file_path":"~/.ssh/id_rsa"}}') == 0
+
+
+def test_guard_fails_open_on_a_broken_payload() -> None:
+    """A bug in the guard must not wedge the loop. That trade is why this is a
+    tripwire and not a boundary, and it is stated in the script's header."""
+    for payload in ("", "not json", "{}", '{"tool_name":"Bash"}'):
+        assert _guard(payload) == 0
