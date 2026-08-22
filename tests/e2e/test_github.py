@@ -17,6 +17,7 @@ from genesis.github import (
     open_onboarding_issue,
     publish_to_github,
     push_to_github,
+    ssh_remote_url,
 )
 from genesis.scaffold import SEED_WORKFLOWS
 
@@ -90,6 +91,99 @@ def test_push_to_github(mock_run: MagicMock) -> None:
 
     # Verify remote add and push were called
     assert call_count == 3  # get-url, remote add, push
+
+    # And that the remote it added is SSH, not the HTTPS URL it was handed.
+    add_args = mock_run.call_args_list[1][0][0]
+    assert "remote" in add_args and "add" in add_args
+    assert "git@github.com:test/repo.git" in add_args, add_args
+
+
+# ---------- SSH remotes (#51) ----------
+#
+# An HTTPS origin authenticates through git's credential helper, which is usually
+# `gh auth git-credential`, so the push borrows whichever gh account is ACTIVE
+# rather than the one that owns the repo. Measured on Sayfan-AI/MaKlaude: the push
+# was denied to the wrong account until it was switched by hand.
+
+
+@pytest.mark.parametrize(
+    "given,want",
+    [
+        ("https://github.com/test/repo", "git@github.com:test/repo.git"),
+        ("https://github.com/test/repo.git", "git@github.com:test/repo.git"),
+        ("https://github.com/test/repo/", "git@github.com:test/repo.git"),
+        # Already SSH: idempotent, so it can normalise an existing remote.
+        ("git@github.com:test/repo.git", "git@github.com:test/repo.git"),
+        ("git@github.com:test/repo", "git@github.com:test/repo.git"),
+        # Not hardcoded to github.com, so an Enterprise host survives the trip.
+        ("https://git.example.com/test/repo", "git@git.example.com:test/repo.git"),
+    ],
+)
+def test_ssh_remote_url(given: str, want: str) -> None:
+    assert ssh_remote_url(given) == want
+
+
+def test_ssh_remote_url_rejects_a_url_with_no_repo_path() -> None:
+    """Better to fail here than to hand git a remote of `git@github.com:.git`."""
+    with pytest.raises(GitHubError):
+        ssh_remote_url("https://github.com")
+
+
+@patch("genesis.github.subprocess.run")
+def test_push_upgrades_an_existing_https_origin_to_ssh(mock_run: MagicMock) -> None:
+    """The end state must not depend on when the repo was scaffolded.
+
+    A repo published by an older genesis has an HTTPS origin on disk. Re-running
+    the publish flow should fix it rather than leave the defect in place.
+    """
+    calls: list[list[str]] = []
+
+    def side_effect(args: list[str], **kwargs: object) -> MagicMock:
+        calls.append(args)
+        result = MagicMock(returncode=0, stderr="")
+        result.stdout = "https://github.com/test/repo.git" if len(calls) == 1 else ""
+        return result
+
+    mock_run.side_effect = side_effect
+    push_to_github(Path("/tmp/test-repo"), "https://github.com/test/repo")
+
+    flat = [" ".join(c) for c in calls]
+    assert any("set-url origin git@github.com:test/repo.git" in f for f in flat), flat
+    assert not any("remote add" in f for f in flat), "origin existed; it must be repointed, not added"
+    assert any("push -u origin main" in f for f in flat), flat
+
+
+@patch("genesis.github.subprocess.run")
+def test_push_leaves_a_correct_ssh_origin_alone(mock_run: MagicMock) -> None:
+    """No redundant set-url on the happy path."""
+    calls: list[list[str]] = []
+
+    def side_effect(args: list[str], **kwargs: object) -> MagicMock:
+        calls.append(args)
+        result = MagicMock(returncode=0, stderr="")
+        result.stdout = "git@github.com:test/repo.git" if len(calls) == 1 else ""
+        return result
+
+    mock_run.side_effect = side_effect
+    push_to_github(Path("/tmp/test-repo"), "https://github.com/test/repo")
+
+    flat = [" ".join(c) for c in calls]
+    assert not any("set-url" in f for f in flat), flat
+    assert not any("remote add" in f for f in flat), flat
+
+
+@patch("genesis.github.subprocess.run")
+def test_push_refuses_an_origin_pointing_at_a_different_repo(mock_run: MagicMock) -> None:
+    """Repointing that silently would push this history at somebody else's repo."""
+    def side_effect(args: list[str], **kwargs: object) -> MagicMock:
+        result = MagicMock(returncode=0, stderr="")
+        result.stdout = "git@github.com:someone/else.git"
+        return result
+
+    mock_run.side_effect = side_effect
+
+    with pytest.raises(GitHubError, match="already points at"):
+        push_to_github(Path("/tmp/test-repo"), "https://github.com/test/repo")
 
 
 @patch("genesis.github.subprocess.run")
