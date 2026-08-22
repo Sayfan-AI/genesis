@@ -164,3 +164,46 @@ def test_scaffolded_workflows_match_templates(tmp_dir: Path) -> None:
         template = (TEMPLATES_DIR / "workflows" / name).read_text()
         scaffolded = (repo / ".github" / "workflows" / name).read_text()
         assert scaffolded == template
+
+
+def test_template_action_pins_match_genesis_own_workflows() -> None:
+    """Templates must not rot behind the actions genesis runs on itself.
+
+    Dependabot's `github-actions` ecosystem only scans `.github/workflows/`.
+    `templates/workflows/` is invisible to it, so every scaffolded dev repo kept
+    getting `actions/checkout@v4` — pinned to a Node 20 runtime GitHub retired
+    in June 2026 — while genesis's own workflows were bumped to v7 by a
+    Dependabot PR nobody realised didn't cover the templates.
+
+    Pinning templates to whatever genesis runs on itself makes the Dependabot PR
+    that bumps `.github/workflows/` fail this test until the templates move too,
+    which is the only automated pressure the template directory gets.
+    """
+    action_re = re.compile(r"uses:\s*([\w.-]+/[\w.-]+)@(\S+)")
+
+    def pins(directory: Path) -> dict[str, set[str]]:
+        found: dict[str, set[str]] = {}
+        for wf in sorted(directory.glob("*.yml")):
+            for action, version in action_re.findall(wf.read_text()):
+                found.setdefault(action, set()).add(version)
+        return found
+
+    own = pins(REPO_ROOT / ".github" / "workflows")
+    template = pins(TEMPLATES_DIR / "workflows")
+
+    for action, versions in sorted(template.items()):
+        if action not in own:
+            # Only actions genesis also uses can be cross-checked; the rest are
+            # covered by the single-version assertion below.
+            continue
+        assert versions == own[action], (
+            f"templates/workflows pins {action} at {sorted(versions)} but "
+            f".github/workflows pins it at {sorted(own[action])}. Dependabot "
+            f"does not see templates/workflows — bump it by hand in the same PR."
+        )
+
+    for action, versions in sorted(template.items()):
+        assert len(versions) == 1, (
+            f"templates/workflows pins {action} at more than one version "
+            f"({sorted(versions)}); a scaffolded repo should be internally consistent"
+        )
