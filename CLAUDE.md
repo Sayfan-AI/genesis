@@ -86,6 +86,32 @@ template is unclassified or declares no `--max-turns` at all. Two separate dev-s
 workflows died at 20 turns three weeks apart before this floor existed — when a run
 dies at max-turns, raise the whole class and record why.
 
+## CI
+
+`.github/workflows/ci.yml` runs the suite on every push to `main` and every PR. It is
+what turns the guards above from convention into enforcement — before it existed, the
+suite ran only when a human remembered to, and several changes merged on the strength
+of a hand-run result.
+
+Two properties keep it usable, both asserted by `tests/e2e/test_workflows.py`:
+
+- **No secrets.** CI must stay free and fast so it can gate every PR. The paid
+  Claude-invoking workflows are separate; never gate a PR on them.
+- **`uv sync --locked` then `uv run --no-sync`, never `--frozen`.** `--frozen` reads
+  as the strict option and is not: it installs a stale lock without complaint, so a
+  dependency added to `pyproject.toml` without a re-lock passes CI and breaks
+  everyone else. `--locked` fails the run instead. `--frozen` also does not keep uv
+  off the configured package index, because building this project resolves
+  `build-system.requires` (hatchling), which no lockfile covers — the thing that
+  actually stops a proxy registry from rewriting source URLs is the
+  `[[tool.uv.index]]` pin in `pyproject.toml`, not a flag on the run command. A
+  `git diff --exit-code uv.lock` step catches a regression in any of this.
+
+The suite must stay hermetic: no network, no ambient config. `tests/conftest.py` sets
+`GIT_AUTHOR_*`/`GIT_COMMITTER_*` because the scaffolding tests end in a real `git
+commit`, which aborts on a runner with no global identity. If a new test needs
+credentials or a live service, it does not belong in this suite.
+
 ## Self-Improvement
 
 This project opts in to self-improvement. Update this CLAUDE.md and project workflows as the design evolves. Keep `docs/` as the living design documents.

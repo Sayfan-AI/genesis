@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only, no secrets. Everything the suite needs is local: the log.sh tests
+# stand up an http.server on loopback, the scaffolding tests write to tmp_path,
+# and the GitHub integration tests mock subprocess. Keep it that way — CI has to
+# stay free and fast so it can gate every PR, unlike Genesis Evolver which burns
+# an ANTHROPIC_API_KEY per run.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Exact release, not `@v9`. setup-uv stopped publishing floating major
+      # tags after v7 — `@v9` does not resolve and fails the job at setup.
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          # Test the floor declared in pyproject.toml (requires-python >=3.12),
+          # not whatever newer interpreter the runner happens to ship.
+          python-version: "3.12"
+          enable-cache: true
+
+      # --locked, not --frozen. Both install from the committed lock, but they
+      # disagree about a *stale* one: --frozen installs it anyway, so a PR that
+      # adds a dependency to pyproject.toml without re-locking goes green here
+      # and breaks for everyone else. Measured on this repo — dependency added,
+      # no re-lock: `uv sync --frozen` exits 0 having installed the old set,
+      # `uv sync --locked` exits 1 with "the lockfile needs to be updated".
+      - run: uv sync --locked
+
+      # --no-sync so the test step itself cannot touch the environment or the
+      # lock. It is also the only invocation that stays off the package index
+      # entirely: --frozen pins the dependency *graph*, but building this
+      # project still resolves `build-system.requires` (hatchling), which no
+      # lockfile covers, against whatever index is configured. So --frozen is
+      # not the shield against a proxy registry that it was assumed to be — the
+      # [[tool.uv.index]] pin in pyproject.toml is, and this ordering keeps the
+      # index out of the picture after the one sync above.
+      - run: uv run --no-sync pytest tests/ -q
+
+      # Belt and braces: if a change ever drops the flags above, this fails
+      # loudly instead of shipping a rewritten lock.
+      - name: uv.lock is unchanged by the test run
+        run: git diff --exit-code uv.lock

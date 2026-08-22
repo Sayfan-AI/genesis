@@ -118,6 +118,44 @@ def test_genesis_own_claude_workflows_meet_orchestrator_floor() -> None:
         )
 
 
+def test_ci_workflow_runs_the_suite_on_every_pr_without_secrets() -> None:
+    """The guards in this file are only guards if something runs them.
+
+    Before ci.yml existed, the whole suite ran only when a human remembered to,
+    which made every assertion here advisory. Two properties keep it that way:
+    it must fire on `pull_request`, and it must need no secrets — a CI job that
+    costs money or an API key is one someone eventually disables.
+    """
+    content = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "pull_request:" in content
+    # Match the commands, not the file. The comments in ci.yml discuss --frozen
+    # at length to explain why it is *not* used, and scanning raw text flags
+    # that prose — same reason the secrets check below matches on interpolation.
+    commands = "\n".join(
+        line
+        for line in content.splitlines()
+        if line.strip().lstrip("- ").startswith("run:")
+    )
+    # --locked, not --frozen: --frozen installs a stale lock without complaint,
+    # so a dependency added to pyproject.toml without a re-lock would pass CI.
+    assert "uv sync --locked" in commands, (
+        "CI must install with --locked so a stale uv.lock fails the run"
+    )
+    assert "uv run --no-sync pytest" in commands, (
+        "CI must run tests with --no-sync so the test step cannot touch the lock"
+    )
+    assert "--frozen" not in commands, (
+        "--frozen is not the guard it looks like: it accepts a stale lock, and "
+        "it does not keep uv off the configured index (build-system.requires is "
+        "resolved outside the lock). Use --locked + --no-sync."
+    )
+    # A workflow can only consume a secret through this interpolation, so match
+    # on it rather than the bare word — prose in a comment is not a secret.
+    assert "${{ secrets." not in content, (
+        "CI must not consume secrets — it has to run on every PR for free"
+    )
+
+
 def test_scaffolded_workflows_match_templates(tmp_dir: Path) -> None:
     repo = tmp_dir / "test-project"
     scaffold_new_repo(repo, "test goal", "test-project")
