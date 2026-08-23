@@ -530,7 +530,9 @@ def _no_real_git(monkeypatch):
     monkeypatch.setattr(server, "session_work_marker", fingerprint)
 
 
-def _session_stream(subtype: str, tool_calls: int = 1, sid: str = "sess-abc123def") -> list[str]:
+def _session_stream(
+    subtype: str, tool_calls: int = 1, sid: str = "sess-abc123def", cost: float = 1.0
+) -> list[str]:
     lines = [json.dumps({"type": "system", "subtype": "init", "session_id": sid})]
     for i in range(tool_calls):
         lines.append(
@@ -553,7 +555,7 @@ def _session_stream(subtype: str, tool_calls: int = 1, sid: str = "sess-abc123de
                 "subtype": subtype,
                 "session_id": sid,
                 "num_turns": tool_calls,
-                "total_cost_usd": 1.0,
+                "total_cost_usd": cost,
                 "duration_ms": 1000,
             }
         )
@@ -1259,3 +1261,152 @@ def test_serve_sweeps_the_board_before_the_first_session(plane, monkeypatch) -> 
     plane.serve()
 
     assert order[:2] == ["sweep", "run"]
+
+
+# ---------- a resume that loaded nothing (#43) ----------
+
+
+def _empty_resume() -> list[str]:
+    """What a resume that failed to load its session actually emitted.
+
+    `success`, no tools, $0.00, six seconds after the ladder decided to continue
+    a chain that had just spent $6.47.
+    """
+    return _session_stream("success", tool_calls=0, cost=0.0)
+
+
+def test_an_empty_resume_is_retried_rather_than_ending_the_chain(plane) -> None:
+    calls = _fake_sessions(
+        plane,
+        [_session_stream("error_max_turns"), _empty_resume(), _session_stream("success")],
+    )
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    assert len(calls) == 3, "the empty resume should have been retried"
+    assert "--resume" in calls[1] and "--resume" in calls[2], (
+        "the retry must resume the same session, not start a fresh one"
+    )
+    assert calls[2][calls[2].index("--resume") + 1] == "sess-abc123def"
+
+
+def test_a_retry_that_is_also_empty_hands_the_work_on_explicitly(plane) -> None:
+    """The observed near-miss: the chain ended `success`, and only the follow-up
+    pass rescued $6.47 of uncommitted work by luck.
+
+    Twice-empty is a broken resume, so the work is handed to the follow-up path
+    on purpose rather than left to the progress check happening to notice.
+    """
+    releases = []
+    _fake_sessions(plane, [_session_stream("error_max_turns"), _empty_resume(), _empty_resume()])
+    plane.release_claims = lambda reason: releases.append(reason)
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    assert plane.pending_followup, "a chain that could not resume must be picked up again"
+    assert releases and "could not be resumed" in releases[0], (
+        f"a chain that finished nothing must hand its claims back, got {releases}"
+    )
+
+
+def test_a_retry_that_does_not_consume_a_continuation(plane, monkeypatch) -> None:
+    """The retry costs nothing by definition — a session that cost nothing is
+    what got us here — so it must not eat one of the bounded continuations."""
+    monkeypatch.setattr(server, "MAX_CONTINUATIONS", 1)
+    calls = _fake_sessions(
+        plane,
+        [_session_stream("error_max_turns"), _empty_resume(), _session_stream("error_max_turns")],
+    )
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    assert len(calls) == 3, (
+        "one continuation, plus the retry of its empty resume, should still run"
+    )
+
+
+def test_a_cheap_but_real_session_is_not_mistaken_for_a_failed_resume(plane) -> None:
+    """Zero tools AND zero cost. A session that genuinely had nothing left to do
+    still pays for the turn in which it decides that; one that cost nothing never
+    reached the model."""
+    plane.last_result_subtype = "success"
+    plane.last_tool_calls = 0
+    plane.last_cost = 0.02
+    assert not plane._resume_loaded_nothing()
+
+    plane.last_cost = 0.0
+    assert plane._resume_loaded_nothing()
+
+    plane.last_tool_calls = 3
+    assert not plane._resume_loaded_nothing()
+
+
+def test_the_zero_tool_warning_does_not_send_you_after_a_deleted_mechanism() -> None:
+    """It used to say "check that the agent profile is authenticated", and profile
+    isolation was removed in 4776803. A message pointing at a mechanism that no
+    longer exists costs its reader the whole search before they conclude it's stale.
+    """
+    source = Path(server.__file__).read_text()
+    assert "agent profile is authenticated" not in source
+    assert "ANTHROPIC_API_KEY" in source
+
+
+# ---------- the dev repo's own pre-agent steps (#44) ----------
+
+
+def test_a_pre_session_script_runs_before_the_agent(plane, tmp_path) -> None:
+    """A net a dev system built to be deterministic has to stay deterministic
+    across execution modes, or "we made this a script so nobody has to remember
+    it" is only true in CI."""
+    marker = tmp_path / "ran.txt"
+    script = Path(server.PRE_SESSION_SCRIPT)
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(f"#!/usr/bin/env bash\necho 'gate #7 is 21 days old'\ntouch {marker}\n")
+
+    _fake_sessions(plane, [_session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    assert marker.exists(), "the dev repo's pre-agent step did not run"
+
+
+def test_a_missing_pre_session_script_is_not_an_error(plane) -> None:
+    assert not Path(server.PRE_SESSION_SCRIPT).exists()
+    plane.run_pre_session_steps()  # must simply do nothing
+
+
+def test_a_failing_pre_session_script_does_not_stop_the_loop(plane) -> None:
+    """Non-fatal on purpose: a net that fails is a better outcome than a control
+    plane that stops."""
+    script = Path(server.PRE_SESSION_SCRIPT)
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("#!/usr/bin/env bash\necho 'boom' >&2\nexit 3\n")
+
+    calls = _fake_sessions(plane, [_session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    assert len(calls) == 1, "the session must still launch after a failed pre-step"
+
+
+def test_a_hanging_pre_session_script_cannot_wedge_the_loop(plane, monkeypatch) -> None:
+    """It runs before every session, so an unbounded one would wedge the loop it
+    was written to protect."""
+    monkeypatch.setattr(server, "PRE_SESSION_TIMEOUT_S", 1)
+    script = Path(server.PRE_SESSION_SCRIPT)
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("#!/usr/bin/env bash\nsleep 30\n")
+
+    start = time.time()
+    plane.run_pre_session_steps()
+    assert time.time() - start < 10, "the pre-session step was not bounded"

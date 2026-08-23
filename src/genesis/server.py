@@ -58,6 +58,26 @@ HIGHWATER_PATH = Path(".genesis/.poll-highwater")
 # is nothing here to release" rather than as an error.
 ISSUES_SCRIPT = Path(".genesis/scripts/issues.sh")
 
+# The dev repo's own pre-agent steps. A dev system is taught to turn a check that
+# needs no judgement into a script and wire it into workflow YAML *before* the
+# agent step - and then `serve` disables every workflow and launches `claude -p`
+# directly, so the script never runs. Measured (#44): a `nudge-gates.sh` written
+# precisely because a stale `needs:human` gate is the one failure with no safety
+# net (one sat 21 days across ~85 ticks) was correctly written, tested, placed,
+# and silently did not execute in the mode the project actually ran in.
+#
+# One conventional path rather than a manifest, for the reason the scaffolded
+# .gitignore stopped enumerating: a list of steps defaults the next member to
+# unsafe. A repo that wants several nets composes them inside this one script,
+# where forgetting is visible in a file it owns.
+PRE_SESSION_SCRIPT = Path(".genesis/scripts/pre-session.sh")
+
+# Bounded and non-fatal, both deliberate. These run before every session, so a
+# hung net would wedge the loop it was written to protect, and a net that fails
+# is still a better outcome than a control plane that stops. The workflow-step
+# equivalent gets the runner's own timeout; this is that.
+PRE_SESSION_TIMEOUT_S = 120
+
 RELEVANT_EVENT_TYPES = frozenset(
     {"IssuesEvent", "IssueCommentEvent", "PullRequestEvent"}
 )
@@ -623,13 +643,20 @@ class LocalControlPlane:
                     self.last_result_subtype = event.get("subtype")
                     # A "successful" session that used no tools did nothing, and
                     # nothing is the failure this whole system exists to notice.
-                    # Seen for real: an unauthenticated agent profile made every
-                    # run exit in one turn for $0.00 while reporting success,
-                    # quietly consuming the event backlog as it went.
+                    # Seen for real: fifteen such runs in a row reported success
+                    # for $0.00 while quietly consuming the event backlog.
+                    #
+                    # The advice used to say "check that the agent profile is
+                    # authenticated", pointing at profile isolation that commit
+                    # 4776803 removed - a message sending its reader to a
+                    # mechanism that no longer exists is worse than none, because
+                    # they spend the search before concluding it's stale (#43).
                     if turns == 0 and event.get("subtype") == "success":
                         log(
-                            "  WARNING: session ran no tools at all - check that the "
-                            "agent profile is authenticated"
+                            "  WARNING: session ran no tools at all and reported "
+                            "success - `claude -p` either could not authenticate "
+                            "(check ANTHROPIC_API_KEY) or, on a resume, failed to "
+                            "load the session it was given"
                         )
                     loki_push(
                         "session-outcome",
@@ -736,6 +763,11 @@ class LocalControlPlane:
         # know which rung took it back; "the claim expired" would tell them
         # nothing, which is half of why an age-based expiry is the wrong shape.
         stop_reason = "the session ended without finishing"
+        # Tracked separately from `last_result_subtype` because a broken resume
+        # reports `success` while having finished nothing. Everything downstream
+        # that asks "did this chain end cleanly" has to agree with the ladder, not
+        # with the last subtype it happened to see.
+        finished_cleanly: bool | None = None
 
         for attempt in range(1, MAX_CONTINUATIONS + 1):
             if self.shutdown or not _died_mid_task(self.last_result_subtype):
@@ -783,6 +815,34 @@ class LocalControlPlane:
             rc = self._run_session(None, deadline, resume=session_id)
             spent += self.last_cost
             self.run_spent += self.last_cost
+
+            # A resume that came back instantly, empty and "successful" did not
+            # resume anything. Left alone it ends the chain, because `success` is
+            # not an abnormal ending - so a task with real uncommitted work and
+            # $6.47 already spent gets abandoned on the strength of a session that
+            # never reached the model (#43).
+            #
+            # Retried once rather than given up on, because the observed failure
+            # was transient: a fresh session seconds later picked the same work up
+            # fine. The retry costs nothing by definition - a session that cost
+            # nothing is what got us here - and does not consume a continuation,
+            # since no continuation happened.
+            if self._resume_loaded_nothing():
+                log(f"  resume of {session_id[:8]} loaded nothing - retrying once")
+                rc = self._run_session(None, deadline, resume=session_id)
+                spent += self.last_cost
+                self.run_spent += self.last_cost
+                if self._resume_loaded_nothing():
+                    # Twice is a broken resume, not a blip. Say so and hand the
+                    # work to the follow-up pass explicitly, rather than reporting
+                    # a clean finish and relying on the fingerprint check to
+                    # rescue it by luck - which is how this survived last time.
+                    log("  resume produced an empty session twice - "
+                        "treating the chain as unfinished")
+                    stop_reason = "the session could not be resumed"
+                    finished_cleanly = False
+                    self.pending_followup = True
+                    break
         else:
             # Every continuation used and the chain is still unfinished. This is
             # the one exit that isn't a `break`, so it needs its own reason.
@@ -825,7 +885,9 @@ class LocalControlPlane:
         # `in-progress`. A claim left on would make the follow-up walk past the
         # very task it was queued to rescue, which is what MaKlaude issue #195
         # measured.
-        if self.last_result_subtype != "success":
+        if finished_cleanly is None:
+            finished_cleanly = self.last_result_subtype == "success"
+        if not finished_cleanly:
             self.release_claims(stop_reason)
 
         # Outside a chain the plane holds no claims, and a sweeper that still
@@ -957,6 +1019,68 @@ class LocalControlPlane:
                 log(f"  {line.strip()}")
         if out.returncode != 0:
             log(f"  {args[0]} exited {out.returncode}: {(out.stderr or '').strip()[:200]}")
+
+    def _resume_loaded_nothing(self) -> bool:
+        """True when a resume came back as an instant, empty, "successful" session.
+
+        Measured (#43): `session ended: success turns=0 cost=$0.00 0s`, six seconds
+        after the ladder decided to continue a chain that had just spent $6.47.
+        `_died_mid_task` sees `success` and ends the chain, so the work stranded -
+        the exact shape continuations exist to prevent. It only survived because
+        the follow-up pass happened to launch a fresh session seconds later.
+
+        Zero tools *and* zero cost is what separates this from a real short
+        session. A session that genuinely had nothing left to do still pays for
+        the turn in which it decides that; one that cost nothing never reached the
+        model, which means the transcript it was told to resume never loaded.
+        """
+        return (
+            self.last_result_subtype == "success"
+            and self.last_tool_calls == 0
+            and self.last_cost == 0.0
+        )
+
+    def run_pre_session_steps(self) -> None:
+        """Run the dev repo's own pre-agent checks, the way a workflow step would.
+
+        A dev system is taught to make a deterministic check a script and put it
+        ahead of the agent step in workflow YAML. `serve` disables every workflow,
+        so under local mode that step silently stops existing and the check goes
+        back to being an agent's judgement call - which is the thing it was
+        written to replace. The property worth holding is that a net a dev system
+        built to be deterministic stays deterministic across execution modes,
+        otherwise "we made this a script so nobody has to remember it" is only
+        true in CI.
+
+        Bounded and non-fatal: this runs before a session, and a net that hangs or
+        fails must not be able to stop the loop it protects. Output is echoed so
+        the terminal shows what ran, which is the local equivalent of a step's log.
+        """
+        if not PRE_SESSION_SCRIPT.is_file():
+            return
+        try:
+            out = subprocess.run(
+                ["bash", str(PRE_SESSION_SCRIPT)],
+                capture_output=True,
+                text=True,
+                timeout=PRE_SESSION_TIMEOUT_S,
+                check=False,
+                env=self._session_env(),
+            )
+        except subprocess.TimeoutExpired:
+            log(f"  pre-session.sh exceeded {PRE_SESSION_TIMEOUT_S}s - continuing without it")
+            return
+        except (OSError, subprocess.SubprocessError) as e:
+            log(f"  pre-session.sh failed to run: {e} - continuing without it")
+            return
+        for line in (out.stdout or "").splitlines():
+            if line.strip():
+                log(f"  pre-session: {line.strip()}")
+        if out.returncode != 0:
+            log(
+                f"  pre-session.sh exited {out.returncode} - continuing anyway: "
+                f"{(out.stderr or '').strip()[:200]}"
+            )
 
     def release_claims(self, reason: str) -> None:
         """Give back the issues this chain claimed, now that nothing will finish them.
@@ -1159,8 +1283,14 @@ class LocalControlPlane:
         self, prompt: str | None, deadline: float, resume: str | None = None
     ) -> int:
         """Launch one `claude -p` session and wait for it, streaming progress."""
+        # Before the agent gets its first turn, which is the whole point of the
+        # step this stands in for. A resumed session gets it too: the workflow
+        # equivalent runs once per run, and a resume is a run.
+        self.run_pre_session_steps()
+
         self.last_result_subtype = None
         self.last_tool_calls = 0
+        self.last_cost = 0.0
 
         cmd = ["claude", "-p"]
         if resume:
