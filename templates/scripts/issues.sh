@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Genesis issue manager — abstraction over gh CLI
-# Supports: create, list, unanswered-comments, close, assign, comment, label, view
+# Supports: create, list, unanswered-comments, close, assign, comment, label,
+#           claim, next, release, sweep-claims, view
 set -euo pipefail
 
 CMD="${1:-help}"
@@ -186,6 +187,88 @@ for age, num, c, thread, note in rows:
         num, ago(age), (c.get('user') or {}).get('login', '?'),
         kind, thread.get('title', ''), note, c.get('html_url', '')))
 PY
+}
+
+# ----- claims -----
+#
+# `in-progress` is the whole concurrency protocol: it is what `next` reads to
+# skip an issue somebody is already on. The label alone carries no identity and
+# no timestamp, so it looks identical whether a live session applied it four
+# seconds ago or a session that has since been killed applied it an hour ago.
+# That ambiguity is why nothing could ever safely take one back, and why
+# MaKlaude issue #195 stayed unselectable with no session alive to work it.
+#
+# The marker below is the missing half: a comment naming the session that
+# claimed the issue, which turns "somebody has this" into "session X has this,
+# since 02:18". `release` uses the identity, `sweep-claims` uses the timestamp.
+# It goes at the END of the comment body on purpose — a line that *starts* with
+# `<!--` opens a markdown HTML block, and everything after the `-->` on that
+# line then renders as raw text rather than prose.
+CLAIM_MARKER="genesis-claim"
+
+# How long a claim may outlive the session holding it before the backstop sweep
+# takes it back. This is the only place age decides anything, and the window has
+# to clear the longest a session can legitimately hold a claim — the control
+# plane's session cap, `GENESIS_SESSION_TIMEOUT`, one hour by default. A shorter
+# window races a slow but healthy run and hands its issue to a second worker:
+# two branches, a merge conflict, and neither run aware of the other, which is
+# strictly worse than the invisibility the sweep exists to fix.
+DEFAULT_CLAIM_STALE_HOURS=2
+
+claim_session() {
+    # Who the caller is, or nothing when the caller has no identity to offer.
+    #
+    # The control plane exports GENESIS_SESSION once per continuation chain, so a
+    # chain the ladder declines to resume can find exactly the claims it made and
+    # nothing else. GitHub Actions has no ladder but does have a run id, which is
+    # the same kind of handle.
+    #
+    # Empty is a real answer and not a failure: `claim` records it as
+    # `unattributed`, and `sweep-claims` uses emptiness to mean "I hold no claims,
+    # so exempt none". Substituting a placeholder here instead would make an
+    # anonymous sweeper exempt every anonymous claim - the exact set that most
+    # needs sweeping.
+    if [ -n "${GENESIS_SESSION:-}" ]; then
+        # Restricted charset because the identity round-trips through a marker
+        # parsed by a whitespace-delimited regex.
+        printf '%s' "$GENESIS_SESSION" | tr -c 'A-Za-z0-9._-' '-'
+    elif [ -n "${GITHUB_RUN_ID:-}" ]; then
+        printf 'gha-%s-%s' "$GITHUB_RUN_ID" "${GITHUB_RUN_ATTEMPT:-1}"
+    fi
+}
+
+claim_rows() {
+    # Every live claim, one tab-separated line each: issue number, claiming
+    # session, age in whole seconds. An `in-progress` issue carrying no marker
+    # reads `-` and `-1`; the placeholder is not cosmetic, because tab is IFS
+    # whitespace and `read` collapses two adjacent tabs into one delimiter, which
+    # would silently shift an empty session's age into the session field.
+    #
+    # The LAST marker wins. An issue can be claimed, released and re-claimed, and
+    # only the most recent claim is the live one — scoring by the first would
+    # release a fresh claim on the strength of an ancient abandoned one.
+    gh issue list --state open --label in-progress --json number,comments --limit 100 \
+        --jq '
+.[] | . as $i
+| ([$i.comments[]? | select(.body | test("<!-- '"$CLAIM_MARKER"' "))] | last) as $c
+| [ $i.number,
+    (if $c == null then "-" else ($c.body | capture("<!-- '"$CLAIM_MARKER"' session=(?<s>[^ ]+)").s) end),
+    (if $c == null then -1 else ((now - ($c.createdAt | fromdateiso8601)) | floor) end)
+  ] | @tsv'
+}
+
+release_one() {
+    # Remove the label, then say why on the issue. The comment is not decoration:
+    # a human looking at an issue whose `in-progress` label vanished has no other
+    # way to tell a release from an agent quietly un-labelling something.
+    if ! gh issue edit "$1" --remove-label in-progress >/dev/null; then
+        echo "issues.sh: could not remove in-progress from #$1" >&2
+        return 1
+    fi
+    gh issue comment "$1" --body \
+        "Claim released: $2. \`in-progress\` is off, so this issue is selectable again." \
+        >/dev/null || true
+    echo "released #$1"
 }
 
 case "$CMD" in
@@ -427,7 +510,125 @@ json.dump(filtered, sys.stdout)
             echo "issues.sh claim: in-progress did not stick on #$ID; refusing to report success" >&2
             exit 1
         fi
+        # Record WHO claimed it, not just that somebody did. Without this the
+        # label is anonymous, and an anonymous claim is one nothing can hand back:
+        # `release --session` can't match it and `sweep-claims` can't date it, so
+        # it sits on the board until a human notices, which is the failure this
+        # whole mechanism exists to remove.
+        SESSION="$(claim_session)"
+        [ -z "$SESSION" ] && SESSION="unattributed"
+        if ! gh issue comment "$ID" --body \
+            "Claimed by session \`$SESSION\`. It's released when that session ends without \
+finishing, so \`in-progress\` means work is under way right now. <!-- $CLAIM_MARKER session=$SESSION -->" \
+            >/dev/null; then
+            # Give the label back rather than hold a claim nobody can release.
+            # Refusing an unattributable claim is the same discipline as refusing
+            # a label that didn't stick — a claim the machinery can't undo is not
+            # a claim, it's a leak.
+            gh issue edit "$ID" --remove-label in-progress >/dev/null || true
+            echo "issues.sh claim: could not record who claimed #$ID; released it again" >&2
+            exit 1
+        fi
         echo "claimed #$ID"
+        ;;
+
+    release)
+        # Hand a claim back so the issue becomes selectable again.
+        #
+        # The label is written by machinery at pickup, so machinery is what has to
+        # take it back. Nothing ever did: MaKlaude issue #195 was claimed at
+        # 02:18, its session went quiet at 03:17 and was killed at 03:33 with a
+        # clean tree, no branch and no commit, and the label sat there until a
+        # human removed it by hand. `next --milestone 6` skipped #195 the whole
+        # time; with the label gone it returned 195 immediately.
+        #
+        # Two forms, for the two callers. `--session T` releases everything T
+        # claimed, which is what the control plane invokes when its continuation
+        # ladder declines to resume a chain — releasing by session rather than by
+        # age is the entire point, because age can't tell a dead session from a
+        # slow one. `--id N` releases a single issue, for an agent or a human
+        # handing work back deliberately.
+        ID="" SESSION="" REASON="the claiming session ended without finishing"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --id) ID="$2"; shift 2 ;;
+                --session) SESSION="$2"; shift 2 ;;
+                --reason) REASON="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        if [ -z "$ID" ] && [ -z "$SESSION" ]; then
+            echo "Usage: issues.sh release (--id ID | --session SESSION) [--reason REASON]" >&2
+            exit 1
+        fi
+        if [ -n "$ID" ] && [ -n "$SESSION" ]; then
+            echo "issues.sh release: pass --id or --session, not both" >&2
+            exit 1
+        fi
+        if [ -n "$ID" ]; then
+            TARGETS="$ID"
+        else
+            TARGETS="$(claim_rows | awk -F'\t' -v s="$SESSION" '$2 == s { print $1 }')"
+        fi
+        rc=0
+        for n in $TARGETS; do
+            release_one "$n" "$REASON" || rc=1
+        done
+        exit $rc
+        ;;
+
+    sweep-claims)
+        # The backstop, and only the backstop.
+        #
+        # `release --session` needs a control plane that reached a decision. One
+        # that is SIGKILLed, or a GitHub Actions run the runner cancels, reaches
+        # no decision at all and releases nothing. This covers exactly that case:
+        # a claim whose session cannot be accounted for by anyone.
+        #
+        # Age is the last resort rather than the mechanism, and the window is why
+        # (see DEFAULT_CLAIM_STALE_HOURS). Three claims are deliberately left
+        # alone:
+        #
+        #   - Anything younger than the window. This is the expensive direction to
+        #     get wrong, so the sweep is biased hard towards leaving claims alone.
+        #   - The caller's own claim, however old, when the caller has an identity.
+        #     A sweeper cannot ask another host whether a process is alive, but it
+        #     always knows about itself, and a long-running session sweeping the
+        #     board must not release the issue it is at that moment working on.
+        #   - A claim with no marker, because there is nothing to date it by.
+        #     Guessing at its age is the race this design refuses, and reporting
+        #     it every sweep is the per-tick noise that gets a report skipped.
+        #     `release --id N` is the hatch for those.
+        HOURS="$DEFAULT_CLAIM_STALE_HOURS"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --older-than) HOURS="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        CUTOFF="$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 }')"
+        if [ "$CUTOFF" -lt 3600 ]; then
+            echo "issues.sh sweep-claims: --older-than $HOURS is under an hour, which is \
+shorter than a session's own life; that races a live session and hands its issue to a \
+second worker" >&2
+            exit 1
+        fi
+        ME="$(claim_session)"
+        ROWS="$(claim_rows)"
+        rc=0
+        while IFS=$'\t' read -r NUM SESS AGE; do
+            [ -z "$NUM" ] && continue
+            [ "$SESS" = "-" ] && continue
+            [ -n "$ME" ] && [ "$SESS" = "$ME" ] && continue
+            [ "$AGE" -lt "$CUTOFF" ] && continue
+            HRS="$(awk -v a="$AGE" 'BEGIN { printf "%.1f", a / 3600 }')"
+            release_one "$NUM" \
+                "session \`$SESS\` claimed this ${HRS}h ago and can no longer be accounted for" \
+                || rc=1
+        done <<EOF
+$ROWS
+EOF
+        exit $rc
         ;;
 
     next)
@@ -512,6 +713,10 @@ Commands:
   close     Close an issue
   assign    Assign an issue
   label     Add/remove labels
+  claim     Mark an issue in-progress, recording which session claimed it
+  next      Pick and claim this run's unit of work (--milestone N)
+  release   Hand a claim back (--id N | --session SESSION)
+  sweep-claims  Release claims older than --older-than HOURS (default 2)
   comment   Comment on an issue
   view      View issue details
 

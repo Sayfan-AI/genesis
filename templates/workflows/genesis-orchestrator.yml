@@ -79,6 +79,19 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The backstop for claims nobody released. `in-progress` is applied by
+      # `issues.sh claim` at pickup and makes an issue unselectable to every
+      # later run; in Actions there is no continuation ladder to notice a run
+      # that died, so a cancelled or timed-out run leaves its issue parked
+      # forever. Deterministic, so it runs before Claude and cannot be skipped by
+      # a session that ran out of turns. Non-fatal: a failed sweep must not stop
+      # the orchestrator, since the sweep is the safety net and not the work.
+      - name: Release claims nobody is working
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: bash .genesis/scripts/issues.sh sweep-claims
+
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.skip != 'true'
         with:

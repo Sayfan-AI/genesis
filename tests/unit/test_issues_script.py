@@ -1,10 +1,16 @@
 """Behavior tests for the work-selection subcommands of templates/scripts/issues.sh.
 
-`label`, `claim` and `next` are what make the `in-progress` label trustworthy, and
-the board is the only place the loop, the human and `summary` look to answer "is
-anyone working this". Every one of them had been verified once by hand against a
-throwaway stub and then left unguarded, which is how the accumulation bug reached
-a shipped script in the first place.
+`label`, `claim`, `next`, `release` and `sweep-claims` are what make the
+`in-progress` label trustworthy, and the board is the only place the loop, the
+human and `summary` look to answer "is anyone working this". Every one of them had
+been verified once by hand against a throwaway stub and then left unguarded, which
+is how the accumulation bug reached a shipped script in the first place.
+
+The claim tests split by which way an error costs. For `claim` the expensive
+failure is a label nobody can hand back, so those tests assert the identity is
+recorded and that a claim which can't be attributed is given up. For the release
+paths it inverts: the expensive failure is releasing a claim somebody is still
+working, so most of `TestSweepIsABackstop` asserts what the sweep leaves alone.
 
 Two properties make these worth testing by execution rather than by reading:
 
@@ -84,6 +90,9 @@ case "$1 $2" in
   "issue edit")
     [ -n "${GH_EDIT_FAILS-}" ] && exit 1
     echo "https://github.com/o/r/issues/1" ;;
+  "issue comment")
+    [ -n "${GH_COMMENT_FAILS-}" ] && exit 1
+    echo "https://github.com/o/r/issues/1#issuecomment-1" ;;
 esac
 exit 0
 """
@@ -148,6 +157,35 @@ def unanswered(run):
     return _go
 
 
+def _board(*claims: tuple[int, str | None, float]) -> str:
+    """What `gh issue list --label in-progress --json number,comments` returns.
+
+    One tuple per open `in-progress` issue: number, claiming session (None for a
+    label with no claim marker behind it), and how many hours ago it was claimed.
+    Built as real comment JSON with real timestamps rather than as pre-filtered
+    rows, because the marker regex and the age arithmetic live in the script's own
+    `--jq` expression - hand-filtering here would leave both untested.
+    """
+    issues = []
+    for number, session, age_hours in claims:
+        stamp = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        comments = [{"body": "unrelated chatter", "createdAt": stamp}]
+        if session is not None:
+            comments.append(
+                {
+                    "body": (
+                        f"Claimed by session `{session}`. It's released when that session "
+                        f"ends without finishing. <!-- genesis-claim session={session} -->"
+                    ),
+                    "createdAt": stamp,
+                }
+            )
+        issues.append({"number": number, "comments": comments})
+    return json.dumps(issues)
+
+
 @pytest.fixture
 def run(tmp_path: Path):
     """Run issues.sh with a stubbed gh, and hand back (result, calls)."""
@@ -168,6 +206,13 @@ def run(tmp_path: Path):
                 **os.environ,
                 "PATH": f"{bindir}:{os.environ['PATH']}",
                 "GH_CALLS": str(calls),
+                # Claim identity is read from the environment, and CI *is* a
+                # GitHub Actions run - without this every claim test would pick up
+                # the runner's own GITHUB_RUN_ID and pass or fail differently on a
+                # laptop than on CI. Tests that want an identity set one.
+                "GENESIS_SESSION": "",
+                "GITHUB_RUN_ID": "",
+                "GITHUB_RUN_ATTEMPT": "",
                 **env,
             },
         )
@@ -525,3 +570,227 @@ class TestRecheckBeforeMergeIsSeeded:
         text = (TEMPLATES / "claude_md.md.j2").read_text()
         assert "narrow-class runner is exempt" in text
         assert "by\nits classification" in text or "by its classification" in text
+
+
+class TestClaimRecordsWhoClaimed:
+    """A claim with no identity is a claim nothing can hand back (#48).
+
+    `in-progress` looks identical whether a live session applied it four seconds
+    ago or a killed one applied it an hour ago. The marker comment is what turns
+    "somebody has this" into "session X has had this since 02:18", and every
+    release path keys off it.
+    """
+
+    def test_the_claiming_session_is_recorded_on_the_issue(self, run) -> None:
+        proc, calls = run(
+            "claim", "--id", "42", GH_VIEW_JSON=LABEL_STUCK, GENESIS_SESSION="serve-abc123"
+        )
+        assert proc.returncode == 0, proc.stderr
+        marker = [c for c in calls if c.startswith("issue comment 42")]
+        assert marker, f"claim recorded no identity: {calls}"
+        assert "<!-- genesis-claim session=serve-abc123 -->" in marker[0]
+
+    def test_the_marker_ends_the_body_so_the_prose_still_renders(self, run) -> None:
+        """A line that *starts* with `<!--` opens a markdown HTML block, and the
+        text after the `-->` then renders as raw source instead of a sentence."""
+        _, calls = run(
+            "claim", "--id", "42", GH_VIEW_JSON=LABEL_STUCK, GENESIS_SESSION="serve-abc123"
+        )
+        body = next(c for c in calls if c.startswith("issue comment 42"))
+        assert body.rstrip().endswith("-->")
+        assert not body.split("--body ", 1)[1].startswith("<!--")
+
+    def test_actions_runs_are_identified_by_their_run_id(self, run) -> None:
+        """GitHub Actions has no continuation ladder, but it does have a run id,
+        which is the handle the backstop sweep needs to name what it released."""
+        _, calls = run(
+            "claim", "--id", "42", GH_VIEW_JSON=LABEL_STUCK,
+            GITHUB_RUN_ID="99887", GITHUB_RUN_ATTEMPT="2",
+        )
+        body = next(c for c in calls if c.startswith("issue comment 42"))
+        assert "session=gha-99887-2" in body
+
+    def test_an_identityless_caller_still_records_something(self, run) -> None:
+        """`unattributed` is a worse claim than a named one, but it is still
+        datable, which is what keeps it reachable by the sweep."""
+        _, calls = run("claim", "--id", "42", GH_VIEW_JSON=LABEL_STUCK)
+        body = next(c for c in calls if c.startswith("issue comment 42"))
+        assert "session=unattributed" in body
+
+    def test_a_claim_it_cannot_attribute_is_given_back(self, run) -> None:
+        """The label stuck but the marker didn't. Holding it would park the issue
+        with nothing able to release it - `release --session` can't match it and
+        the sweep can't date it - which is the exact failure #48 is about."""
+        proc, calls = run(
+            "claim", "--id", "42", GH_VIEW_JSON=LABEL_STUCK,
+            GENESIS_SESSION="serve-abc123", GH_COMMENT_FAILS="1",
+        )
+        assert proc.returncode == 1
+        assert "could not record who claimed" in proc.stderr
+        assert "issue edit 42 --remove-label in-progress" in calls
+        assert "claimed #42" not in proc.stdout
+
+
+class TestReleaseHandsClaimsBack:
+    """The layer that keys on the ladder's decision rather than on age.
+
+    Reproduces MaKlaude issue #195: claimed at 02:18, session killed at 03:33
+    with a clean tree and no branch, and `next --milestone 6` skipped the issue
+    until a human removed the label by hand.
+    """
+
+    def test_releases_only_the_issues_that_session_claimed(self, run) -> None:
+        board = _board((40, "serve-dead", 0.5), (41, "serve-alive", 0.5))
+        proc, calls = run(
+            "release", "--session", "serve-dead",
+            "--reason", "the session deadline was reached",
+            GH_LIST_JSON=board,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "issue edit 40 --remove-label in-progress" in calls
+        assert "issue edit 41 --remove-label in-progress" not in calls
+        assert "released #40" in proc.stdout
+
+    def test_says_on_the_issue_why_the_claim_ended(self, run) -> None:
+        """Without this a human sees a label vanish and can't tell a deliberate
+        release from an agent quietly un-labelling something."""
+        board = _board((40, "serve-dead", 0.5))
+        _, calls = run(
+            "release", "--session", "serve-dead",
+            "--reason", "the session deadline was reached",
+            GH_LIST_JSON=board,
+        )
+        comment = next(c for c in calls if c.startswith("issue comment 40"))
+        assert "the session deadline was reached" in comment
+
+    def test_a_session_that_claimed_nothing_releases_nothing(self, run) -> None:
+        """The common case by far: most chains end holding no claim at all, and
+        that has to cost one query and no writes."""
+        board = _board((40, "serve-other", 0.5))
+        proc, calls = run("release", "--session", "serve-dead", GH_LIST_JSON=board)
+        assert proc.returncode == 0, proc.stderr
+        assert not any("--remove-label" in c for c in calls)
+
+    def test_only_the_most_recent_claim_on_an_issue_counts(self, run) -> None:
+        """Claimed, released, re-claimed. Matching the first marker would release
+        the live claim of whoever holds it now."""
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        board = json.dumps([
+            {
+                "number": 40,
+                "comments": [
+                    {"body": "<!-- genesis-claim session=serve-old -->", "createdAt": stamp},
+                    {"body": "<!-- genesis-claim session=serve-new -->", "createdAt": stamp},
+                ],
+            }
+        ])
+        proc, calls = run("release", "--session", "serve-old", GH_LIST_JSON=board)
+        assert proc.returncode == 0, proc.stderr
+        assert not any("--remove-label" in c for c in calls), (
+            "released a claim that had already been superseded"
+        )
+
+    def test_a_single_issue_can_be_handed_back_by_number(self, run) -> None:
+        """For an agent abandoning work deliberately - blocked, wrong milestone,
+        wrong pick - which is otherwise done by bare label surgery."""
+        proc, calls = run("release", "--id", "40", "--reason", "blocked on a dependency")
+        assert proc.returncode == 0, proc.stderr
+        assert "issue edit 40 --remove-label in-progress" in calls
+
+    def test_neither_target_is_a_usage_error(self, run) -> None:
+        proc, calls = run("release")
+        assert proc.returncode == 1
+        assert calls == []
+
+    def test_both_targets_is_a_usage_error(self, run) -> None:
+        """--id and --session mean different scopes; guessing which one was meant
+        would either miss claims or release ones nobody asked about."""
+        proc, calls = run("release", "--id", "40", "--session", "serve-abc")
+        assert proc.returncode == 1
+        assert calls == []
+
+    def test_a_failed_removal_fails_the_command(self, run) -> None:
+        proc, _ = run("release", "--id", "40", GH_EDIT_FAILS="1")
+        assert proc.returncode == 1
+
+
+class TestSweepIsABackstop:
+    """Age releases a claim only where nothing else can (#48).
+
+    The sweep exists for the control plane that is SIGKILLed and the Actions run
+    the runner cancels: neither reaches a decision, so neither releases anything.
+    Every rule here is about not releasing too much.
+    """
+
+    def test_releases_a_claim_older_than_the_window(self, run) -> None:
+        board = _board((40, "serve-gone", 9))
+        proc, calls = run("sweep-claims", "--older-than", "2", GH_LIST_JSON=board)
+        assert proc.returncode == 0, proc.stderr
+        assert "issue edit 40 --remove-label in-progress" in calls
+        comment = next(c for c in calls if c.startswith("issue comment 40"))
+        assert "serve-gone" in comment and "9.0h" in comment
+
+    def test_a_healthy_in_flight_claim_is_never_released(self, run) -> None:
+        """The expensive false positive, and the reason age is the second layer
+        rather than the first.
+
+        Two workers on one issue produce two branches and a merge conflict with
+        neither run aware of the other, which is strictly worse than the
+        invisibility the sweep is fixing. A claim minutes old belongs to a session
+        that is very probably still typing.
+        """
+        board = _board((40, "serve-working", 0.25), (41, "serve-working", 1.5))
+        proc, calls = run("sweep-claims", "--older-than", "2", GH_LIST_JSON=board)
+        assert proc.returncode == 0, proc.stderr
+        assert not any("--remove-label" in c for c in calls), (
+            f"the sweep released a live claim: {calls}"
+        )
+        assert proc.stdout.strip() == "", "a sweep with nothing to do must stay quiet"
+
+    def test_never_releases_the_callers_own_claim(self, run) -> None:
+        """A long-running session that sweeps the board must not hand away the
+        issue it is at that moment working on. Age can't rule that out - the
+        session may legitimately have held the claim for hours - but identity can.
+        """
+        board = _board((40, "serve-me", 40))
+        proc, calls = run(
+            "sweep-claims", "--older-than", "2",
+            GH_LIST_JSON=board, GENESIS_SESSION="serve-me",
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert not any("--remove-label" in c for c in calls)
+
+    def test_an_anonymous_sweeper_exempts_nothing(self, run) -> None:
+        """The self-exemption keys on a real identity. A caller with none must not
+        collapse into exempting every `unattributed` claim, which is the set most
+        in need of sweeping."""
+        board = _board((40, "unattributed", 40))
+        proc, calls = run("sweep-claims", "--older-than", "2", GH_LIST_JSON=board)
+        assert proc.returncode == 0, proc.stderr
+        assert "issue edit 40 --remove-label in-progress" in calls
+
+    def test_an_in_progress_label_with_no_marker_is_left_alone(self, run) -> None:
+        """Nothing dates it, so nothing can say whether it is stale. Guessing is
+        the race this design refuses; `release --id N` is the hatch."""
+        board = _board((40, None, 99))
+        proc, calls = run("sweep-claims", "--older-than", "2", GH_LIST_JSON=board)
+        assert proc.returncode == 0, proc.stderr
+        assert not any("--remove-label" in c for c in calls)
+
+    def test_a_window_shorter_than_a_session_is_refused(self, run) -> None:
+        """A sub-hour window races the control plane's own session cap. Refusing
+        it is the difference between a backstop and an expiry."""
+        proc, calls = run("sweep-claims", "--older-than", "0.25")
+        assert proc.returncode == 1
+        assert "shorter than a session" in proc.stderr
+        assert calls == []
+
+    def test_the_default_window_clears_the_session_cap(self, run) -> None:
+        """Called with no flag - by the scaffolded Actions workflow, among others -
+        the default has to be safe on its own."""
+        board = _board((40, "serve-gone", 1.5))
+        proc, calls = run("sweep-claims", GH_LIST_JSON=board)
+        assert proc.returncode == 0, proc.stderr
+        assert not any("--remove-label" in c for c in calls), (
+            "the default window is inside the one-hour session cap"
+        )

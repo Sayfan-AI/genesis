@@ -129,3 +129,23 @@ def sessions_run(repo):
         counter = repo / "claude-script.json.n"
         return int(counter.read_text()) if counter.exists() else 0
     return count
+
+
+@pytest.fixture
+def issues_script(repo):
+    """A stand-in for the seeded `issues.sh`, recording how the plane called it.
+
+    Claim bookkeeping is the third thing the plane forks (after `claude` and
+    `git`), and it runs on the path where a session has just died — which is the
+    path this suite spends all its time on. Recorded rather than stubbed out, so
+    a scenario can assert that a killed session actually handed its issue back.
+    """
+    script = repo / ".genesis" / "scripts" / "issues.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    record = repo / "issues-calls.txt"
+    script.write_text(f'#!/bin/sh\necho "$GENESIS_SESSION|$*" >> "{record}"\n')
+
+    def calls() -> list[str]:
+        return record.read_text().splitlines() if record.exists() else []
+
+    return calls
