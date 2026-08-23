@@ -8,6 +8,22 @@ on:
   issue_comment:
     types: [created]
 
+# One group shared by the scheduled and the event-driven orchestrator, because
+# the collisions that hurt are between them, not within either. Measured twice:
+# two `workflow_dispatch` runs 4 seconds apart each filed a "Milestone 1 plan"
+# issue (genesis issue #22), and a human closing a milestone issue fired
+# `issues:closed` and `issue_comment:created` together, so two runs both passed
+# their duplicate check before either had created anything and filed 10 task
+# issues for 5 tasks (genesis issue #11). An in-prompt "no duplicate issues" rule
+# cannot win that race - the second run checks before the first has written.
+#
+# `cancel-in-progress: false` on purpose. Each event may carry state that only
+# exists in that event - an issue-closed approval signal, a human's comment - and
+# dropping the queued run drops the signal. Queue, don't cancel.
+concurrency:
+  group: genesis-orchestrator-${{ github.repository }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   issues: write
@@ -16,8 +32,17 @@ permissions:
 jobs:
   orchestrate:
     runs-on: ubuntu-latest
-    # Skip events from bots to prevent loops
-    if: github.actor != 'github-actions[bot]' && github.actor != 'genesis-dev-bot[bot]' && github.actor != 'claude[bot]'
+    # Skip events from bots to prevent loops. A suffix test rather than a list
+    # of names: the list shipped with three entries and the loop that burned
+    # 30+ concurrent runs in `ronny-learns-ai` was started by a bot identity
+    # nobody had thought to add (genesis issue #4). Every GitHub App actor ends
+    # in `[bot]` and no human login can, so the suffix is the invariant and the
+    # names were a guess at it.
+    #
+    # This is the same rule `is_bot_actor` applies in src/genesis/server.py. Two
+    # execution modes disagreeing about what a bot is would mean a project's
+    # loop-breaking depends on how it happens to be driven.
+    if: ${{ !endsWith(github.actor, '[bot]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -30,6 +55,12 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
           permission-workflows: write
+          # Without this every `gh run list` from inside the agent returns
+          # 403 Resource not accessible by integration, which silently removes
+          # failed workflow runs from the evolver's signal set - one of its
+          # primary inputs - and leaves it reviewing a system it cannot see
+          # failing (genesis issue #14, hit on the-gigi/butterfly). Read-only.
+          permission-actions: read
 
       - uses: anthropics/claude-code-action@v1
         with:

@@ -53,8 +53,14 @@ def test_evolver_workflow_uses_claude_action() -> None:
 
 
 def test_events_workflow_skips_bot_events() -> None:
+    """Asserted on the rule, not on one bot's name.
+
+    This used to check for the literal `github-actions[bot]`, which passed the
+    whole time the filter was an enumerated list of three names that a fourth bot
+    walked straight past. See the suffix test further down for the reasoning.
+    """
     content = (TEMPLATES_DIR / "workflows" / "genesis-events.yml").read_text()
-    assert "github-actions[bot]" in content
+    assert "endsWith(github.actor, '[bot]')" in content
 
 
 def test_workflows_have_correct_permissions() -> None:
@@ -274,4 +280,101 @@ def test_local_mode_grants_the_same_tools_as_the_workflows() -> None:
     granted = set(server.ALLOWED_TOOLS.split(","))
     assert {"Read", "Write", "Edit", "Bash"} <= granted, (
         f"genesis serve grants fewer tools than the workflows do: {sorted(granted)}"
+    )
+
+
+ORCHESTRATOR_CLASS_TEMPLATES = ("genesis-orchestrator.yml", "genesis-events.yml")
+
+
+def _template(name: str) -> str:
+    return (TEMPLATES_DIR / "workflows" / name).read_text()
+
+
+def test_scheduled_and_event_orchestrators_share_one_concurrency_group() -> None:
+    """The races that hurt are between the two workflows, not inside either.
+
+    Two `workflow_dispatch` runs 4 seconds apart each filed a "Milestone 1 plan"
+    issue; separately, a human closing a milestone issue fired `issues:closed`
+    and `issue_comment:created` together and produced 10 task issues for 5 tasks.
+    Both runs passed their own duplicate check before the other had written
+    anything, which is a race an in-prompt rule cannot win. Per-workflow groups
+    would not have stopped either one — hence the assertion that the group string
+    is identical across both.
+    """
+    groups = set()
+    for name in ORCHESTRATOR_CLASS_TEMPLATES:
+        content = _template(name)
+        match = re.search(r"^concurrency:\n  group: (.+)$", content, re.MULTILINE)
+        assert match, f"{name} has no concurrency group"
+        groups.add(match.group(1).strip())
+        assert "cancel-in-progress: false" in content, (
+            f"{name} cancels queued runs; an event carries state that only exists "
+            "in that event (an approval, a human's comment), so dropping the run "
+            "drops the signal"
+        )
+    assert len(groups) == 1, (
+        f"the orchestrator workflows do not share a group ({groups}), so a "
+        "scheduled run and an event run can still collide"
+    )
+
+
+def test_the_bot_filter_matches_the_suffix_not_a_list_of_names() -> None:
+    """The list shipped with three names and the loop that burned 30+ concurrent
+    runs was started by a bot identity nobody had added.
+
+    Every GitHub App actor ends in `[bot]` and no human login can, so the suffix
+    is the invariant the list was approximating.
+    """
+    for name in ("genesis-events.yml", "genesis-push-trigger.yml"):
+        content = _template(name)
+        assert "endsWith(github.actor, '[bot]')" in content, (
+            f"{name} does not filter bots by suffix"
+        )
+        assert "github.actor != 'github-actions[bot]'" not in content, (
+            f"{name} still carries the enumerated bot list the suffix replaced"
+        )
+
+
+def test_the_two_execution_modes_agree_on_what_a_bot_is() -> None:
+    """A project's loop-breaking must not depend on how it happens to be driven."""
+    from genesis.server import is_bot_actor
+
+    assert is_bot_actor("github-actions[bot]")
+    assert is_bot_actor("some-app-nobody-listed[bot]")
+    assert not is_bot_actor("the-gigi")
+    assert "endsWith(github.actor, '[bot]')" in _template("genesis-events.yml")
+
+
+def test_orchestrator_class_tokens_can_read_workflow_runs() -> None:
+    """Without `permission-actions: read` every `gh run list` returns 403.
+
+    That silently removes failed workflow runs from the evolver's signal set —
+    one of its primary inputs — and leaves it reviewing a system it can't see
+    failing. Read-only, so there's nothing to weigh against it.
+    """
+    for name in (*ORCHESTRATOR_CLASS_TEMPLATES, "genesis-evolver.yml"):
+        assert "permission-actions: read" in _template(name), (
+            f"{name} mints a token that cannot read Actions"
+        )
+
+
+def test_the_human_gate_skips_the_schedule_and_never_the_events() -> None:
+    """The gate saves idle spend; putting it on the events workflow would wedge
+    the project.
+
+    A scheduled run while a `needs:human` issue is open reads the state, confirms
+    the gate, and exits — one gate sat open 4+ days for ~17 idle runs. But a human
+    closing or commenting on that issue arrives through the events workflow, and
+    that IS the signal to advance. Gate it there and clearing the gate becomes
+    impossible, which is also what keeps a stale label from deadlocking the loop.
+    """
+    scheduled = _template("genesis-orchestrator.yml")
+    assert 'gh issue list --label "needs:human"' in scheduled
+    assert "if: steps.gate.outputs.skip != 'true'" in scheduled, (
+        "the gate computes a skip nothing acts on"
+    )
+
+    events = _template("genesis-events.yml")
+    assert "needs:human" not in events, (
+        "the events workflow must always run — it is how a human clears the gate"
     )
