@@ -1,0 +1,26 @@
+# genesis local control plane runtime state (`genesis serve`).
+#
+# A pattern over the class, not an enumeration of names. The enumeration is what
+# this used to be, and it listed `.disabled-by-genesis`, `.orchestrator.lock`,
+# `.poll-etag` and `.poll-highwater`; `genesis serve` then started writing a
+# fifth, `.genesis/.trigger-state`, which nothing ignored, so every local-mode
+# run left it untracked in the working tree (measured in Sayfan-AI/MaKlaude,
+# fixed there in MaKlaude PR #153).
+#
+# Quiet, not harmless. Agents here read `git status` to decide what a run
+# changed, so a stray `??` line is noise every run has to look past, and any
+# `git add -A` path sweeps per-machine state into the repo. It's also invisible
+# to CI by construction — a fresh checkout has no runtime state — so `main` stays
+# green and nothing ever reports it. The general shape: when a property depends
+# on every member of a set being listed, the next member defaults to unsafe.
+#
+# The pattern encodes the convention genesis already follows: a dotfile directly
+# under `.genesis/` is per-machine runtime state, and tracked dev-system content
+# there (`config.toml`, `onboarding.md`, `scripts/`, anything the dev system adds
+# later) is never a dotfile. That's why it's `.genesis/.*` and not `.genesis/*` —
+# the broader pattern would swallow the dev system's own scripts and config,
+# which is a worse failure than the untracked file this removes.
+#
+# An already-tracked file is unaffected by gitignore, and a `.genesis` dotfile
+# that genuinely belongs in the repo can still be added with `git add -f`.
+.genesis/.*
