@@ -35,6 +35,8 @@ try:
     ctx = json.loads(raw) if raw.strip() else {}
 except (ValueError, TypeError):
     sys.exit(0)  # unparseable payload: fail open, never block on our own bug
+if not isinstance(ctx, dict):
+    sys.exit(0)  # valid JSON of the wrong shape is still not something to act on
 
 if (ctx.get("tool_name") or "") != "Bash":
     sys.exit(0)

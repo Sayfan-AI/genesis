@@ -221,7 +221,18 @@ class TestFailsOpenOnItsOwnBugs:
 
     @pytest.mark.parametrize(
         "payload",
-        ['{"tool_name": "Bash"}', "{}", "not json at all", "", '{"tool_input": null}'],
+        [
+            '{"tool_name": "Bash"}',
+            "{}",
+            "not json at all",
+            "",
+            '{"tool_input": null}',
+            # Valid JSON of the wrong *shape*. This one crashed with an
+            # AttributeError and exited 1 - found while writing the sibling gate
+            # for the .claude/ directory, which had the identical hole.
+            "[]",
+            '"a bare string"',
+        ],
     )
     def test_malformed_payloads_are_allowed_not_crashed(self, payload):
         proc = subprocess.run(

@@ -60,6 +60,37 @@ Claude-invoking workflow below its class floor, or with no `--max-turns` at all.
 When a run does die at max-turns, raise the budget for that whole *class* and
 record why; don't patch the single workflow and let the next one rediscover it.
 
+## Changing Your Own `.claude/`
+
+You can't, and no configuration change makes you able to. This is measured, not
+inferred: the harness refuses writes anywhere under `.claude/` for every tool,
+including a Bash redirect, and a `permissions.allow` entry doesn't relax it —
+whether it comes from this repo's `.claude/settings.json`, from the operator's
+`--settings`, or from a workspace that's been trusted. Only a blanket permission
+bypass gets through, and a session that can rewrite its own operating rules is a
+worse problem than the one it solves.
+
+That restriction is fine for prose and fatal for wiring. When you need a
+`.claude/` change:
+
+1. **Prose — a rule, a convention, an instruction to a future agent — goes in
+   this file instead.** `CLAUDE.md` reaches agents under GitHub Actions *and*
+   under `genesis serve`, which no workflow prompt does: local mode disables
+   every `genesis-*` workflow, so a rule that lives only in a workflow prompt
+   reaches nobody in the mode the project may actually be running in.
+2. **Wiring — a hook declaration in `.claude/settings.json`, agent front-matter,
+   a skill definition — has no alternative home.** Comment on the task issue with
+   the exact edit as a fenced diff or the full file content (not a description of
+   it), say which file it belongs in, and label the issue `needs:human`. Then
+   carry on with the rest of the task. That is completing the step, not failing
+   it: a change nobody can apply without reconstructing your reasoning is the
+   thing to avoid, and the request is what turns a human *edit* back into a human
+   *decision*.
+
+`.genesis/scripts/claude-dir-guard.sh` intercepts these writes and repeats these
+instructions at the moment you'd otherwise stall on a bare permission error.
+Reading `.claude/` is always allowed — that's how you know what to propose.
+
 ## Tech Stack Preferences
 
 Defaults (override as needed):

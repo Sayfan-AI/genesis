@@ -112,6 +112,38 @@ The suite must stay hermetic: no network, no ambient config. `tests/conftest.py`
 commit`, which aborts on a runner with no global identity. If a new test needs
 credentials or a live service, it does not belong in this suite.
 
+## What a Scaffolded `settings.json` Can and Can't Grant
+
+Measured against real sessions, not read from documentation (issues #49, #7):
+
+- **`permissions.allow` in a repo's `.claude/settings.json` is ignored in an
+  untrusted workspace**, with the session printing `Ignoring N permissions.allow
+  entries ... this workspace has not been trusted`. Every GitHub Actions checkout
+  is untrusted, so an allow-list seeded there does nothing on a runner and starts
+  working only once a developer accepts a trust dialog locally. Don't seed tool
+  grants that way. `--allowedTools` (via `claude_args`, and `ALLOWED_TOOLS` in
+  `server.py`) is what actually grants, in both modes; `tests/e2e/test_workflows.py`
+  holds the two in step.
+- **Hooks from an untrusted workspace's `settings.json` do fire.** Only the
+  permissions entries are dropped, so the seeded logging and guard layer works on
+  a runner. Worth knowing before anyone "fixes" it.
+- **Writes anywhere under `.claude/` are refused for every tool**, including a
+  Bash redirect, and nothing relaxes it: not a repo allow-list, not the operator's
+  `--settings`, not a trusted workspace, not `acceptEdits`, not `dontAsk`. Only
+  `bypassPermissions` gets through, and that hands a session the ability to rewrite
+  its own operating rules. So genesis seeds a *gate*, not a grant:
+  `templates/scripts/claude-dir-guard.sh` intercepts the write and tells the agent
+  to post the exact edit on the task issue under `needs:human` instead of stalling
+  on a bare permission string.
+- **`PreToolUse` runs before the permission decision**, which is the only reason
+  that gate can say anything at all.
+
+A corollary that generalises past permissions: **any behavioural rule seeded into a
+workflow prompt silently does not apply under `genesis serve`**, because local mode
+disables every `genesis-*` workflow. The mode-independent carriers are the repo's
+`CLAUDE.md` and — for genesis to seed, not for the dev system to edit —
+`.claude/agents/*.md`. Put rules there.
+
 ## Self-Improvement
 
 This project opts in to self-improvement. Update this CLAUDE.md and project workflows as the design evolves. Keep `docs/` as the living design documents.
