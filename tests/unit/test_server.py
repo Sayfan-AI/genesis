@@ -1575,3 +1575,72 @@ def test_the_warning_is_wired_into_the_session_path() -> None:
     assert "_warn_if_the_session_did_nothing()" in run_session, (
         "the did-nothing check is defined but never called from _run_session"
     )
+
+
+# ---------- the run total (#77) ----------
+
+
+def test_shutdown_reports_what_the_run_cost(plane, capsys, monkeypatch) -> None:
+    """The bounds exist so an operator can leave the loop running overnight. The
+    thing they want the next morning is the number, and until this existed the
+    only way to get it was arithmetic over a log."""
+    monkeypatch.setattr(plane, "_reenable_workflows_safe", lambda: None)
+    plane.run_spent = 8.83
+
+    plane._shutdown(token_ok=True)
+
+    assert "Run total: $8.83" in capsys.readouterr().out
+
+
+def test_the_total_is_hedged_when_a_cost_could_not_be_read(plane, capsys, monkeypatch) -> None:
+    """`cost_is_lower_bound` is set when a judge session's cost was unreadable.
+    A total that has lost a session's spend has to read differently from one that
+    hasn't - "$52.11" and "at least $52.11" lead to different decisions."""
+    monkeypatch.setattr(plane, "_reenable_workflows_safe", lambda: None)
+    plane.run_spent = 52.11
+    plane.cost_is_lower_bound = True
+
+    plane._shutdown(token_ok=True)
+
+    assert "Run total: at least $52.11" in capsys.readouterr().out
+
+
+def test_a_near_miss_on_the_budget_says_so(plane, capsys, monkeypatch) -> None:
+    """A run that stops early because the next chain would cross the budget looks
+    exactly like a run that finished its work. The operator finds out by noticing
+    the absence of progress, which is the slowest possible way."""
+    monkeypatch.setattr(plane, "_reenable_workflows_safe", lambda: None)
+    monkeypatch.setenv("GENESIS_RUN_COST_BUDGET", "10")
+    plane.run_spent = 9.50
+
+    plane._shutdown(token_ok=True)
+    out = capsys.readouterr().out
+
+    assert "Run total: $9.50" in out
+    assert "within $0.50" in out
+
+
+def test_a_run_with_headroom_is_not_flagged(plane, capsys, monkeypatch) -> None:
+    """The near-miss note has to stay rare or it stops meaning anything."""
+    monkeypatch.setattr(plane, "_reenable_workflows_safe", lambda: None)
+    monkeypatch.setenv("GENESIS_RUN_COST_BUDGET", "10")
+    plane.run_spent = 2.00
+
+    plane._shutdown(token_ok=True)
+    out = capsys.readouterr().out
+
+    assert "Run total: $2.00" in out
+    assert "within" not in out
+
+
+def test_every_shutdown_path_reports_the_total() -> None:
+    """Three call sites reach `_shutdown`: the normal loop exit, a budget stop, and
+    the abort when `claude` is not callable. Putting the report inside `_shutdown`
+    is what makes that automatic - a per-call-site version would have missed one,
+    which is the same shape as every other drift in this repo."""
+    source = Path(server.__file__).read_text()
+    shutdown = source.split("def _shutdown", 1)[1].split("\n    def ", 1)[0]
+    assert "_log_run_total()" in shutdown, (
+        "the run total is not reported from _shutdown, so it depends on which exit "
+        "path the run happened to take"
+    )

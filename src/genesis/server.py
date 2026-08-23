@@ -1625,8 +1625,38 @@ class LocalControlPlane:
         log("Shutting down - re-enabling GitHub Actions workflows")
         self._reenable_workflows_safe()
         self.release_lock()
+        self._log_run_total()
         log("Goodbye.")
         return 0
+
+    def _log_run_total(self) -> None:
+        """Say what the run cost, on the way out.
+
+        The plane bounds spending three ways - a per-task ceiling, a per-run
+        budget, and the judge accounting from issue #50 - and until this existed it
+        never once reported the resulting number unless a bound was *reached*.
+        Every normal run ended on `Goodbye.` with no figure, so getting the total
+        meant summing the per-session lines out of the log by hand. Measured on a
+        30-minute run that came within $1.17 of its budget and said so nowhere
+        (#77).
+
+        Reported through `_spend`, so it inherits the `at least $X` hedge when a
+        judge session's cost could not be read. This runs on every path that
+        reaches `_shutdown`, which is all three of them: the normal loop exit, a
+        budget stop, and the abort when `claude` is not callable. The last of those
+        is why the zero case still prints rather than being skipped as noise - a
+        run that spent nothing because it never started is worth distinguishing
+        from a run that spent nothing because it had nothing to do.
+        """
+        budget = _run_cost_budget()
+        headroom = budget - self.run_spent
+        note = ""
+        # Worth flagging the near miss. A run that stops early because the next one
+        # would cross the budget looks identical to a run that finished its work,
+        # and the operator only finds out by noticing the absence of progress.
+        if 0 < headroom <= budget * 0.1:
+            note = f" - within ${headroom:.2f} of the ${budget:.2f} budget"
+        log(f"Run total: {self._spend(self.run_spent)} of ${budget:.2f}{note}")
 
     def _reenable_workflows_safe(self) -> None:
         try:
