@@ -135,13 +135,27 @@ def test_merge_workflow_re_triggers_the_orchestrator_in_its_own_step() -> None:
 
 
 def test_merge_workflow_does_not_share_a_concurrency_group() -> None:
-    """A CI-failure-triage run holding the orchestrator group cancelled the merge
-    run that a green pull request had just triggered, and the milestone stalled
-    with the work finished. Merges only need to serialize against merges."""
+    """A triage run holding the shared orchestrator group cancelled the merge run
+    a green pull request had just triggered, and the milestone stalled with the
+    work finished. Merges only need to serialize against merges.
+
+    Asserted against the orchestrator's actual group rather than a spelling, so
+    that folding auto-merge back into the shared group fails here even if someone
+    renames the group on the way.
+    """
+    group_re = re.compile(r"^concurrency:\n\s+group:\s*(.+)$", re.M)
     content = MERGE_WORKFLOW.read_text()
-    group = re.search(r"^concurrency:\n\s+group:\s*(.+)$", content, re.M)
-    assert group, "auto-merge needs its own concurrency group, not the orchestrator's"
-    assert "genesis-merge" in group.group(1)
+    merge_group = group_re.search(content)
+    assert merge_group, "auto-merge needs a concurrency group of its own"
+
+    for sibling in ("genesis-orchestrator.yml", "genesis-events.yml"):
+        other = group_re.search((TEMPLATES_DIR / "workflows" / sibling).read_text())
+        assert other, f"{sibling} lost its concurrency group"
+        assert merge_group.group(1) != other.group(1), (
+            f"auto-merge shares a group with {sibling}; an orchestrator run will "
+            "cancel a merge that a green pull request already earned"
+        )
+
     assert "cancel-in-progress: false" in content, (
         "a cancelled merge is a lost merge and the next sweep is an hour out"
     )

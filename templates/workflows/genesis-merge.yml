@@ -45,14 +45,15 @@ on:
 # merge performed with it would land on main and trigger nothing downstream.
 permissions: {}
 
-# Auto-merge gets its own group and never the orchestrator's. Sharing one on
-# MaKlaude meant a CI-failure-triage run already holding the group cancelled the
-# merge run that had just fired on a green pull request: the pull request went
-# green, was never merged, and the milestone stalled with the work finished.
-# Merges only need to serialize against other merges — a server-side squash
-# running alongside an orchestrator session is harmless. `cancel-in-progress:
-# false` because a cancelled merge is a lost merge and the next sweep is an hour
-# out.
+# Its own group, and specifically NOT the shared
+# `genesis-orchestrator-${{ github.repository }}` that genesis-orchestrator.yml
+# and genesis-events.yml sit in. Sharing that one on MaKlaude meant a triage run
+# already holding the group cancelled the merge run a green pull request had just
+# fired: the pull request went green, was never merged, and the milestone stalled
+# with the work finished. Merges only need to serialize against other merges — a
+# server-side squash running alongside an orchestrator session is harmless.
+# `cancel-in-progress: false` because a cancelled merge is a lost merge and the
+# next sweep is an hour out.
 concurrency:
   group: genesis-merge-${{ github.repository }}
   cancel-in-progress: false
@@ -131,16 +132,22 @@ jobs:
           echo "numbers=$(jq -r 'map(.number) | join(",")' /tmp/ready.json)" >> "$GITHUB_OUTPUT"
 
       # ---- PRE-MERGE GATE SEAM ------------------------------------------------
-      # A veto that the predicate above can't see belongs HERE: a step between
+      # A veto the predicate above can't see belongs HERE: a step between
       # `candidates` and `merge` that reads steps.candidates.outputs.numbers and
-      # writes a narrowed list of its own. genesis issue #41 ("don't merge over
-      # an unaddressed human comment") is the first one and is being built
-      # separately in .genesis/scripts/issues.sh.
+      # writes a narrowed list of its own.
+      #
+      # The first one is genesis issue #41, "don't merge over an unaddressed
+      # human comment", and its reporting half already exists:
+      # `bash .genesis/scripts/issues.sh unanswered-comments` prints one
+      # `#<number>  unanswered <age> — @who on PR "title"` line per thread whose
+      # newest comment is a person's. A gate here drops those numbers from the
+      # list. It needs an `actions/checkout` step, which this job deliberately
+      # doesn't have yet — nothing else here reads a file from the repo.
       #
       # Keep vetoes out of the jq filter above. That filter is the merge
-      # predicate shared with genesis's automerge.py and has to stay identical
-      # to it; a gate is a local policy layered on top, and the two have
-      # different reasons to change.
+      # predicate shared with genesis's automerge.py and has to stay identical to
+      # it; a gate is local policy layered on top, and the two have different
+      # reasons to change.
       # -------------------------------------------------------------------------
 
       - name: Squash-merge them
@@ -188,10 +195,11 @@ jobs:
         # model credit gets spent on no work.
         #
         # A dispatch is needed at all because the merge is bot-authored end to
-        # end: genesis-events.yml drops bot events by design, and the push to
-        # main that this merge produces is attributed to the App, so
-        # genesis-push-trigger.yml's own loop-breaker drops that too. Without
-        # this step a green pull request merges into total silence.
+        # end, and both of the workflows that would otherwise notice screen that
+        # out with `!endsWith(github.actor, '[bot]')`: genesis-events.yml on the
+        # pull-request-closed event, and genesis-push-trigger.yml on the push to
+        # main the merge produces. Without this step a green pull request merges
+        # into total silence.
         if: always() && steps.merge.outputs.merged != ''
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
