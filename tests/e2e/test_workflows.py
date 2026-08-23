@@ -378,3 +378,29 @@ def test_the_human_gate_skips_the_schedule_and_never_the_events() -> None:
     assert "needs:human" not in events, (
         "the events workflow must always run — it is how a human clears the gate"
     )
+
+
+def test_no_workflow_uses_the_deprecated_app_id_input() -> None:
+    """`app-id` still works and warns; a warning is a countdown.
+
+    This sits on the auth path of a loop whose whole point is not needing a human,
+    so the input going away is the one deprecation it can't absorb. The rename is
+    free — the secret keeps holding the numeric App ID, because the action funnels
+    `client-id` and `app-id` into the same `appId` and GitHub takes either value
+    there.
+    """
+    for directory in (TEMPLATES_DIR / "workflows", REPO_ROOT / ".github" / "workflows"):
+        for workflow in sorted(directory.glob("*.yml")):
+            body = "\n".join(
+                line
+                for line in workflow.read_text().splitlines()
+                if not line.strip().startswith("#")
+            )
+            assert "app-id:" not in body, (
+                f"{workflow.name} uses the deprecated `app-id` input; use "
+                "`client-id` with the same secret"
+            )
+            if "create-github-app-token" in body:
+                assert "client-id:" in body, (
+                    f"{workflow.name} mints an App token with no client-id"
+                )
