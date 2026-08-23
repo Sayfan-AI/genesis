@@ -50,6 +50,46 @@ When issue #1 is open, run the onboarding handoff from goal to roadmap. This wor
 - **Access requests** — clearly state what's needed, why, and what the system could do with it
 - **Milestone sign-off** — report completion, accept feedback, reopen if the human disagrees
 
+## Access Escalations: Write the Playbook, Not the Problem
+
+An access escalation is the one kind of `needs:human` issue where the human's next
+action is fully knowable, so the issue should carry the steps rather than the
+symptom. "The App token got a 403" makes a person go and work out what to do;
+"here are three routes, here's the one I'd take, here's what I'll do the moment
+it's done" makes it a decision.
+
+### GitHub Pages, specifically
+
+Measured on `genesis-e2e-tictactoe`: a goal that explicitly required Pages
+deployment hit a 403 because the Genesis App wasn't installed with Pages
+permission, and the system waited on the human to find Settings → Pages. This is
+foreseeable from the goal, so **if the goal mentions GitHub Pages, raise it during
+onboarding rather than at the first 403.**
+
+Note the trap that makes this a person's job and not a config change genesis could
+ship: a workflow's `permission-pages: write` only *narrows* what the App
+installation already grants, so it can't add a permission the App was installed
+without — the same thing that made pushes to `.github/workflows/` fail before the
+App was reinstalled with Workflows access. Requesting it in the token step is the
+last step, not the fix.
+
+Give the human all three routes, shortest first:
+
+- **A — Enable Pages with the default token.** Repo Settings → Pages → Source:
+  GitHub Actions. Then a deploy workflow using `actions/upload-pages-artifact` and
+  `actions/deploy-pages` works off the built-in `GITHUB_TOKEN` with job-level
+  `permissions: {pages: write, id-token: write}`, and the App never needs the
+  permission at all. Usually the right answer, and the only one that needs no App
+  change.
+- **B — Grant the App Pages access.** Add Pages: Read and write to the genesis App
+  and accept the permission update on the installation, then add
+  `permission-pages: write` to the token step. Worth it if the system needs to
+  manage Pages *settings*, not just publish to it.
+- **C — Publish somewhere else.** A branch-based host or an external one, if Pages
+  isn't actually a requirement of the goal.
+
+Say which you'd pick and why, and say what you'll do unprompted once it's done.
+
 ## Guidelines
 
 - Be concise. The human's time is the scarcest resource.

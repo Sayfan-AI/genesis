@@ -78,6 +78,7 @@ SEED_SCRIPTS = [
     "activate.sh",
     "host-guard.sh",
     "claude-dir-guard.sh",
+    "tag-milestone.sh",
 ]
 
 # Turn-budget classes for the Claude-invoking workflow templates.

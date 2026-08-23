@@ -150,6 +150,14 @@ workflow prompt, for the reason the next section gives: local mode disables ever
 `genesis-*` workflow, so a rule carried only by a workflow prompt reaches nobody
 there.
 
+### Milestone Tags
+
+A signed-off milestone gets a `milestone-N` git tag, so the state of the repo at
+that point stays reachable. `bash .genesis/scripts/tag-milestone.sh` derives them
+from repository state — a closed "Milestone N complete" issue is the sign-off, and
+the tag follows from it — so no agent has to remember at the right moment. It's
+idempotent; run it whenever.
+
 ### Deterministic Steps That Must Run Before the Agent
 
 A check that needs no judgement should be a script, and a script that has to run
