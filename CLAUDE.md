@@ -253,6 +253,24 @@ invisible to CI by construction — a fresh checkout has no runtime state, and a
 template is never executed in the repo that stores it — so `main` stays green
 across the whole drift. The guard has to be a test that names both halves.
 
+### The pairs, and where each is checked
+
+Genesis runs the control plane it ships, against its own repo, so several things it
+seeds are also things it depends on. Each of those is a pair, and every pair that
+went unchecked has drifted at least once:
+
+| Pair | Guard |
+| --- | --- |
+| `.github/workflows/` and `templates/workflows/` | `tests/e2e/test_workflows.py` |
+| `.gitignore` and `templates/gitignore` | `tests/e2e/test_gitignore.py` |
+| `.genesis/scripts/` guards and `templates/scripts/` | `tests/e2e/test_seeded_pairs.py` |
+
+The last one is parameterized over `SEEDED_GUARDS` rather than written per guard,
+and it checks the list itself against what `templates/settings.json` declares - so
+a guard added to the template and forgotten in the list fails rather than sitting
+unpaired. That's the shape to copy for the next pair, because writing one bespoke
+test per instance is what let five issues be filed for one bug.
+
 ## Genesis Merges Its Own Bot Pull Requests
 
 `.github/workflows/genesis-merge.yml` is genesis's own copy of the template it
