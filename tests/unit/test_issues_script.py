@@ -95,6 +95,8 @@ case "$1 $2" in
       *" --state closed "*) emit "${GH_CLOSED_JSON-[]}" ;;
       *) emit "${GH_LIST_JSON-[]}" ;;
     esac ;;
+  "pr list")
+    emit "${GH_PR_LIST_JSON-[]}" ;;
   "issue edit")
     [ -n "${GH_EDIT_FAILS-}" ] && exit 1
     echo "https://github.com/o/r/issues/1" ;;
@@ -1044,3 +1046,91 @@ class TestSweepIsABackstop:
         assert not any("--remove-label" in c for c in calls), (
             "the default window is inside the one-hour session cap"
         )
+
+
+def _pr(number: int, *checks: str, draft: bool = False) -> dict:
+    """A pull request with a check rollup. Each check is `NAME:STATE`.
+
+    A state is put in `conclusion` unless it's PENDING, which is the legacy
+    status-context shape for "still running" and the one value that is non-empty
+    without meaning anything has concluded.
+    """
+    rollup = []
+    for check in checks:
+        name, state = check.split(":")
+        if state == "PENDING":
+            rollup.append({"context": name, "state": "PENDING"})
+        else:
+            rollup.append({"name": name, "conclusion": state})
+    return {
+        "number": number,
+        "title": f"pr {number}",
+        "url": f"https://github.com/o/r/pull/{number}",
+        "isDraft": draft,
+        "statusCheckRollup": rollup,
+    }
+
+
+class TestRedPullRequestsAreDerivedFromState:
+    """A pull request with a failing check is finished work that will never land
+    and never asks anyone for anything: auto-merge fires on a check going green
+    and nothing fires on one going red.
+
+    `genesis-ci-failure.yml` covers that in Actions, and under `genesis serve`
+    every `genesis-*` workflow is disabled - so in the mode an operator may
+    actually be running, this listing is the only thing that notices. Which is
+    why "red" is defined here as the exact complement of the merge predicate in
+    genesis-merge.yml rather than as "a check said FAILURE": anything narrower
+    leaves a state that blocks the merge forever invisible to the one report that
+    would have surfaced it.
+    """
+
+    def test_a_failing_check_is_reported_with_the_check_that_failed(self, run) -> None:
+        prs = json.dumps([_pr(12, "test:FAILURE", "lint:SUCCESS")])
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=prs)
+        assert proc.returncode == 0, proc.stderr
+        assert "#12" in proc.stdout
+        assert "red: test" in proc.stdout, "naming the failing check is the whole point"
+        assert "lint" not in proc.stdout
+
+    def test_a_green_pull_request_is_not_reported(self, run) -> None:
+        prs = json.dumps([_pr(12, "test:SUCCESS", "docs:SKIPPED")])
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=prs)
+        assert proc.stdout.strip() == "", (
+            "SKIPPED is a pass to the merge predicate, so it must be one here"
+        )
+
+    def test_a_check_still_running_is_not_yet_red(self, run) -> None:
+        """The trap in the rollup shape: an unfinished check run reports an empty
+        conclusion, and a legacy status context reports PENDING. Reading either
+        as a conclusion turns every in-flight pull request into a false alarm."""
+        prs = json.dumps([_pr(12, "test:", "legacy:PENDING")])
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=prs)
+        assert proc.stdout.strip() == ""
+
+    @pytest.mark.parametrize("state", ["TIMED_OUT", "CANCELLED", "ERROR", "ACTION_REQUIRED"])
+    def test_every_state_that_blocks_a_merge_counts_as_red(self, run, state: str) -> None:
+        """Matching only FAILURE is the tempting version and the broken one: the
+        merge sweep takes SUCCESS and SKIPPED and nothing else, so each of these
+        strands a pull request just as permanently while looking like an
+        exception somebody would have to think of."""
+        prs = json.dumps([_pr(12, f"test:{state}")])
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=prs)
+        assert "#12" in proc.stdout, f"{state} blocks the merge and is not reported"
+
+    def test_a_draft_is_reported_and_labelled_as_one(self, run) -> None:
+        """Drafts are excluded from the merge predicate, so a red draft isn't
+        stalling anything yet - but it is still the author's problem, and hiding
+        it means the failure surfaces only when the draft is marked ready."""
+        prs = json.dumps([_pr(12, "test:FAILURE", draft=True)])
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=prs)
+        assert "#12" in proc.stdout and "[draft]" in proc.stdout
+
+    def test_summary_prints_the_section_even_when_it_is_empty(self, run) -> None:
+        """Same reasoning as the unanswered-comments section it sits next to: a
+        section that appears only when it has content teaches the reader that its
+        absence means nothing, and then a run that skips it looks identical to a
+        run where nothing was wrong."""
+        proc, _ = run("summary", GH_PR_LIST_JSON="[]")
+        assert proc.returncode == 0, proc.stderr
+        assert "Stalled On A Red Check" in proc.stdout

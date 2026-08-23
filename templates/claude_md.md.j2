@@ -89,6 +89,37 @@ uphold:
 A pull request with no checks at all is never merged: in a repo that has CI, an
 empty check list means CI hasn't started, not that there's nothing to run.
 
+### When Something Fails
+
+Auto-merge is the green path and it has no red twin by construction: a check
+going green fires an event, a check going red fires nothing, and a pull request
+that fails is finished work sitting still. Three pieces cover that, and they
+degrade in that order.
+
+- **`genesis-ci-failure.yml`** wakes the orchestrator on a failing gating check,
+  with the run URL and branch in hand. Same `CI` naming convention as auto-merge
+  above — one name, upheld once. `check_suite` looks like the way to avoid
+  naming anything and isn't: GitHub doesn't deliver it for check suites created
+  by Actions, which is all of yours.
+- **`.genesis/scripts/escalate.sh`**, wired as an `if: failure()` step in every
+  workflow that can fail with work left undone. It opens or updates an issue
+  labelled `needs:human` + `automation:failure`, deduplicated per workflow so
+  repeated failures append rather than multiply. There is no model in this path
+  and there must not be one: the failure it exists for is a run that ran out of
+  turns, and an agent asked to escalate as its last act is an agent that never
+  reaches it.
+- **The orchestrator's own `Handling Failures` section**, which is where triage
+  belongs: read the log, write the diagnosis down *before* attempting a fix,
+  then fix small and known or escalate. Not in a workflow prompt, because local
+  mode runs no workflows.
+
+`automation:failure` is deliberately excluded from the scheduled orchestrator's
+`needs:human` gate. Both labels mean "a person should look", but only
+`needs:human` alone means "and nothing will progress until they do" — a died run
+isn't a decision, and gating on it would let one transient API error silence
+every scheduled tick until someone noticed the quiet. That's the original bug
+with a new hat on.
+
 ### Turn Budgets
 
 Every workflow that invokes Claude must pass an explicit `--max-turns`, sized by

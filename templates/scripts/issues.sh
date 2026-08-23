@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Genesis issue manager — abstraction over gh CLI
-# Supports: create, list, unanswered-comments, unselectable-work, close, assign,
-#           comment, label, claim, next, release, sweep-claims, view
+# Supports: create, list, unanswered-comments, unselectable-work, red-prs, close,
+#           assign, comment, label, claim, next, release, sweep-claims, view
 set -euo pipefail
 
 CMD="${1:-help}"
@@ -257,6 +257,37 @@ claim_rows() {
   ] | @tsv'
 }
 
+format_red_prs() {
+    # Open pull requests the merge sweep will never take, because a check on them
+    # has concluded as something other than a pass.
+    #
+    # This exists because the event that would otherwise report a red check does
+    # not reach every execution mode. `genesis-ci-failure.yml` wakes triage within
+    # seconds of CI going red, and under `genesis serve` every `genesis-*`
+    # workflow is disabled, so in the mode an operator may actually be running
+    # there is no wake-on-failure at all. A red pull request is a fact about
+    # repository state, so deriving it from state works in both modes — the same
+    # reason the merge sweep has a cron next to its `workflow_run` trigger.
+    #
+    # "Red" is defined as the exact complement of the merge predicate in
+    # genesis-merge.yml: concluded, and neither SUCCESS nor SKIPPED. Anything
+    # narrower (matching only FAILURE) would leave a timed-out or errored check
+    # invisible here while still blocking the merge forever, which is the stall
+    # with no reporter. PENDING is the one legacy status state that is non-empty
+    # and still means "running", so it is spelled out rather than inferred.
+    gh pr list --state open --limit 100 \
+        --json number,title,url,isDraft,statusCheckRollup \
+        --jq '
+def check_state: if (.conclusion // "") != "" then .conclusion else (.state // "") end;
+def blocking: check_state as $s
+  | $s != "" and $s != "PENDING" and $s != "SUCCESS" and $s != "SKIPPED";
+.[]
+| . as $pr
+| [$pr.statusCheckRollup[]? | select(blocking)] as $red
+| select(($red | length) > 0)
+| "#\($pr.number) \(if $pr.isDraft then "[draft] " else "" end)\($pr.title)\n  \($pr.url)\n  red: \([$red[] | .name // .context // "check"] | join(", "))"'
+}
+
 release_one() {
     # Remove the label, then say why on the issue. The comment is not decoration:
     # a human looking at an issue whose `in-progress` label vanished has no other
@@ -504,6 +535,11 @@ json.dump(filtered, sys.stdout)
         format_unselectable_work
         ;;
 
+    red-prs)
+        # Pull requests stalled on a red check (empty = nothing is stuck).
+        format_red_prs
+        ;;
+
     blocked)
         # Shortcut: list all blocked issues
         gh issue list --state open --label "blocked" --json "$FIELDS" --limit 100 | format_issues
@@ -545,6 +581,15 @@ json.dump(filtered, sys.stdout)
         # is reachable.
         echo "=== Unselectable Work (open but no run can pick it up) ==="
         format_unselectable_work
+        echo ""
+        # Also unconditional, and the same shape one step further along the
+        # pipeline: unselectable work is work no run can start, this is work no
+        # run can finish. Auto-merge fires on a check going green and nothing
+        # fires on one going red, so a pull request with a failing check is
+        # finished work that will never land and never asks anyone for anything.
+        # Empty here means nothing is stuck.
+        echo "=== Pull Requests Stalled On A Red Check (nothing will merge these) ==="
+        format_red_prs
         echo ""
         echo "=== Blocked ==="
         gh issue list --state open --label "blocked" --json "$FIELDS" --limit 100 | format_issues
@@ -862,6 +907,9 @@ Commands:
             List open issues no run can select — no milestone:N label, or
             every milestone on them already signed off — stalest first
             (empty = every open issue is reachable)
+  red-prs   List open pull requests stalled on a check that concluded as
+            anything other than a pass — the exact complement of what the
+            merge sweep will take (empty = nothing is stuck)
   blocked   List all blocked issues
   recent    List recently updated issues (default: last 24h)
   summary   Overview of project state

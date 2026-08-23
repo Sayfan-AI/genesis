@@ -64,17 +64,29 @@ jobs:
       # gate impossible and wedge the project permanently. The events workflow is
       # also what keeps this from deadlocking on a stale label: no cron run will
       # touch it, but any human action still wakes the loop.
+      #
+      # `automation:failure` is excluded, and that exclusion is what keeps the
+      # escalation net from eating the loop it protects. Every escalation
+      # `.genesis/scripts/escalate.sh` files carries `needs:human`, so without
+      # this the first transient API error would open a gate that silences every
+      # scheduled tick until a person closed it - trading "a run died quietly"
+      # for "the whole cron died quietly", which is the same bug wearing the
+      # fix's clothes. The two labels answer different questions: `needs:human`
+      # alone means a person must decide something and no amount of retrying
+      # helps, while `automation:failure` means a run died and the next one may
+      # not. Only the first is a reason to stay home.
       - name: Skip the run if a human gate is open
         id: gate
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          count=$(gh issue list --label "needs:human" --state open --json number --jq length)
+          gates=$(gh issue list --label "needs:human" --state open --json number,title,labels \
+            --jq '[.[] | select(([.labels[].name] | index("automation:failure")) == null)]')
+          count=$(printf '%s' "$gates" | jq length)
           if [ "${count:-0}" -gt 0 ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "Skipping the LLM run: $count open needs:human issue(s) are waiting on a person."
-            gh issue list --label "needs:human" --state open --json number,title \
-              --jq '.[] | "  #\(.number) \(.title)"'
+            printf '%s' "$gates" | jq -r '.[] | "  #\(.number) \(.title)"'
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -118,3 +130,17 @@ jobs:
           # work, and dispatched subagents spend from this same budget.
           # Enforced at >= 30 by tests/e2e/test_workflows.py.
           claude_args: "--max-turns 40 --allowedTools Read,Write,Edit,Bash,Glob,Grep,Agent"
+
+      # The last line of defence, and the reason it's a step rather than a
+      # sentence in the prompt above is written up in escalate.sh. This one is
+      # the quietest failure of the four: a scheduled run dies at 03:00 with
+      # nobody watching, the next tick is six hours out, and until then the
+      # project is indistinguishable from a project with nothing to do.
+      - name: Escalate to a human if this run failed
+        if: failure()
+        run: bash .genesis/scripts/escalate.sh
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          WF_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

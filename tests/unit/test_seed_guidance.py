@@ -332,3 +332,95 @@ class TestOnboardingCannotClearItsOwnGate:
             "nothing stops the onboarding agent breaking milestone 1 into task "
             "issues before the roadmap is approved"
         )
+
+
+@pytest.fixture(scope="module")
+def failures(orchestrator: str) -> str:
+    return _section(orchestrator, "Handling Failures")
+
+
+class TestFailuresAreTriagedNotHeroicallyFixed:
+    """Issue #27 — the third part, and the one a workflow can't enforce.
+
+    The first two parts wake the orchestrator on a red check and file a
+    `needs:human` issue if a run dies. Neither helps if the woken agent responds
+    by trying to fix the failure inline: that is what a MaKlaude triage session
+    did, and it ran out of turns holding both the fix and the diagnosis. So the
+    guidance has to make escalation the cheap move and say why, and it has to
+    live in the agent definition rather than the workflow prompt, because local
+    mode disables every `genesis-*` workflow.
+    """
+
+    def test_the_workflow_prompt_names_a_section_that_exists(self, orchestrator: str) -> None:
+        """The prompt delegates the whole procedure by name. A rename on either
+        side leaves an agent told to follow a section it can't find, and it will
+        improvise something instead of failing.
+        """
+        prompt = (TEMPLATES / "workflows" / "genesis-ci-failure.yml").read_text()
+        named = re.search(r'its "([^"]+)" section', prompt)
+        assert named, "wake-on-failure no longer delegates to a named section"
+        _section(orchestrator, named.group(1))
+
+    def test_triage_starts_from_the_log_and_the_token_can_read_it(
+        self, failures: str
+    ) -> None:
+        """`--log-failed` is the mechanism; `permission-actions: read` is what
+        makes it work. Either one alone is an instruction that 403s."""
+        assert "--log-failed" in failures, (
+            "triage that starts from the diff diagnoses what changed, not what broke"
+        )
+        triage_workflow = (TEMPLATES / "workflows" / "genesis-ci-failure.yml").read_text()
+        assert "permission-actions: read" in triage_workflow, (
+            "the agent is told to read a failing run's log with a token that cannot"
+        )
+
+    def test_the_diagnosis_is_written_before_the_fix_is_attempted(
+        self, failures: str
+    ) -> None:
+        """The ordering is the entire value. Output produced before the unbounded
+        work survives a run that dies in the middle of it; output planned for
+        afterwards is exactly what a max-turns death takes with it."""
+        bullet = _bullet(failures, "diagnosis down")
+        assert "first" in bullet.lower() or "before" in bullet.lower(), (
+            "nothing in this rule establishes that the diagnosis comes first"
+        )
+
+    def test_it_says_subagents_spend_the_parent_budget(self, failures: str) -> None:
+        """The specific misconception that produced the original death: delegating
+        the fix reads as buying more room and buys none."""
+        bullet = _bullet(failures, "subagent")
+        assert "--max-turns" in bullet, (
+            "the rule names no budget, so it reads as advice about tidiness"
+        )
+
+    def test_it_refuses_the_two_ways_a_red_check_gets_cleared_without_a_fix(
+        self, failures: str
+    ) -> None:
+        bullet = _bullet(failures, "Never merge or close")
+        assert "re-running" in bullet and "removing the check" in bullet
+
+    def test_the_label_it_tells_the_agent_about_is_the_one_the_net_applies(
+        self, failures: str
+    ) -> None:
+        """Cross-file, because the agent's instructions are useless if the script
+        files something else. `escalate.sh` is deterministic and the agent's
+        reading of its output is not, so the two have to name the same label."""
+        assert "automation:failure" in failures
+        script = (TEMPLATES / "scripts" / "escalate.sh").read_text()
+        assert "automation:failure" in script
+
+    def test_the_state_derived_path_is_the_one_local_mode_still_has(
+        self, failures: str
+    ) -> None:
+        """Under `genesis serve` the wake-on-failure workflow doesn't run at all,
+        so the guidance can't rest on being woken. `issues.sh summary` is what
+        reports a red pull request in both modes, and it has to actually do it.
+        """
+        assert "issues.sh summary" in failures
+        script = (TEMPLATES / "scripts" / "issues.sh").read_text()
+        summary = re.search(r"^    summary\)(.*?)^        ;;", script, re.M | re.S)
+        assert summary, "issues.sh has no summary subcommand any more"
+        assert "format_red_prs" in summary.group(1), (
+            "the orchestrator is pointed at a summary that doesn't report red "
+            "pull requests, which is the only report local mode gets"
+        )

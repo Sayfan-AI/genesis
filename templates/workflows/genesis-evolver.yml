@@ -81,3 +81,16 @@ jobs:
           # at error_max_turns on a small budget.
           # Enforced at >= 30 by tests/e2e/test_workflows.py.
           claude_args: "--max-turns 40 --allowedTools Read,Write,Edit,Bash,Glob,Grep,Agent"
+
+      # Reasoning in escalate.sh. The evolver is the agent whose whole job is
+      # noticing that the system is failing, so nothing downstream notices when
+      # it's the one that fails - and on a daily cadence a silent death is a full
+      # day of the system running unreviewed before anything looks again.
+      - name: Escalate to a human if this run failed
+        if: failure()
+        run: bash .genesis/scripts/escalate.sh
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          WF_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
