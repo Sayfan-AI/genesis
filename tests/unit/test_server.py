@@ -869,6 +869,10 @@ def test_a_session_that_ran_no_tools_is_called_out(plane, capsys) -> None:
     plane._stream_progress(iter([json.dumps(
         {"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0, "duration_ms": 1000}
     )]))
+    # The check moved out of the result branch and onto the session boundary, so
+    # that one result event out of several can no longer trigger it (#79). The
+    # reader still supplies the state it reads.
+    plane._warn_if_the_session_did_nothing()
     assert "ran no tools at all" in capsys.readouterr().out
 
 
@@ -1473,3 +1477,101 @@ def test_an_unreadable_settings_file_errs_toward_running_it(plane) -> None:
         settings.write_text(content)
         plane.run_pre_session_steps()
         assert counter.exists(), f"settings {content!r} silently disabled the nets"
+
+
+# ---------- one process, more than one result event (#78, #79) ----------
+
+
+def _two_results(first_cost: float, second_cost: float, tools_after_first: int = 2) -> list[str]:
+    """The shape measured on 2026-08-23: an early result, then real work, then another.
+
+    A leftover task notification from a background job the agent had started itself
+    flushed an empty turn and a `result`. The continuation prompt landed 20ms later
+    and the same process carried on, emitting a second `result` 27 seconds after.
+    """
+    sid = "sess-two-results"
+    lines = [json.dumps({"type": "system", "subtype": "init", "session_id": sid})]
+    lines.append(json.dumps({
+        "type": "result", "subtype": "success", "session_id": sid,
+        "num_turns": 0, "total_cost_usd": first_cost, "duration_ms": 0,
+    }))
+    for i in range(tools_after_first):
+        lines.append(json.dumps({
+            "type": "assistant", "session_id": sid,
+            "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": f"f{i}.py"}}
+            ]},
+        }))
+    lines.append(json.dumps({
+        "type": "result", "subtype": "success", "session_id": sid,
+        "num_turns": tools_after_first, "total_cost_usd": second_cost, "duration_ms": 27000,
+    }))
+    return lines
+
+
+def test_a_session_that_emits_two_results_pays_for_both(plane) -> None:
+    """The expensive event comes FIRST on purpose.
+
+    In the measured case the discarded value was $0.00, so nothing was lost and the
+    bug was invisible. Reversing the order is what makes the undercount show up, so
+    that's the order under test.
+    """
+    plane.last_cost = 0.0
+    plane._stream_progress(iter(_two_results(first_cost=4.00, second_cost=0.25)))
+
+    assert plane.last_cost == pytest.approx(4.25), (
+        f"only one result event was charged: got {plane.last_cost}"
+    )
+
+
+def test_the_terminal_outcome_still_wins_across_two_results(plane) -> None:
+    """Cost accumulates; the outcome fields do not. The last event is the one that
+    describes how the session actually ended, and `turns` is cumulative already."""
+    sid = "sess-two-results"
+    lines = _two_results(first_cost=0.0, second_cost=0.5, tools_after_first=3)
+    lines[-1] = json.dumps({
+        "type": "result", "subtype": "error_max_turns", "session_id": sid,
+        "num_turns": 3, "total_cost_usd": 0.5, "duration_ms": 27000,
+    })
+    plane._stream_progress(iter(lines))
+
+    assert plane.last_result_subtype == "error_max_turns"
+    assert plane.last_tool_calls == 3, "turns is cumulative, so the total should survive"
+
+
+def test_an_early_empty_result_does_not_trigger_the_did_nothing_warning(plane, capsys) -> None:
+    """The misfire from issue #79.
+
+    The per-event check fired on the first result and told the reader to go and
+    check ANTHROPIC_API_KEY. There was no auth problem, and the session went on to
+    do three tool calls. An operator following that advice finds nothing wrong,
+    twice, and is left with a scary line and no explanation.
+    """
+    plane._stream_progress(iter(_two_results(first_cost=0.0, second_cost=0.5, tools_after_first=3)))
+    plane._warn_if_the_session_did_nothing()
+
+    assert "ran no tools at all" not in capsys.readouterr().out
+
+
+def test_a_session_that_really_did_nothing_still_warns(plane, capsys) -> None:
+    """The detector this replaces is worth keeping: fifteen consecutive runs once
+    reported success for $0.00 while consuming the event backlog."""
+    sid = "sess-empty"
+    plane._stream_progress(iter([
+        json.dumps({"type": "system", "subtype": "init", "session_id": sid}),
+        json.dumps({"type": "result", "subtype": "success", "session_id": sid,
+                    "num_turns": 0, "total_cost_usd": 0.0, "duration_ms": 0}),
+    ]))
+    plane._warn_if_the_session_did_nothing()
+
+    assert "ran no tools at all" in capsys.readouterr().out
+
+
+def test_the_warning_is_wired_into_the_session_path() -> None:
+    """The tests above call the check directly, so all of them would pass with it
+    sitting in the file unreferenced. `host-guard.sh` shipped inert once already."""
+    source = Path(server.__file__).read_text()
+    run_session = source.split("def _run_session", 1)[1].split("\n    def ", 1)[0]
+    assert "_warn_if_the_session_did_nothing()" in run_session, (
+        "the did-nothing check is defined but never called from _run_session"
+    )
