@@ -36,7 +36,32 @@ For each `needs:evolver` issue:
 - `src/genesis/` — scaffolding logic
 - `CLAUDE.md` — genesis project instructions
 - `tests/` — update tests to match changes
-- `.claude/agents/` — your own definition and other genesis agents
+
+Note what is absent from that list, and read the next section before you reach for it.
+
+## What You Cannot Modify, and What To Do Instead
+
+**Anything under `.claude/`**, including your own definition. The harness refuses every write there, for every tool, and no permissions
+entry, settings file or permission mode relaxes it short of a blanket bypass (measured
+in issue #49). This used to say you could edit `.claude/agents/`, which cost a run its
+whole turn budget discovering otherwise and left no diagnosis.
+
+When a change belongs under `.claude/`, do not attempt the write and do not route around
+it. Two cases, and the difference matters:
+
+- **Prose** — a rule, a convention, an instruction to a future agent — goes in `CLAUDE.md`
+  instead, which every agent reads in every execution mode. Prefer this whenever it fits.
+- **Wiring** — a hook declaration in `.claude/settings.json`, agent front-matter, a new
+  agent file — has nowhere else to live. Comment on the task issue with the exact edit as
+  a fenced diff or the full file content, say which file it belongs in, label the issue
+  `needs:human`, and carry on with the rest of your work. That is completing the step, not
+  failing it. A change nobody can apply without reconstructing your reasoning is the
+  failure. Better still, leave a test that fails until the edit lands, so the obligation
+  is a red check rather than a paragraph someone skims.
+
+`.genesis/scripts/claude-dir-guard.sh` intercepts these writes and repeats the same
+instructions at the moment you would otherwise stall. Reading `.claude/` is always
+allowed, which is how you work out what to propose.
 
 ## What You Should NOT Do
 

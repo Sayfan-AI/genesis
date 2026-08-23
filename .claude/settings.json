@@ -4,5 +4,18 @@
       "Bash(git *)",
       "Bash(gh *)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .genesis/scripts/claude-dir-guard.sh"
+          }
+        ]
+      }
+    ]
   }
 }
