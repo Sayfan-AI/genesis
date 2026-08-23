@@ -7,6 +7,7 @@ import pytest
 
 from genesis.scaffold import (
     ORCHESTRATOR_TURN_FLOOR,
+    SEED_SCRIPTS,
     SEED_WORKFLOWS,
     TEMPLATES_DIR,
     WORKFLOW_TURN_CLASSES,
@@ -246,7 +247,12 @@ def test_every_orchestrator_workflow_sweeps_claims_before_the_agent() -> None:
 
 
 def test_workflows_have_correct_permissions() -> None:
-    for name in ["genesis-orchestrator.yml", "genesis-events.yml", "genesis-evolver.yml"]:
+    for name in [
+        "genesis-orchestrator.yml",
+        "genesis-events.yml",
+        "genesis-evolver.yml",
+        "genesis-ci-failure.yml",
+    ]:
         content = (TEMPLATES_DIR / "workflows" / name).read_text()
         assert "contents: write" in content
         assert "issues: write" in content
@@ -733,3 +739,283 @@ def test_a_same_named_workflow_serializes_in_both_places() -> None:
             f"{'.github/workflows' if own_has else 'templates/workflows'} but not the "
             "other; a race fixed in one place is still shipping from the other"
         )
+
+
+# The one seeded workflow with no escalation step, kept as an allow-list rather
+# than an absence so a new workflow has to say which side of the line it's on.
+# Everything genesis-push-trigger.yml can fail at is a dispatch that three other
+# paths re-derive within hours; the template says so at the step.
+WORKFLOWS_WITHOUT_ESCALATION = {"genesis-push-trigger.yml"}
+
+ESCALATION_STEP = "Escalate to a human if this run failed"
+
+
+def test_every_workflow_that_can_strand_work_escalates_to_a_human() -> None:
+    """The deterministic half of genesis issue #27.
+
+    A run that dies at `error_max_turns` leaves no fix, no diagnosis and nobody
+    told, and the system then reads as idle rather than broken — measured on
+    MaKlaude, where a triage session died mid-fix and stalled milestone 1. An
+    escalation written into the agent's prompt can't cover that: it's the last
+    instruction, and running out of turns is precisely not reaching it. So it's a
+    step, and it belongs on every workflow whose failure strands work.
+    """
+    for name in SEED_WORKFLOWS:
+        content = (TEMPLATES_DIR / "workflows" / name).read_text()
+        if name in WORKFLOWS_WITHOUT_ESCALATION:
+            assert "escalate.sh" not in content, (
+                f"{name} escalates but is listed as exempt; drop it from "
+                "WORKFLOWS_WITHOUT_ESCALATION or remove the step"
+            )
+            continue
+        assert f"- name: {ESCALATION_STEP}" in content, (
+            f"{name} can fail with work stranded and tells nobody. Add the "
+            "`if: failure()` escalation step, or add it to "
+            "WORKFLOWS_WITHOUT_ESCALATION with a reason"
+        )
+        step = _step(content, ESCALATION_STEP)
+        assert "if: failure()" in step, (
+            f"{name} escalates unconditionally or on the wrong condition. "
+            "`if: failure()` is what separates a real job failure from a benign "
+            "concurrency cancellation"
+        )
+        assert "bash .genesis/scripts/escalate.sh" in step, (
+            f"{name} inlines its own escalation instead of calling the shared "
+            "script; five copies of one rule drift apart"
+        )
+        for required in ("GH_TOKEN:", "GH_REPO:", "WF_NAME:", "RUN_URL:"):
+            assert required in step, f"{name}'s escalation step is missing {required}"
+
+
+def test_the_escalation_step_can_reach_the_script_it_runs() -> None:
+    """`bash .genesis/scripts/escalate.sh` needs the repo on disk.
+
+    genesis-merge.yml went without a checkout for most of its life and carried a
+    comment explaining why it never would, so this is the assertion that keeps
+    those two facts attached to each other.
+    """
+    for name in SEED_WORKFLOWS:
+        if name in WORKFLOWS_WITHOUT_ESCALATION:
+            continue
+        content = (TEMPLATES_DIR / "workflows" / name).read_text()
+        # `uses:`, not a bare mention — genesis-merge.yml discusses its checkout
+        # in two comments, and matching prose is how a test keeps passing after
+        # the step it was written for is deleted.
+        assert "uses: actions/checkout" in content, (
+            f"{name} runs .genesis/scripts/escalate.sh without checking the repo out"
+        )
+
+
+def test_the_merge_checkout_authenticates_as_the_app() -> None:
+    """`permissions: {}` leaves the default GITHUB_TOKEN with no `contents: read`,
+    and genesis creates dev repos private by default — so a checkout on the
+    default token 403s on exactly the repos this gets seeded into.
+
+    Asserted as an ordering as well, because a checkout placed before the token
+    step fails closed on private repos and passes on the public one somebody
+    happens to test with.
+    """
+    content = MERGE_WORKFLOW.read_text()
+    assert "permissions: {}" in content, (
+        "the empty default-token posture is what makes an App-token checkout "
+        "necessary; if that changed, revisit this"
+    )
+    assert "token: ${{ steps.app-token.outputs.token }}" in content, (
+        "the merge checkout runs on the default GITHUB_TOKEN, which has no scopes here"
+    )
+    assert content.index("create-github-app-token") < content.index("actions/checkout"), (
+        "the checkout consumes a token that is minted after it"
+    )
+
+
+def test_every_dispatch_names_the_ref_it_dispatches_on() -> None:
+    """`gh workflow run` without `--ref` resolves the default branch over the API
+    first, and that lookup is what failed on MaKlaude and took the dispatch down
+    with it.
+
+    Asserted over every template rather than on the one workflow it was fixed in.
+    `genesis-merge.yml` got `--ref main` and carried a comment explaining why,
+    and `genesis-push-trigger.yml` sat one file away dispatching the same
+    workflow the old way for weeks — a per-file fix leaves the next copy of the
+    bug to be found by hand.
+    """
+    for name in SEED_WORKFLOWS:
+        content = (TEMPLATES_DIR / "workflows" / name).read_text()
+        for line in content.splitlines():
+            command = line.strip().lstrip("- ")
+            if not command.startswith("run: gh workflow run"):
+                continue
+            assert "--ref " in command, (
+                f"{name} dispatches without --ref: {command!r}. gh then looks the "
+                "default branch up over the API, which is the call that failed"
+            )
+
+
+def test_the_events_workflow_does_not_wake_on_a_label() -> None:
+    """A trigger the bot fires constantly, filtered out only after it has cost
+    something.
+
+    `issues.sh claim` writes `in-progress`, `next` claims in the same call, and
+    the escalation net puts two labels on the issue it files; `gh issue create
+    --label` fires `opened` and `labeled` for one issue, which is how two
+    40-turn agents raced on genesis issue #37. The bot-actor guard skips each of
+    those runs, but GitHub has already queued them into the shared concurrency
+    group by then, and one pending slot means a run with nothing to do can evict
+    one that has work — the same shape that cost genesis-ci-failure.yml 157 runs
+    on MaKlaude.
+    """
+    triggers = re.search(
+        r"^  issues:\n    types: \[(.*)\]$", _template("genesis-events.yml"), re.M
+    )
+    assert triggers, "the events workflow no longer filters issue activity types"
+    types = {t.strip() for t in triggers.group(1).split(",")}
+    assert "labeled" not in types, (
+        "the events workflow wakes on `labeled`, which the bot fires on almost "
+        "every issue it touches"
+    )
+    assert {"opened", "closed"} <= types, (
+        "a human opening or closing an issue is the signal this workflow exists "
+        f"for: {sorted(types)}"
+    )
+
+
+def test_the_escalation_never_became_a_watcher_workflow() -> None:
+    """The design that looks obvious and measured worse.
+
+    A `workflow_run` watcher can only test the conclusion inside a job, so GitHub
+    queues and then skips a run for every completion it watches — ~26 skipped
+    runs on MaKlaude from watching four busy workflows — and it also fires on a
+    benign concurrency cancellation, which `if: failure()` doesn't. The single
+    place a watcher is unavoidable is wake-on-failure, which exists to observe
+    another workflow finishing, and it watches exactly one name.
+    """
+    watched: set[str] = set()
+    for name in SEED_WORKFLOWS:
+        content = (TEMPLATES_DIR / "workflows" / name).read_text()
+        for match in re.finditer(r"^\s*workflows:\s*\[(.*)\]\s*$", content, re.M):
+            watched.update(w.strip().strip("\"'") for w in match.group(1).split(","))
+    assert watched == {"CI"}, (
+        f"a seeded workflow watches {sorted(watched)}. Watching a genesis-* "
+        "workflow in order to react to its failure is the skipped-run design; "
+        "put an `if: failure()` step inside that workflow instead"
+    )
+
+
+def test_wake_on_failure_fires_on_failure_and_not_on_cancellation() -> None:
+    """Auto-merge fires when a check goes green and nothing fired when one went
+    red, which is how one failing e2e check stalled an entire milestone.
+
+    `timed_out` counts, because the merge predicate accepts only SUCCESS and
+    SKIPPED and a timed-out check strands a pull request just as thoroughly.
+    `cancelled` doesn't, because it's nearly always concurrency working as
+    designed, and waking a 40-turn agent to discover that is spend with no signal.
+    """
+    content = (TEMPLATES_DIR / "workflows" / "genesis-ci-failure.yml").read_text()
+    assert "workflow_run:" in content and 'workflows: ["CI"]' in content
+    assert "github.event.workflow_run.conclusion == 'failure'" in content
+    assert "github.event.workflow_run.conclusion == 'timed_out'" in content
+    assert "'cancelled'" not in content, (
+        "a cancelled run is concurrency doing its job, not a failure to triage"
+    )
+    assert "head_repository.full_name == github.repository" in content, (
+        "a workflow_run job runs with write permissions and this one hands an "
+        "agent a Bash tool; a fork's head commit must not choose what it executes"
+    )
+
+
+def test_wake_on_failure_joins_the_concurrency_group_at_the_job() -> None:
+    """A workflow-level group is joined before any job's `if:` is evaluated, so a
+    run with nothing to do still takes the single pending slot GitHub allows per
+    group and can evict one that has real work.
+
+    Measured on MaKlaude: this workflow had 0 successful runs in 157 and never
+    once fired, because every genuine CI failure was evicted by a triage run that
+    would have skipped in a second. A run cancelled while still pending starts no
+    job, so it can't even trip its own escalation step — the loss is invisible.
+    """
+    content = (TEMPLATES_DIR / "workflows" / "genesis-ci-failure.yml").read_text()
+    assert not re.search(r"^concurrency:", content, re.M), (
+        "the group is declared at workflow level, which is the shape that made "
+        "this workflow fire 0 times in 157 runs"
+    )
+    job_group = re.search(r"^    concurrency:\n      group: (.+)$", content, re.M)
+    assert job_group, "wake-on-failure has no concurrency group at all"
+
+    orchestrator = re.search(
+        r"^concurrency:\n  group: (.+)$", _template("genesis-orchestrator.yml"), re.M
+    )
+    assert orchestrator, "genesis-orchestrator.yml lost its concurrency group"
+    assert job_group.group(1).strip() == orchestrator.group(1).strip(), (
+        "triage pushes fixes and has to serialize against orchestrator sessions"
+    )
+
+
+def test_the_human_gate_ignores_the_escalations_the_net_files() -> None:
+    """Where the two halves of issue #27 meet, and the one way this fix could
+    have made things worse.
+
+    Every escalation carries `needs:human`, and the scheduled orchestrator skips
+    its LLM step whenever one is open. Left alone, a single transient API error
+    would open a gate that silenced every scheduled tick until a person closed
+    it — trading "one run died quietly" for "the cron died quietly". The events
+    workflow would still fire, but that only helps a repo somebody is interacting
+    with. `automation:failure` is what separates "a person must decide something"
+    from "a run died, and the next one may not".
+    """
+    scheduled = _template("genesis-orchestrator.yml")
+    assert 'index("automation:failure")' in scheduled, (
+        "the gate counts the escalation net's own issues, so the first failure "
+        "silences every scheduled run after it"
+    )
+    escalate = (TEMPLATES_DIR / "scripts" / "escalate.sh").read_text()
+    assert "automation:failure" in escalate, (
+        "the gate excludes a label nothing applies; the two have to agree"
+    )
+    assert "needs:human" in escalate, (
+        "an escalation nobody can find under the project's one gate label"
+    )
+
+
+def test_every_script_a_workflow_runs_is_seeded_and_git_tracked() -> None:
+    """The same class of bug as the hook-manifest guard in tests/unit, one
+    directory over: a workflow step naming a script the scaffolder never copies
+    fails on the runner, in the repo it was scaffolded into, at the moment it was
+    needed.
+
+    Tracking is checked separately from existence because `gcm` is
+    `git commit -a`, which stages modified tracked files and silently skips a
+    brand-new one — the manifest entry, the workflow step and this assertion can
+    all land in a commit that doesn't contain the script, and it passes locally
+    forever.
+    """
+    import subprocess
+
+    referenced = set()
+    for name in SEED_WORKFLOWS:
+        content = (TEMPLATES_DIR / "workflows" / name).read_text()
+        for match in re.finditer(r"\.genesis/scripts/([\w.-]+)", content):
+            referenced.add(match.group(1))
+    assert referenced, "no workflow runs a seeded script any more; is this test stale?"
+
+    missing = sorted(referenced - set(SEED_SCRIPTS))
+    assert not missing, (
+        f"workflow templates run {missing}, which SEED_SCRIPTS does not copy into "
+        "a new project"
+    )
+
+    tracked = {
+        Path(p).name
+        for p in subprocess.run(
+            ["git", "ls-files", "templates/scripts/"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=REPO_ROOT,
+        ).stdout.split()
+    }
+    untracked = sorted(referenced - tracked)
+    assert not untracked, (
+        f"{untracked} is run by a workflow and listed in SEED_SCRIPTS but git does "
+        "not track it. A fresh clone then scaffolds a repo whose workflows call a "
+        "missing file. Run `git add templates/scripts/<name>`."
+    )

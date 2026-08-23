@@ -1,0 +1,174 @@
+name: Genesis CI Failure Triage
+
+# Wake-on-failure. Auto-merge fires when a check goes green and nothing at all
+# fires when one goes red, so a failing pull request used to sit untouched until
+# a person happened to look: on MaKlaude a single T8 e2e failure stalled
+# milestone 1 outright. This is the missing branch — a red check wakes the
+# orchestrator with the failure in hand, and it triages instead of guessing.
+
+on:
+  # `workflow_run` on a single name, rather than the enumerated list of every
+  # gating workflow this started as. Two alternatives were considered and both
+  # are worse:
+  #
+  # `check_suite` looks like the general answer — one trigger, every check,
+  # no names — and it is inert here. GitHub's own docs: "To prevent recursive
+  # workflows, this event does not trigger workflows if the check suite was
+  # created by GitHub Actions or if the check suite's head SHA is associated
+  # with GitHub Actions." A dev system's gating checks *are* GitHub Actions, so
+  # `check_suite` would never fire once and the loop would look fixed while
+  # staying exactly as blind as before.
+  #
+  # A hand-maintained list of workflow names is the other option, and it rots
+  # the moment the dev system adds a second gating workflow — silently, since a
+  # name that matches nothing is indistinguishable from a name that never fails.
+  # One convention, "your gating workflow is named CI", is already what
+  # genesis-merge.yml asks for and what CLAUDE.md documents; a single name keeps
+  # the two conventions the same one instead of adding a second thing to keep in
+  # sync. Compose extra gating checks as jobs inside CI, where the rollup
+  # conclusion covers them for free.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+# Same as the other orchestrator-class workflows: the agent authenticates as the
+# App, but claude-code-action still touches the default token.
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  triage:
+    # The concurrency group lives on the JOB, and moving it up to the workflow
+    # would disable this workflow without appearing to.
+    #
+    # GitHub allows exactly one *pending* run per group and cancels the older
+    # pending run when a newer one queues. A workflow-level group is joined
+    # before any job's `if:` is evaluated, so a run with nothing to do — CI went
+    # green, which is most of them — still takes the single pending slot and can
+    # evict a run that has real work. Measured on MaKlaude, where this workflow
+    # had **0 successful runs in 157** and never once fired:
+    #
+    #   09:28:28  E2E succeeded    -> triage run queued; would have skipped in a
+    #                                 second, but occupies the pending slot
+    #   09:29:04  CI failed        -> the real triage run queues behind it
+    #   09:31:08  next no-op queues -> evicts the CI-failure run. Never ran.
+    #
+    # The only genuine CI failure in that repo's history was dropped by runs that
+    # had nothing to do, and a run cancelled while *pending* starts no job, so it
+    # can't even trip the `if: failure()` escalation below. The loss is invisible.
+    #
+    # With the group here, a run whose `if:` is false never queues. The group is
+    # still the orchestrator's own — this agent pushes fixes and must not race a
+    # scheduled orchestrator session — and `cancel-in-progress: false` because a
+    # triage run carries the only copy of its trigger.
+    concurrency:
+      group: genesis-orchestrator-${{ github.repository }}
+      cancel-in-progress: false
+    # `timed_out` alongside `failure` because the merge predicate treats anything
+    # that isn't SUCCESS or SKIPPED as blocking, so a timed-out check strands a
+    # pull request just as thoroughly as a failed one. `cancelled` is deliberately
+    # absent: a cancelled run is almost always concurrency doing its job, and
+    # waking a 40-turn agent to discover that is the definition of spend with no
+    # signal.
+    #
+    # No filter on `github.event.workflow_run.event`. The obvious clause is
+    # `== 'pull_request'`, and it drops real failures: a dev system whose CI is
+    # wired `on: push` reports `push` for a branch that has an open pull request,
+    # so the filter would quietly exclude every failure on exactly those repos.
+    # A red default branch is worth waking for anyway, and the prompt handles
+    # both shapes.
+    #
+    # `head_repository` must be this repo. A `workflow_run` job runs with write
+    # permissions and this one hands an agent a Bash tool, so triaging a failure
+    # whose head commit came from a fork would let a stranger's pull request
+    # choose what that agent executes. Dev systems push branches to their own
+    # repo, so nothing legitimate is excluded.
+    # Every continuation line is indented exactly as far as the first, so YAML
+    # folds the whole thing into one line. A line indented further would be kept
+    # verbatim, newline and all, which is a `>-` subtlety worth not discovering
+    # through a workflow that silently stops matching.
+    if: >-
+      (github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'timed_out') &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          # `client-id`, not the deprecated `app-id`. The secret still holds the
+          # numeric App ID and needs no adopter action - see the note in genesis's
+          # own CLAUDE.md for why the rename is safe on already-scaffolded repos.
+          client-id: ${{ secrets.GENESIS_APP_ID }}
+          private-key: ${{ secrets.GENESIS_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
+          # Load-bearing here in a way it isn't anywhere else: step 1 of triage is
+          # `gh run view <id> --log-failed`, and without this the agent gets
+          # 403 Resource not accessible by integration and has to diagnose a
+          # failure it can't read. Read-only.
+          permission-actions: read
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          allowed_bots: "genesis-dev-bot[bot]"
+          # Reaches the activity-logging hooks in .claude/settings.json. The
+          # `settings` input MERGES with the repo's settings, so the hooks survive.
+          # Unset secrets render as empty strings and log.sh skips the push. There is
+          # no stderr consolation prize: Claude Code captures hook stderr into its
+          # own transcript, so unconfigured Loki means no activity trail at all.
+          settings: |
+            {
+              "env": {
+                "GENESIS_LOKI_URL": "${{ secrets.GENESIS_LOKI_URL }}",
+                "GENESIS_LOKI_USER": "${{ secrets.GENESIS_LOKI_USER }}",
+                "GENESIS_LOKI_TOKEN": "${{ secrets.GENESIS_LOKI_TOKEN }}"
+              }
+            }
+          # The procedure itself lives in the agent definition, not here. Under
+          # `genesis serve` every `genesis-*` workflow is disabled, so a rule that
+          # only exists in a workflow prompt reaches nobody in the mode a project
+          # may actually be running in — and this run's whole job is following that
+          # procedure.
+          prompt: |
+            A gating check failed.
+            - Failing workflow: ${{ github.event.workflow_run.name }}
+            - Conclusion: ${{ github.event.workflow_run.conclusion }}
+            - Head branch: ${{ github.event.workflow_run.head_branch }}
+            - Failed run: ${{ github.event.workflow_run.html_url }}
+            - Failed run id: ${{ github.event.workflow_run.id }}
+
+            Run the orchestrator agent defined in .claude/agents/orchestrator.md,
+            restricted to its "Handling Failures" section. Triage this one failure
+            and nothing else - do not plan, do not pick up other work.
+
+            If the head branch has no pull request, the failure is on that branch
+            directly; triage it the same way and open an issue instead of
+            commenting on a pull request.
+          # Orchestrator class — see the turn-budget floor in CLAUDE.md. It runs the
+          # same agent definition as the scheduled and event orchestrators, and
+          # reading a failing run's log then fixing on the branch is not cheaper
+          # than a cron tick's work. Enforced at >= 30 by tests/e2e/test_workflows.py.
+          claude_args: "--max-turns 40 --allowedTools Read,Write,Edit,Bash,Glob,Grep,Agent"
+
+      # The safety net under the agent above. Triage is the run most likely to die
+      # at `error_max_turns` — it's the one that arrives with a problem already in
+      # progress — and a triage run that dies silently leaves the system exactly
+      # where the failing check left it, which is the shape issue #27 was filed
+      # for. No model in this step, so it can't fail the same way.
+      - name: Escalate to a human if this run failed
+        if: failure()
+        run: bash .genesis/scripts/escalate.sh
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          WF_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

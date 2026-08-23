@@ -19,7 +19,22 @@ jobs:
           private-key: ${{ secrets.GENESIS_APP_PRIVATE_KEY }}
           permission-actions: write
 
-      - run: gh workflow run genesis-orchestrator.yml
+      # The one genesis workflow with no `if: failure()` escalation step, and the
+      # omission is the point rather than an oversight. Everything this job can
+      # fail at is a dispatch that another path re-derives within hours: the
+      # scheduled orchestrator, the merge sweep, and any later event all wake the
+      # loop on their own. Adding an escalation would mean a checkout and an
+      # issue for a failure that heals itself — and every workflow that escalates
+      # for a self-healing failure teaches the reader to skim past the ones that
+      # don't.
+      #
+      # `--ref` for the reason genesis-merge.yml spells out at its own dispatch:
+      # without it `gh workflow run` resolves the default branch over the API
+      # first, and on MaKlaude that lookup is what failed and took the dispatch
+      # with it. `main` is right by construction — genesis renames the branch
+      # before the first push (publish_to_github in github.py). This dispatch is
+      # the one that had been left behind when the merge runner was fixed.
+      - run: gh workflow run genesis-orchestrator.yml --ref main
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}

@@ -69,6 +69,7 @@ SEED_WORKFLOWS = [
     "genesis-events.yml",
     "genesis-evolver.yml",
     "genesis-merge.yml",
+    "genesis-ci-failure.yml",
     "genesis-push-trigger.yml",
 ]
 
@@ -80,6 +81,7 @@ SEED_SCRIPTS = [
     "claude-dir-guard.sh",
     "tag-milestone.sh",
     "pre-session.sh",
+    "escalate.sh",
 ]
 
 # The dev repo's `.gitignore`, carried in the template tree WITHOUT the leading
@@ -116,6 +118,14 @@ WORKFLOW_TURN_CLASSES = {
     "genesis-orchestrator.yml": "orchestrator",
     "genesis-events.yml": "orchestrator",
     "genesis-evolver.yml": "orchestrator",
+    # Triage looks narrow — one failing check, one procedure — and isn't. It runs
+    # the same agent definition as the two above, and reading a failing run's log
+    # and fixing the defect is open-ended in exactly the way a fixed procedure
+    # isn't. It's also the run most likely to hit the floor: it starts with a
+    # problem already in progress. `genesis-ci-failure.yml` exists because a
+    # triage session died at max-turns; classifying it narrow would rebuild the
+    # trap it was written to remove.
+    "genesis-ci-failure.yml": "orchestrator",
 }
 
 # Minimum turns for an orchestrator-class workflow. Two separate dev-system

@@ -1,8 +1,18 @@
 name: Genesis Orchestrator (Events)
 
 on:
+  # No `labeled`, and its absence is load-bearing. The bot labels constantly —
+  # `issues.sh claim` writes `in-progress`, `next` claims in the same call, the
+  # escalation net applies two labels to the issue it files — and
+  # `gh issue create --label` fires `opened` AND `labeled` for one issue, which
+  # is what raced two 40-turn agents on genesis issue #37. The bot-actor guard
+  # below catches each of those runs, but only after GitHub has queued it into
+  # the shared concurrency group, where a single pending slot means a no-op run
+  # can evict one that has real work (the shape measured in
+  # genesis-ci-failure.yml, where it cost 157 runs' worth of triage). A human's
+  # meaningful actions all arrive through the types that remain.
   issues:
-    types: [opened, closed, reopened, labeled]
+    types: [opened, closed, reopened]
   pull_request:
     types: [opened, closed, synchronize]
   issue_comment:
@@ -116,3 +126,17 @@ jobs:
           # review the diff, merge, close), and subagents spend from this same
           # budget. Enforced at >= 30 by tests/e2e/test_workflows.py.
           claude_args: "--max-turns 40 --allowedTools Read,Write,Edit,Bash,Glob,Grep,Agent"
+
+      # Reasoning in escalate.sh. What's specific to this workflow is that the
+      # trigger is unrepeatable: a scheduled run that dies can be re-derived from
+      # repository state six hours later, but the event that woke this one — a
+      # person's comment, an approval close — exists only in the run that
+      # received it. A failure here loses the signal, not just the turn.
+      - name: Escalate to a human if this run failed
+        if: failure()
+        run: bash .genesis/scripts/escalate.sh
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          WF_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

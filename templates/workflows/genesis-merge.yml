@@ -39,10 +39,11 @@ on:
   # green — can force a sweep instead of waiting up to an hour for the cron.
   workflow_dispatch: {}
 
-# Every call below authenticates as the GitHub App, so the default GITHUB_TOKEN
-# needs no scopes at all. The App identity is load-bearing beyond least
-# privilege: pushes made with GITHUB_TOKEN don't start new workflow runs, so a
-# merge performed with it would land on main and trigger nothing downstream.
+# Every call below authenticates as the GitHub App — the checkout included — so
+# the default GITHUB_TOKEN needs no scopes at all. The App identity is
+# load-bearing beyond least privilege: pushes made with GITHUB_TOKEN don't start
+# new workflow runs, so a merge performed with it would land on main and trigger
+# nothing downstream.
 permissions: {}
 
 # Its own group, and specifically NOT the shared
@@ -67,8 +68,6 @@ jobs:
     # that went green ten minutes ago. It's also what lets one job body serve
     # all three triggers without branching on `github.event_name`.
     steps:
-      # No checkout: no step here reads a file from the repo, and a checkout is
-      # pure latency on a job billed by the started minute.
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
@@ -79,13 +78,32 @@ jobs:
           private-key: ${{ secrets.GENESIS_APP_PRIVATE_KEY }}
           permission-contents: write # the squash commit, and --delete-branch
           permission-pull-requests: write # merging the pull request itself
-          permission-issues: write # the merge closes linked task issues
+          permission-issues: write # linked task issues, and the escalation below
           # `gh workflow run` needs actions: write, and this line is most of
           # issue #28. The token used to ask for `permission-workflows: write`,
           # which governs *editing workflow files* and has nothing to do with
           # dispatching runs, so every re-trigger below 403'd and the loop went
           # quiet after each otherwise-successful merge.
           permission-actions: write
+
+      # This job had no checkout for most of its life, on the grounds that no
+      # step read a file from the repo and a checkout is pure latency on a job
+      # billed by the started minute. The escalation step at the bottom reads
+      # `.genesis/scripts/escalate.sh`, so that stopped being true — and the
+      # alternative, inlining the escalation into each of the five workflows that
+      # need it, is how five copies of one rule drift apart. A few seconds of
+      # clone against a job GitHub already bills at a one-minute minimum buys the
+      # same script everywhere.
+      #
+      # It clones with the App token and therefore sits AFTER the step that mints
+      # one, which is load-bearing rather than tidy: `permissions: {}` above
+      # leaves the default GITHUB_TOKEN with no `contents: read`, and genesis
+      # creates dev repos private by default, so a checkout on the default token
+      # would 403 on exactly the repos that matter. Minting first keeps the empty
+      # default-token posture instead of reopening it for one step.
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Find pull requests that satisfy every merge precondition
         id: candidates
@@ -141,8 +159,8 @@ jobs:
       # `bash .genesis/scripts/issues.sh unanswered-comments` prints one
       # `#<number>  unanswered <age> — @who on PR "title"` line per thread whose
       # newest comment is a person's. A gate here drops those numbers from the
-      # list. It needs an `actions/checkout` step, which this job deliberately
-      # doesn't have yet — nothing else here reads a file from the repo.
+      # list. It needs the repo on disk, which the escalation step at the bottom
+      # already pays for — the `actions/checkout` above is there for both.
       #
       # Keep vetoes out of the jq filter above. That filter is the merge
       # predicate shared with genesis's automerge.py and has to stay identical to
@@ -210,3 +228,18 @@ jobs:
         # genesis renames the branch before the first push (publish_to_github in
         # github.py).
         run: gh workflow run genesis-orchestrator.yml --ref main
+
+      # Reasoning in escalate.sh. Nothing above calls a model, so this step isn't
+      # here for a max-turns death — it's here because the failures this job
+      # *can* have are the systematic ones. A token that can't be minted, or an
+      # App whose permissions were narrowed, fails identically on every sweep, so
+      # an unescalated failure isn't one lost merge: it's every merge from now on,
+      # and the symptom is green pull requests piling up with nothing saying why.
+      - name: Escalate to a human if this run failed
+        if: failure()
+        run: bash .genesis/scripts/escalate.sh
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          WF_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
