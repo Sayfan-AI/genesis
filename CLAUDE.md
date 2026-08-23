@@ -213,7 +213,7 @@ disables every `genesis-*` workflow. The mode-independent carriers are the repo'
 `CLAUDE.md` and — for genesis to seed, not for the dev system to edit —
 `.claude/agents/*.md`. Put rules there.
 
-## The Drift Between `.github/workflows/` and `templates/`
+## The Drift Between Genesis and Its Templates
 
 The most productive bug in this repo's history, and it wore five hats: issues #4,
 #11, #14, #15 and #22 were all *something got fixed in `.github/workflows/` and
@@ -237,6 +237,21 @@ seeded up to that point still had the race.
 
 **When you fix something in genesis's own workflows, the question isn't whether to
 port it — it's whether there's a reason not to.**
+
+**And it runs backwards too, past workflows.** Issue #72: `templates/gitignore`
+got the `.genesis/.*` rule for issue #40, and genesis's own `.gitignore` — which
+needs it, because `genesis serve` runs against this repo and writes the same
+runtime state here — never got it. Same class, opposite direction, different pair
+of files, so neither the workflow guard nor the thorough `tests/e2e/test_gitignore.py`
+suite asked the question: every case in that file interrogated a repo the scaffold
+had just produced. `tests/e2e/test_gitignore.py` now also asks it of genesis's own
+tree, and pins the two copies of the rule to the same `GITIGNORE_PATTERN`.
+
+The generalisation worth carrying: **wherever genesis seeds something it also uses
+itself, that's a pair, and a pair drifts unless something checks it.** These are
+invisible to CI by construction — a fresh checkout has no runtime state, and a
+template is never executed in the repo that stores it — so `main` stays green
+across the whole drift. The guard has to be a test that names both halves.
 
 ## Genesis Merges Its Own Bot Pull Requests
 
