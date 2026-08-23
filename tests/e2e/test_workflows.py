@@ -601,3 +601,65 @@ def test_every_dispatch_target_is_a_workflow_that_exists_beside_it() -> None:
                     f"{workflow.name} dispatches {target}, which does not exist in "
                     f"{directory.name}/ — the dispatch would 404 at run time"
                 )
+
+
+# ---------- the drift class itself ----------
+
+
+def _own_and_template_pairs() -> list[tuple[str, str, str]]:
+    """Workflows that exist in both directories, as (name, own text, template text)."""
+    own_dir = REPO_ROOT / ".github" / "workflows"
+    template_dir = TEMPLATES_DIR / "workflows"
+    pairs = []
+    for own in sorted(own_dir.glob("*.yml")):
+        template = template_dir / own.name
+        if template.is_file():
+            pairs.append((own.name, own.read_text(), template.read_text()))
+    return pairs
+
+
+def test_a_same_named_workflow_grants_the_same_permissions_in_both_places() -> None:
+    """The single most productive bug in this repo's history, generalised.
+
+    Five separate issues — #4, #11, #14, #15, #22 — were one failure wearing five
+    hats: something got fixed in `.github/workflows/` and never reached
+    `templates/workflows/`. `permission-actions: read` went that way. So did the
+    concurrency group, and the `checkout` pin before PR #52 added a version guard.
+    Nobody was careless; the two directories simply have no relationship a reader
+    or a reviewer can see, so the copy is remembered or it isn't.
+
+    Where genesis runs a workflow of the same name as one it seeds, it's running
+    the same agent against the same board, so the token it mints for itself and
+    the token it mints for a dev system have no business differing. Genesis-only
+    workflows (`ci.yml`) and template-only ones (the orchestrator, which genesis
+    doesn't have) are simply absent from the pairing and unaffected.
+    """
+    permission_re = re.compile(r"^\s*(permission-[a-z-]+):\s*(\w+)", re.M)
+    pairs = _own_and_template_pairs()
+    assert pairs, "no workflow is shared between the two directories; has one moved?"
+
+    for name, own, template in pairs:
+        assert dict(permission_re.findall(own)) == dict(permission_re.findall(template)), (
+            f"{name} mints a different token for genesis than for a dev system. "
+            "Dependabot and reviewers see .github/workflows/; nothing points at "
+            "templates/workflows/, so the copy across is the step that gets missed."
+        )
+
+
+def test_a_same_named_workflow_serializes_in_both_places() -> None:
+    """Same drift, different key. A concurrency group present in one directory and
+    absent in the other is how a race gets fixed for genesis and left shipping to
+    every repo genesis seeds.
+
+    The group *names* are allowed to differ — they're scoped per repository — but
+    whether a workflow serializes at all is not a property that should depend on
+    which directory you read.
+    """
+    for name, own, template in _own_and_template_pairs():
+        own_has = "\nconcurrency:" in own
+        template_has = "\nconcurrency:" in template
+        assert own_has == template_has, (
+            f"{name} declares a concurrency group in "
+            f"{'.github/workflows' if own_has else 'templates/workflows'} but not the "
+            "other; a race fixed in one place is still shipping from the other"
+        )

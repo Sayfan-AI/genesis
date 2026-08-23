@@ -175,6 +175,31 @@ disables every `genesis-*` workflow. The mode-independent carriers are the repo'
 `CLAUDE.md` and — for genesis to seed, not for the dev system to edit —
 `.claude/agents/*.md`. Put rules there.
 
+## The Drift Between `.github/workflows/` and `templates/`
+
+The most productive bug in this repo's history, and it wore five hats: issues #4,
+#11, #14, #15 and #22 were all *something got fixed in `.github/workflows/` and
+never reached `templates/workflows/`*. `permission-actions: read` went that way.
+So did the concurrency group and the `checkout` pin. Nobody was careless — the two
+directories have no relationship a reader or a reviewer can see, Dependabot only
+scans one of them, and the copy across is remembered or it isn't.
+
+`tests/e2e/test_workflows.py` now checks the relationship instead of trusting it.
+For any workflow name present in **both** directories, the `permission-*` set must
+match exactly, and either both declare a concurrency group or neither does. Group
+*names* may differ; whether a workflow serializes at all may not. Genesis-only
+workflows (`ci.yml`) and template-only ones (the orchestrator) aren't paired and
+are unaffected.
+
+That guard caught a live instance on its first run: the seeded `genesis-evolver.yml`
+had no concurrency group, while genesis's own got one after two 40-turn agents
+raced on genesis issue #37. Issues #11 and #22 named the orchestrator and events
+workflows, so those got fixed and the evolver template didn't — every dev system
+seeded up to that point still had the race.
+
+**When you fix something in genesis's own workflows, the question isn't whether to
+port it — it's whether there's a reason not to.**
+
 ## Genesis Merges Its Own Bot Pull Requests
 
 `.github/workflows/genesis-merge.yml` is genesis's own copy of the template it

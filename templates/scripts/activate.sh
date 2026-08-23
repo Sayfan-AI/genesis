@@ -81,19 +81,95 @@ app_jwt() {
         | b64url)" || return 2
     printf '%s.%s' "$signing" "$sig"
 }
+# What the seeded workflows actually need, and why each one, so a failure here
+# reads as a checklist rather than a riddle. A workflow's `permission-*` input can
+# only NARROW what the installation already grants - it cannot add anything - so
+# every one of these has to be on the App itself.
+#
+# This check exists because the failure it replaces is the expensive kind: the
+# agent authors the change, commits it, and the push is rejected *mid-run*, so a
+# whole session's work and budget is spent discovering a setup problem. Measured
+# on the-gigi/butterfly for `workflows` (genesis issue #20) and again for
+# `actions` (genesis issue #14), where every `gh run list` from inside an agent
+# returned 403 and the evolver silently lost one of its main signals.
+#
+# Fails rather than warns. An adopter who has just run activate.sh believes the
+# repo is ready, and a warning scrolled past three lines ago does not survive
+# that belief.
+# Exported because the python below reads it from the environment rather than
+# taking it as an argument - a multi-line argv entry is a quoting minefield.
+export REQUIRED_APP_PERMISSIONS="
+contents:write:the agent commits and pushes its own work
+issues:write:the loop coordinates through issues
+pull_requests:write:workers open pull requests and auto-merge lands them
+workflows:write:the evolver edits .github/workflows/ files
+actions:write:auto-merge re-dispatches the orchestrator with gh workflow run
+"
+
+check_app_permissions() {
+    local body="$1" missing
+    missing="$(printf '%s' "$body" | python3 -c '
+import json, os, sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)  # unreadable body: this check is a convenience, not a gate on itself
+
+granted = payload.get("permissions") if isinstance(payload, dict) else None
+# An ABSENT permissions object teaches us nothing, and reporting "all five
+# missing" off it would block activation on a check that learned nothing. Only a
+# populated object is evidence. An installation always carries at least
+# `metadata`, so an empty one means the shape changed, not that the App has no
+# grants.
+if not isinstance(granted, dict) or not granted:
+    sys.exit(0)
+
+for line in os.environ["REQUIRED_APP_PERMISSIONS"].strip().splitlines():
+    name, level, why = line.split(":", 2)
+    have = granted.get(name)
+    # write satisfies a read requirement; nothing satisfies a missing one.
+    if have == "write" or (level == "read" and have == "read"):
+        continue
+    print("  %-15s need %-5s have %-7s - %s" % (name, level, have or "nothing", why))
+' 2>/dev/null)" || return 0
+
+    if [ -n "$missing" ]; then
+        echo "ERROR: the genesis App is installed on $REPO but is missing permissions:" >&2
+        echo "$missing" >&2
+        echo "" >&2
+        echo "Add them to the App (Settings -> Developer settings -> GitHub Apps ->" >&2
+        echo "your genesis App -> Permissions), then ACCEPT the permission update on" >&2
+        echo "the installation - a granted permission does nothing until the install" >&2
+        echo "is updated. Then re-run this script." >&2
+        echo "" >&2
+        echo "A workflow's permission-* input can only narrow what the App grants, so" >&2
+        echo "this cannot be fixed in YAML. Without it the failure surfaces mid-run:" >&2
+        echo "the agent does the work, then the push or the API call is refused." >&2
+        exit 1
+    fi
+    echo "App permissions look right."
+}
+
 verify_app_installed() {
     if ! command -v openssl >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
         echo "WARNING: openssl/curl not found; skipping App-install check." >&2
         return 0
     fi
-    local jwt code
+    local jwt code body tmp
     jwt="$(app_jwt)" || { echo "WARNING: couldn't mint App JWT; skipping App-install check." >&2; return 0; }
-    code="$(curl -s -o /dev/null -w '%{http_code}' \
+    # Keep the body. It carries a `permissions` object, and throwing it away is
+    # what made a missing grant a mid-run failure instead of a setup one - see
+    # check_app_permissions below.
+    tmp="$(mktemp)"
+    code="$(curl -s -o "$tmp" -w '%{http_code}' \
         -H "Authorization: Bearer $jwt" \
         -H "Accept: application/vnd.github+json" \
         "https://api.github.com/repos/$REPO/installation")"
+    body="$(cat "$tmp")"; rm -f "$tmp"
     case "$code" in
-        200) echo "Genesis App is installed on $REPO." ;;
+        200) echo "Genesis App is installed on $REPO."
+             check_app_permissions "$body" ;;
         404) echo "ERROR: the genesis GitHub App is not installed on $REPO." >&2
              echo "Install it on the repo's org/account, then re-run." >&2
              exit 1 ;;

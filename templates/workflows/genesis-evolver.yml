@@ -6,6 +6,24 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch: {}
 
+# One evolver at a time. Its own group, not the orchestrator's: the evolver is a
+# different agent doing different work, and sharing a group means whichever run
+# gets there second is cancelled rather than queued.
+#
+# Found by the parity test rather than by an incident here, which is the point of
+# that test. Genesis's own evolver got a group after `gh issue create --label`
+# fired both an `opened` and a `labeled` event and started two 40-turn agents on
+# genesis issue #37, racing to open competing pull requests. The template never
+# did, because no issue was ever filed naming the seeded copy - issues #11 and #22
+# named the orchestrator and the events workflow, and those got fixed. Every dev
+# system genesis has seeded still has that race.
+#
+# `cancel-in-progress: false` for the same reason as the orchestrator's: a queued
+# run may carry the only copy of a signal, and dropping it drops the signal.
+concurrency:
+  group: genesis-evolver-${{ github.repository }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   issues: write
