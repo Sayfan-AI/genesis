@@ -9,7 +9,7 @@ string too. So these tests look for the thing that makes each rule work — the
 `issues.sh next` actually filters on, the `mergedAt` that separates merged from
 closed — and cross-check the two files that have to agree about it.
 
-Covers genesis issues #8, #10 and #30.
+Covers genesis issues #8, #10, #30 and #33 (the onboarding half, MaKlaude issue #3).
 """
 
 import re
@@ -259,4 +259,76 @@ class TestOnboardingDoesNotPreCommitAnArchitecture:
         actual = len([ln for ln in section.splitlines() if ln.startswith("- ") and "?" in ln])
         assert NUMBER_WORDS[claimed.group(1)] == actual, (
             f"evolver.md says {claimed.group(1)} questions, CLAUDE.md asks {actual}"
+        )
+
+
+class TestOnboardingCannotClearItsOwnGate:
+    """MaKlaude issue #3 — the onboarding agent's definition walked it through
+    both of the human gates it exists to stop at.
+
+    Its numbered flow ended `7. Create GitHub issues for milestone 1 tasks` and
+    `8. Close issue #1`. Closing that issue is the human's approval of the
+    roadmap and nothing else signals it, so step 8 approved the roadmap on the
+    human's behalf and step 7 started building against it. The async run on issue
+    #1 escaped only because it followed the instructions embedded in the issue
+    rather than the ones in its own agent definition — which is the sharpest
+    thing about the bug: the two carriers disagreed, and the system happened to
+    read the correct one.
+
+    So both are checked, and structurally. A prohibition is prose an agent can
+    reason its way around; a numbered flow that ends at the gate is a shape.
+    """
+
+    GATE_CARRIERS = ("agents/human_interaction.md", "onboarding_issue.md.j2")
+
+    @pytest.mark.parametrize("carrier", GATE_CARRIERS)
+    def test_the_close_that_approves_the_roadmap_is_the_humans(self, carrier: str) -> None:
+        """The one sentence that makes the gate a gate, in both carriers.
+
+        Without it, "label `needs:human` and stop" reads as a notification rather
+        than a handover, and an agent that later re-reads the file has no reason
+        not to close the issue it just labelled.
+        """
+        text = (TEMPLATES / carrier).read_text()
+        assert re.search(r"the human clos\w+", text, re.I), (
+            f"{carrier} never says the human's close is what approves the roadmap"
+        )
+
+    @pytest.mark.parametrize("carrier", GATE_CARRIERS)
+    def test_the_onboarding_flow_ends_at_the_gate(self, carrier: str) -> None:
+        """The regression is a step 8, whatever it is called.
+
+        Asserting on the *last* numbered step rather than searching for a
+        forbidden phrase is what makes this hold against a rewrite: any step
+        appended after the one that labels and stops fails here, including ones
+        nobody has thought of. Both files number their flow, so both get it.
+        """
+        text = (TEMPLATES / carrier).read_text()
+        steps = [ln for ln in text.splitlines() if re.match(r"^\d+\. ", ln)]
+        assert steps, f"{carrier} no longer numbers the onboarding flow"
+        assert "needs:human" in steps[-1] and "STOP" in steps[-1], (
+            f"{carrier}'s onboarding flow continues past the human gate: {steps[-1]}"
+        )
+
+    def test_the_agent_definition_forbids_both_ways_past_the_gate(self) -> None:
+        """Closing the issue and getting on with the work are separate bypasses.
+
+        An agent that only refuses to close it, and files the milestone's task
+        issues anyway, has left the gate standing and made it decorative — the
+        breakdown is already done and the human is approving a fait accompli.
+        Task breakdown belongs to the orchestrator, behind its own `Milestone 1
+        plan` gate, after this one clears.
+        """
+        rules = _section(
+            (TEMPLATES / "agents" / "human_interaction.md").read_text(),
+            "Onboarding (your first task)",
+        )
+        forbidden = [ln for ln in rules.splitlines() if re.search(r"Do \*\*NOT\*\*", ln)]
+        assert any(re.search(r"close issue #1", ln, re.I) for ln in forbidden), (
+            "nothing stops the onboarding agent closing the issue whose close is "
+            "the human's approval"
+        )
+        assert any(re.search(r"task issue", ln, re.I) for ln in forbidden), (
+            "nothing stops the onboarding agent breaking milestone 1 into task "
+            "issues before the roadmap is approved"
         )

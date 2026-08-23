@@ -65,6 +65,27 @@ jobs:
           # failing (genesis issue #14, hit on the-gigi/butterfly). Read-only.
           permission-actions: read
 
+      # Same backstop as genesis-orchestrator.yml, and needed here more, not
+      # less. This is the workflow that fires on ordinary repo activity, so it
+      # runs far more often than the six-hourly cron and strands claims at the
+      # same rate - and in Actions there is no continuation ladder to notice a
+      # run that died, so a cancelled or timed-out run releases nothing. With the
+      # sweep only on the schedule, a claim stranded here waited up to six hours
+      # for a cron tick to take it back, and `issues.sh next` skipped the issue
+      # the whole time.
+      #
+      # Safe to run on every event because both orchestrator workflows share one
+      # concurrency group: a sweep here cannot overlap a live orchestrator run,
+      # and the window it enforces (DEFAULT_CLAIM_STALE_HOURS) clears a session's
+      # own life anyway. Deterministic, so it runs before Claude and cannot be
+      # skipped by a session that ran out of turns; non-fatal, because the safety
+      # net must never stop the work it is protecting.
+      - name: Release claims nobody is working
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: bash .genesis/scripts/issues.sh sweep-claims
+
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

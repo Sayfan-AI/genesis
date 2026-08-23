@@ -37,6 +37,43 @@ def test_brain_death_resumes_while_work_lands_then_stops(plane, script, sessions
     assert sessions_run() <= server.MAX_CONTINUATIONS + 2, "chain must be bounded"
 
 
+def test_a_chain_that_lands_work_forever_is_stopped_by_the_cap_and_says_so(
+    plane, script, sessions_run, issues_script, monkeypatch
+):
+    """The one rung with no opinion in it, and the one nothing reaches.
+
+    Every session here commits, so rung 3 answers "this session changed the repo"
+    every single time: the ceiling is far away, the judge is never consulted, and
+    there is no evidence anywhere that this chain should stop. That is not a
+    contrived shape - it is what a task looping over a rename or a lint fix looks
+    like from the outside, progress by every measure the ladder has. The
+    continuation cap is the only thing left, which is exactly what it is for.
+
+    The reason it names matters as much as the count. The cap is the ladder's one
+    exit that isn't a `break`, so it carries its own `stop_reason`, and that
+    string is what the release comment tells a human who finds an issue whose
+    `in-progress` label vanished. "The session ended without finishing" - the
+    default this would fall back to - describes a different failure and would send
+    them looking for a crash that never happened.
+    """
+    monkeypatch.setenv("GENESIS_COST_CEILING", "100")
+    script([
+        {"tools": 5, "subtype": "error_max_turns", "turns": 41, "cost": 1.0, "commit": f"n{i}.txt"}
+        for i in range(server.MAX_CONTINUATIONS + 4)
+    ], judge="CONTINUE")
+
+    plane.run_orchestrator(None)
+
+    assert sessions_run() == server.MAX_CONTINUATIONS + 1, (
+        f"the cap is the only bound in play and it did not hold: ran {sessions_run()}"
+    )
+    released = [c for c in issues_script() if "|release " in c]
+    assert len(released) == 1, f"the capped chain kept its claim: {issues_script()}"
+    assert "continuation cap" in released[0], (
+        f"the release does not say which rung ended the chain: {released[0]}"
+    )
+
+
 def test_a_commit_the_session_authored_is_progress(plane, script, monkeypatch):
     """The positive control for the two negatives below.
 
