@@ -60,6 +60,46 @@ Claude-invoking workflow below its class floor, or with no `--max-turns` at all.
 When a run does die at max-turns, raise the budget for that whole *class* and
 record why; don't patch the single workflow and let the next one rediscover it.
 
+### Unanswered Human Comments
+
+Every safety net in here keys on CI state, issue/PR state, or run outcome. None
+of them keys on **a person having said something**, so a human instruction that
+lands while CI is running gets merged over, and nothing anywhere records that it
+happened. Measured on a sibling dev system (UTC): the bot announced a PR at
+06:18:37 with CI still running; the human approved at **06:29:18 attaching two
+conditions**; the PR merged on its own green checks at 06:31:43; the task issue
+closed at 06:31:44. The comment was unread for 2m25s, and two of the three things
+it asked for never shipped. Nothing failed — the merge gated on bot-author plus
+green checks, read no comment, and was correct on the evidence it had.
+
+`bash .genesis/scripts/issues.sh unanswered-comments` derives that missing state
+from the repo: threads whose newest comment is human-authored, stalest first.
+Detection needs no judgment; the design is in the four exclusions that keep it
+quiet enough to be read — a bot replied last, outside the window, the comment
+came *after* the close (a closing note), or the closer was a human. What survives
+is the one shape that matters: the human spoke and then the loop closed over
+them. `issues.sh summary` prints it every run under **Unanswered Human
+Comments**, empty meaning all-clear.
+
+**Re-run it immediately before merging a PR or closing a task issue.** A report
+only helps the *next* run, and the damage happens at merge time — a comment can
+land in the minutes between the summary you read and the merge you make. A
+comment attaching conditions to work in flight is part of that work's done
+criteria: satisfy them, or say which ones you aren't satisfying and why.
+
+That rule is for orchestrator-class sessions. A narrow-class runner is exempt **by
+its classification above**, not by a second list: "is this comment a condition?"
+is exactly the unbounded judgment its small budget exists to keep out. Two
+non-fixes rejected before this one — making the merge runner read comments (same
+sentence), and a "label your comment if it carries conditions" convention (an
+opt-in invariant isn't an invariant, and the member who forgets here is a
+*person*).
+
+The rule lives in this file and in `.claude/agents/*.md` rather than in a
+workflow prompt, for the reason the next section gives: local mode disables every
+`genesis-*` workflow, so a rule carried only by a workflow prompt reaches nobody
+there.
+
 ## Changing Your Own `.claude/`
 
 You can't, and no configuration change makes you able to. This is measured, not
