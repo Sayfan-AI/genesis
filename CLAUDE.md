@@ -76,15 +76,20 @@ in this system: no progress *and* no diagnosis, and the next run redoes the work
 
 - **Orchestrator class** — open-ended, and dispatched subagents spend from the same
   budget. **Floor: 30.** Templates seeded at 40.
-- **Narrow class** (e.g. `genesis-merge.yml`) — fixed procedure, deliberately small
-  so a run that needs more turns fails fast instead of wandering. The fix for a
-  starved narrow run is a tighter procedure, not a bigger budget.
+- **Narrow class** — fixed procedure, deliberately small so a run that needs more
+  turns fails fast instead of wandering. The fix for a starved narrow run is a
+  tighter procedure, not a bigger budget. **No template is narrow-class today.**
+  `genesis-merge.yml` was the only one until it stopped invoking Claude at all: a
+  fixed procedure with no fuzzy step in it is a script, and the strongest form of
+  "the budget is small enough" is having no budget to run out of. When a narrow
+  workflow needs a *third* tightening, ask whether it needs a model.
 
 Classes live in `WORKFLOW_TURN_CLASSES` in `src/genesis/scaffold.py`; the floor is
 enforced by `tests/e2e/test_workflows.py`, which also fails if a Claude-invoking
-template is unclassified or declares no `--max-turns` at all. Two separate dev-system
-workflows died at 20 turns three weeks apart before this floor existed — when a run
-dies at max-turns, raise the whole class and record why.
+template is unclassified, declares no `--max-turns` at all, or is still classified
+after it stopped invoking Claude. Two separate dev-system workflows died at 20 turns
+three weeks apart before this floor existed — when a run dies at max-turns, raise the
+whole class and record why.
 
 ## CI
 

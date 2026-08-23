@@ -41,6 +41,27 @@ GitHub Actions serve as the trigger layer:
 
 Each trigger launches a Claude Agent SDK session as the orchestrator.
 
+### Auto-Merge
+
+`genesis-merge.yml` squash-merges every open pull request that is bot-authored,
+not a draft, conflict-free, and green on **every** check, then dispatches the
+orchestrator so the loop continues. It's plain shell — no model, no turn budget,
+nothing to run out of. Two conventions keep it working, and both are yours to
+uphold:
+
+- **Name your CI workflow `CI`.** The merge workflow's fast path is
+  `workflow_run: workflows: ["CI"]`, which matches on a workflow's `name:`. Under
+  any other name the fast path never fires and merges wait for the hourly sweep.
+  If you must name it something else, add that name to the list.
+- **Put `Closes #<n>` in every worker pull request body.** GitHub closes the task
+  issue itself when such a pull request merges into the default branch. Nothing in
+  the merge path closes issues, so a pull request without the keyword lands work
+  and leaves its issue open. Keep the closing line bare — `Closes issue #117` is
+  not a closing keyword and GitHub silently ignores it.
+
+A pull request with no checks at all is never merged: in a repo that has CI, an
+empty check list means CI hasn't started, not that there's nothing to run.
+
 ### Turn Budgets
 
 Every workflow that invokes Claude must pass an explicit `--max-turns`, sized by
@@ -51,9 +72,11 @@ run starts over from scratch.
 - **Orchestrator class** (`genesis-orchestrator`, `genesis-events`,
   `genesis-evolver`) — open-ended work, and any subagents it dispatches spend from
   the *same* budget. **Floor: 30 turns.** Seeded at 40.
-- **Narrow class** (`genesis-merge`, and anything else running a fixed procedure)
-  — kept deliberately small. If it needs more turns it is wandering, and failing
-  fast is the signal you want. The fix is a tighter procedure, not a bigger budget.
+- **Narrow class** (anything running a fixed procedure) — kept deliberately small.
+  If it needs more turns it's wandering, and failing fast is the signal you want.
+  The fix is a tighter procedure, not a bigger budget. Push that far enough and
+  you land where `genesis-merge` did: no seeded workflow is narrow-class, because
+  a procedure with no fuzzy step left in it turned out to be shell, not an agent.
 
 Enforce this with a test, not a convention — a CI check that fails on any
 Claude-invoking workflow below its class floor, or with no `--max-turns` at all.

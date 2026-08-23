@@ -68,6 +68,7 @@ SEED_WORKFLOWS = [
     "genesis-orchestrator.yml",
     "genesis-events.yml",
     "genesis-evolver.yml",
+    "genesis-merge.yml",
     "genesis-push-trigger.yml",
 ]
 
@@ -88,12 +89,21 @@ SEED_SCRIPTS = [
 # turns fails fast instead of wandering.
 #
 # Every Claude-invoking template must be classified here and must declare an
-# explicit `--max-turns`. Enforced by tests/e2e/test_workflows.py.
+# explicit `--max-turns`. Enforced by tests/e2e/test_workflows.py, which also
+# fails if a template listed here stopped invoking Claude - a stale entry is how
+# a budget rule outlives the thing it governed.
+#
+# The narrow bucket is currently empty, and that is the interesting part.
+# `genesis-merge.yml` was its only member until the merge rule turned out not to
+# need a model at all; rewriting it as shell steps is what *deterministic over
+# agentic* looks like when you follow it to the end, and the reward is a step
+# that can't die at `error_max_turns` in the first place. The class stays
+# documented because the next fixed-procedure agent still needs a small budget
+# and a reason for it.
 WORKFLOW_TURN_CLASSES = {
     "genesis-orchestrator.yml": "orchestrator",
     "genesis-events.yml": "orchestrator",
     "genesis-evolver.yml": "orchestrator",
-    "genesis-merge.yml": "narrow",
 }
 
 # Minimum turns for an orchestrator-class workflow. Two separate dev-system
