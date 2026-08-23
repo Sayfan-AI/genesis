@@ -156,6 +156,12 @@ It has to be a state-derived sweep rather than an event handler, for two reasons
 
 Deterministic on purpose: the merge rule is a predicate, not a judgement, and a merge step that cannot exhaust a turn budget is one less way for the loop to stall. `mergeStateStatus == CLEAN` is deliberately *not* trusted on its own, because GitHub reports CLEAN when no branch protection requires the failing check. Disable with `GENESIS_AUTO_MERGE=off`.
 
+**Merging in GitHub Actions mode.** `genesis-merge.yml` runs the same predicate as shell steps, for the same reasons — it started as a `claude-code-action` prompt and the failures were all budget-shaped rather than judgement-shaped. On MaKlaude the run hit max-turns after merging and dropped the orchestrator re-dispatch, which was the prompt's last line, so the loop went quiet after every *successful* merge. Three fixes travel together: the re-dispatch is its own `if: always()` step, the App token asks for `actions: write` (`workflows: write` governs editing workflow files, not dispatching runs) and passes `--ref main` so `gh workflow run` skips the default-branch lookup that failed, and auto-merge holds its own concurrency group so an orchestrator run can't cancel a merge that a green pull request just earned.
+
+Its triggers are layered because none of them is sufficient alone. `workflow_run` on a workflow named `CI` is the low-latency path but is dead in a fresh repo that has no CI workflow yet; an hourly `schedule` is the state-derived safety net that works on day one; `workflow_dispatch` is the manual override. The hour is a cost decision — a private repo bills each job at a one-minute minimum, so a sweep every fifteen minutes would spend more than the whole free-tier allowance finding nothing.
+
+The Python and the jq encode one rule in two languages and can't share code, so `tests/e2e/test_workflows.py` executes both against the same fixtures and fails when they disagree.
+
 **Scope of the workflow disable:** only genesis-owned workflows (`genesis-*.yml`) are disabled, so CI and other gates keep running. Disabling everything broke the merge agent, whose precondition is "all CI checks passing" — a disabled workflow can never report that. Pass `--all-workflows` for the old behaviour.
 
 **Sandboxing:** The orchestrator session can run with Claude Code's built-in sandboxing. For stronger isolation, the user can run `genesis serve` inside Docker.

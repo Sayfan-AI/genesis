@@ -1,8 +1,15 @@
 """Local equivalent of the `genesis-merge.yml` workflow.
 
-In GitHub Actions, a pull request going green triggers `workflow_run` and a merge
-agent decides whether to land it. Local mode had no counterpart, so a green pull
-request waited for a human. Two things conspired:
+KEEP IN SYNC with `templates/workflows/genesis-merge.yml`, which runs the same
+predicate as a jq filter on a GitHub Actions runner. The two can't share code -
+this is Python inside the genesis package on an operator's laptop, that is jq in
+a scaffolded repo with no dependency on genesis - so `tests/e2e/test_workflows.py`
+runs both against the same fixtures and fails if they ever disagree. Change the
+rule here, change it there.
+
+In GitHub Actions, a pull request going green triggers `workflow_run` and the
+merge workflow lands it. Local mode had no counterpart, so a green pull request
+waited for a human. Two things conspired:
 
 - `serve` disables `genesis-merge.yml`, since the whole point of local mode is
   that GHA is not driving.
@@ -27,8 +34,8 @@ import json
 import os
 import subprocess
 
-# Matches the merge agent's own rule in genesis-merge.yml: the dev system lands
-# its own work, and a human's pull request stays a human's decision.
+# Matches the `endswith("[bot]")` in genesis-merge.yml: the dev system lands its
+# own work, and a human's pull request stays a human's decision.
 BOT_SUFFIX = "[bot]"
 
 

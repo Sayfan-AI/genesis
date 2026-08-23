@@ -284,14 +284,21 @@ def test_publish_to_github_full_flow(mock_run: MagicMock, tmp_path: Path) -> Non
 def test_disable_seed_workflows_disables_only_active(
     mock_run: MagicMock, mock_sleep: MagicMock, tmp_path: Path
 ) -> None:
-    listing = json.dumps(
-        [
-            {"id": 10, "name": "orchestrator", "state": "active"},
-            {"id": 11, "name": "events", "state": "active"},
-            {"id": 12, "name": "evolver", "state": "active"},
-            {"id": 13, "name": "push", "state": "disabled_manually"},
-        ]
-    )
+    # Derived from SEED_WORKFLOWS, not hand-written. `disable_seed_workflows`
+    # polls until the listing is at least as long as the seed manifest, so a
+    # fixture that falls one workflow short stops testing the disable logic and
+    # starts testing the timeout loop instead. Seeding genesis-merge.yml is
+    # exactly what broke the hard-coded version.
+    seeded = [
+        {
+            "id": 10 + i,
+            "name": name.removeprefix("genesis-").removesuffix(".yml"),
+            "state": "active",
+        }
+        for i, name in enumerate(SEED_WORKFLOWS)
+    ]
+    seeded[-1]["state"] = "disabled_manually"
+    listing = json.dumps(seeded)
 
     def side_effect(args: list[str], **kwargs: object) -> MagicMock:
         result = MagicMock(returncode=0, stderr="")
@@ -306,12 +313,12 @@ def test_disable_seed_workflows_disables_only_active(
 
     disabled = disable_seed_workflows(tmp_path)
 
-    # The already-disabled one is left alone; the three active ones get disabled.
-    assert disabled == ["orchestrator", "events", "evolver"]
+    # The already-disabled one is left alone; every active one gets disabled.
+    assert disabled == [wf["name"] for wf in seeded[:-1]]
     disable_ids = [
         c[0][0][c[0][0].index("disable") + 1]
         for c in mock_run.call_args_list
         if "workflow" in c[0][0] and "disable" in c[0][0]
     ]
-    assert disable_ids == ["10", "11", "12"]
+    assert disable_ids == [str(wf["id"]) for wf in seeded[:-1]]
     mock_sleep.assert_not_called()  # listing was complete on first poll
