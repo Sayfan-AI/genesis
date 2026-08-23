@@ -144,6 +144,22 @@ disables every `genesis-*` workflow. The mode-independent carriers are the repo'
 `CLAUDE.md` and — for genesis to seed, not for the dev system to edit —
 `.claude/agents/*.md`. Put rules there.
 
+## GitHub App Token Input
+
+Every token step uses `client-id: ${{ secrets.GENESIS_APP_ID }}`, which reads odd on
+purpose. `app-id` is deprecated — every run printed `Input 'app-id' has been deprecated
+with message: Use 'client-id' instead` — and a deprecated input is one that eventually
+stops existing, which this loop can't ask a human to fix on its own auth path.
+
+The **secret is unchanged and still holds the numeric App ID.** No adopter action, no
+new secret, and no breakage on repos scaffolded before the rename. `create-github-app-token`
+resolves `core.getInput("client-id") || core.getInput("app-id")` into one `appId` passed
+to `createAppAuth`, so the value's journey is identical; only the input it arrives
+through differs, and GitHub accepts either an App ID or a Client ID there. Renaming the
+secret too would have cost every existing dev repo a manual step for nothing.
+
+`tests/e2e/test_workflows.py` fails any template that goes back to `app-id`.
+
 ## Self-Improvement
 
 This project opts in to self-improvement. Update this CLAUDE.md and project workflows as the design evolves. Keep `docs/` as the living design documents.
