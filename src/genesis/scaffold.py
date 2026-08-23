@@ -78,6 +78,7 @@ SEED_SCRIPTS = [
     "activate.sh",
     "host-guard.sh",
     "claude-dir-guard.sh",
+    "tag-milestone.sh",
 ]
 
 # The dev repo's `.gitignore`, carried in the template tree WITHOUT the leading

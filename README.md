@@ -40,7 +40,7 @@ Dev System (takes over from here):
 
 Genesis uses **one GitHub App per user/org, shared by every project you bootstrap** - so this happens once, not per project, and your credentials live in a single central place.
 
-1. **Create your genesis GitHub App** (once). Permissions: Contents R/W, Issues R/W, Pull requests R/W, Workflows R/W, Metadata R; webhook disabled. Install it on the orgs/accounts you want genesis to manage, and generate a private key (downloads a `.pem`). Full walkthrough: [docs/bootstrapping-sessions/001-repo-guardian.md](docs/bootstrapping-sessions/001-repo-guardian.md).
+1. **Create your genesis GitHub App** (once). Permissions: Contents R/W, Issues R/W, Pull requests R/W, Workflows R/W, Actions R/W, Metadata R; webhook disabled. (Actions R/W is what lets a merge re-dispatch the orchestrator and lets an agent read failed runs; Workflows R/W is a different permission and doesn't cover it.) **Pages R/W is optional** — add it only if a project needs to manage Pages settings; publishing to Pages works off the built-in `GITHUB_TOKEN` without it. Install it on the orgs/accounts you want genesis to manage, and generate a private key (downloads a `.pem`). Full walkthrough: [docs/bootstrapping-sessions/001-repo-guardian.md](docs/bootstrapping-sessions/001-repo-guardian.md).
 
 2. **Populate `~/.config/genesis/.env`.** Genesis writes this file with placeholders the first time you bootstrap a project (and never overwrites an existing one). Fill in the three values - they're shared across all your projects:
 
