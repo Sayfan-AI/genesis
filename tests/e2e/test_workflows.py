@@ -1019,3 +1019,85 @@ def test_every_script_a_workflow_runs_is_seeded_and_git_tracked() -> None:
         "not track it. A fresh clone then scaffolds a repo whose workflows call a "
         "missing file. Run `git add templates/scripts/<name>`."
     )
+
+
+# ---------- the branch ruleset's half of a coupling nothing else sees ----------
+
+# The status check `main`'s branch ruleset requires before anything can merge.
+# GitHub names a check run after the job's `name:` if it has one and after the
+# job KEY otherwise, so this string has to match a job key in ci.yml exactly.
+#
+# Nothing connects the two. The ruleset lives in GitHub's settings, not in this
+# repo, so a rename here is a perfectly reasonable-looking refactor that passes
+# review, passes CI, and then blocks every future pull request forever on a check
+# that will never report — with no error naming the cause. That's the same
+# invisible-coupling shape as the two workflow directories, and the same answer:
+# check the relationship instead of trusting it.
+#
+# Ruleset: "main: CI must pass" (id 21219925) on Sayfan-AI/genesis. Read what is
+# actually enforced with:
+#   gh api repos/Sayfan-AI/genesis/rules/branches/main \
+#     --jq '.[] | select(.type=="required_status_checks")
+#           | .parameters.required_status_checks[] | .context'
+REQUIRED_CHECK_CONTEXT = "test"
+
+
+def _ci_jobs() -> dict[str, str]:
+    """Job key -> its `name:` override, or "" when it has none.
+
+    Parsed by hand rather than with a YAML library because the suite has no YAML
+    dependency and CI installs from the lockfile — adding one to read a
+    four-line block would cost every contributor a re-lock.
+    """
+    content = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    body = content.split("\njobs:\n", 1)
+    assert len(body) == 2, "ci.yml has no jobs block"
+
+    jobs: dict[str, str] = {}
+    current = None
+    for line in body[1].splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        key = re.match(r"^  ([A-Za-z_][\w-]*):\s*$", line)
+        if key:
+            current = key.group(1)
+            jobs[current] = ""
+            continue
+        override = re.match(r"^    name:\s*(.+?)\s*$", line)
+        if override and current:
+            jobs[current] = override.group(1).strip("\"'")
+    return jobs
+
+
+def test_the_ci_job_is_named_what_the_branch_ruleset_requires() -> None:
+    """Rename the job and every pull request blocks forever, silently."""
+    jobs = _ci_jobs()
+    assert REQUIRED_CHECK_CONTEXT in jobs, (
+        f"ci.yml has no job named `{REQUIRED_CHECK_CONTEXT}` (found {sorted(jobs)}). "
+        "main's branch ruleset requires a status check by that exact name, so "
+        "every pull request would now wait forever on a check that never reports. "
+        "Rename the job back, or update the ruleset to match and change "
+        "REQUIRED_CHECK_CONTEXT here."
+    )
+    assert jobs[REQUIRED_CHECK_CONTEXT] in ("", REQUIRED_CHECK_CONTEXT), (
+        f"the `{REQUIRED_CHECK_CONTEXT}` job carries `name: "
+        f"{jobs[REQUIRED_CHECK_CONTEXT]}`, and GitHub names the check run after "
+        "that override, not after the job key — so the required check would "
+        "never report under the name the ruleset is looking for"
+    )
+
+
+def test_ci_has_exactly_one_job_because_only_one_is_required() -> None:
+    """A second job would run, and its failure would not block a merge.
+
+    Only `test` is a required context, so any job added beside it is advisory —
+    green-looking protection that gates nothing, which is worse than knowing you
+    have none. This test failing is the reminder to add the new job to the
+    ruleset; it isn't a rule against having two.
+    """
+    jobs = _ci_jobs()
+    assert set(jobs) == {REQUIRED_CHECK_CONTEXT}, (
+        f"ci.yml declares {sorted(jobs)}, but main's ruleset only requires "
+        f"`{REQUIRED_CHECK_CONTEXT}`. The extra job's failures would not block a "
+        "merge. Add it to the ruleset's required contexts, then list it here."
+    )

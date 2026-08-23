@@ -138,6 +138,44 @@ Two properties keep it usable, both asserted by `tests/e2e/test_workflows.py`:
   `[[tool.uv.index]]` pin in `pyproject.toml`, not a flag on the run command. A
   `git diff --exit-code uv.lock` step catches a regression in any of this.
 
+### The branch ruleset
+
+`ci.yml` is a **required status check on `main`**, enforced by the repository
+ruleset "main: CI must pass" (id `21219925`). Before it, the guards in this suite
+could be merged past red — a job that exists and creates the impression of a gate
+without being one.
+
+What it requires, and the two settings that are load-bearing:
+
+- **Context `test`**, which is the *job* name in `ci.yml`, not the workflow name.
+  There are two check runs on a commit here — `test` from `ci.yml` and `merge`
+  from `genesis-merge.yml` via `workflow_run` — and requiring `merge` would
+  deadlock every pull request, since it never runs on `pull_request` and would
+  have to pass before the merge that produces it.
+- **`strict_required_status_checks_policy: false`.** Requiring branches to be up
+  to date would mean every merge invalidates every other open pull request, and
+  nothing in this system rebases, so the auto-merge loop would stall on a queue
+  only a human could unstick.
+- **No `pull_request` rule**, so no approval requirement — a bot pull request has
+  no reviewer, and requiring one deadlocks the loop.
+- The Genesis App has **no bypass**, on purpose. It only merges pull requests
+  where every check concluded `SUCCESS`, so it satisfies the rule on its own;
+  a bypass would let auto-merge land red work.
+
+The ruleset targets `~DEFAULT_BRANCH` only, so agent pushes to feature branches
+are unaffected.
+
+`tests/e2e/test_workflows.py` holds up this repo's half of the coupling: the job
+must stay named `test`, must not carry a `name:` override that changes the check
+run's name, and must stay the only job — a second one would run without being
+required, which gates nothing. Read what's actually enforced with:
+
+```
+gh api repos/Sayfan-AI/genesis/rules/branches/main \
+  --jq '.[] | select(.type=="required_status_checks")
+        | .parameters.required_status_checks[] | .context'
+```
+
 The suite must stay hermetic: no network, no ambient config. `tests/conftest.py` sets
 `GIT_AUTHOR_*`/`GIT_COMMITTER_*` because the scaffolding tests end in a real `git
 commit`, which aborts on a runner with no global identity. If a new test needs
