@@ -24,14 +24,41 @@ These are the principles this dev system operates by. Evolve them as the project
 - **Deterministic over agentic** — if a task is well-understood and doesn't need LLM judgment, build a deterministic tool (script, CLI, CI step). Reserve LLMs for fuzzy reasoning.
 - **Incremental planning** — only detail the current milestone. Future milestones stay high-level until they're next.
 
-## Agent Roster
+## Agents
 
-- **Onboarding** — refines goal with human, produces milestones (runs once at project start)
-- **Project manager** — owns roadmap, tracks progress, drills down current milestone into tasks
-- **Human interaction** — all comms with user (reports, escalations, access requests). Speaks A2H protocol.
-- **Evolver** — evolves the dev system itself (new agents, tools, skills, memory design, CLAUDE.md refinement). Escalates framework-level improvements to genesis.
-- **Health / self-review** — monitors for stuck/looping, audits quality
-- **Workers** — designed by the dev system for the specific goal
+Three agents are seeded, and they are the *loop*, not the architecture:
+
+- **orchestrator** — assesses state, plans, dispatches one unit of work per run, advances milestones
+- **human-interaction** — every exchange with the human: onboarding, escalations, progress reports
+- **evolver** — evolves this system: scripts, workflows, agent definitions, this file
+
+That is the entire roster, deliberately. **Nothing here says what agents the
+*project* needs** — no worker roles, no coordinator, no reviewer, no health
+agent. Those are architecture, and architecture is emergent here: a role gets
+added when this repo's own run history shows a pattern that needs one, and the
+evolver adds it with that evidence attached.
+
+This section used to list three more roles than the repo actually shipped, which
+is what a pre-committed roster costs. A named role gets built because it was
+named, the orchestrator starts routing to it, and the routing outlives whatever
+reason there was for the name. The same failure shows up one step earlier, at
+onboarding: on a sibling dev system the onboarding agent's design question
+*defaulted* to a fixed multi-agent shape — a coordinator delegating to two named
+roles — before the project had a line of code, off a goal that had named that
+shape as inspiration rather than as a requirement. A human caught that one.
+
+So before adding an agent, answer these in the issue that proposes it:
+
+- **What can't the system do today?** State the missing capability, not the role.
+- **How would you know it worked?** A done criterion the next run can check.
+- **Why an agent rather than a script, a skill, or a paragraph in this file?**
+  Deterministic over agentic — a role is the most expensive answer on that list
+  and by far the hardest to withdraw.
+- **What does it own that nothing else owns?** Two agents with overlapping
+  ownership means every run has to decide which one acts, and that decision
+  lives in no file.
+
+A proposal that can't answer them is a name, not a capability.
 
 ## Execution Model
 

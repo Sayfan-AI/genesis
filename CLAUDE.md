@@ -26,16 +26,22 @@ Genesis is a CLI/agent that:
 3. Opens issue #1 (onboarding) with the user's goal
 4. The dev system's onboarding agent takes over from there
 
-### Seed Agent Roster
+### Seed Agents
 
-These are seeded as starting patterns. The dev system evolves them:
+`SEED_AGENTS` in `src/genesis/scaffold.py` — three, and they're the loop rather
+than the project's architecture:
 
-- **Onboarding** — refines goal with human, produces milestones
-- **Project manager** — owns roadmap, tracks progress, drills down current milestone into tasks
-- **Human interaction** — comms with user (reports, escalations, access requests)
-- **Evolver** — evolves the dev system itself (new agents, tools, skills, memory design). Escalates framework-level improvements to genesis.
-- **Health / self-review** — monitors for stuck/looping, audits quality
-- **Workers** — designed by the dev system for the specific goal
+- **orchestrator** — assesses state, plans, dispatches one unit of work per run
+- **human-interaction** — all comms with the user (onboarding, escalations, reports)
+- **evolver** — evolves the dev system itself, and escalates framework-level findings back here
+
+Genesis seeds no worker roles, no coordinator, no project-manager or health
+agent. Those are the dev system's architecture to discover, and its evolver
+introduces them from its own run history (issue #30). This list used to name
+three roles genesis has never shipped, and a scaffolded repo's CLAUDE.md
+inherited them — a fresh system reading its own instructions was told it had a
+project manager and a health agent when it had neither. The seeded three are
+justified by being running code; the rest was a forecast.
 
 ## Development Guidelines
 
