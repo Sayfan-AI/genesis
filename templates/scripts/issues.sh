@@ -275,17 +275,47 @@ format_red_prs() {
     # invisible here while still blocking the merge forever, which is the stall
     # with no reporter. PENDING is the one legacy status state that is non-empty
     # and still means "running", so it is spelled out rather than inferred.
+    #
+    # Two more ways a pull request is unmergeable forever, neither of which
+    # involves a red check, and both of which were silent until they were added
+    # here (#33). The merge predicate refuses BOTH on purpose:
+    #
+    #   - **No checks at all.** genesis-merge.yml never merges an empty rollup,
+    #     because on a repo that has CI an empty one almost always means CI hasn't
+    #     started. That's right for a fresh pull request and wrong forever after:
+    #     a workflow that was never wired, or whose trigger doesn't match the
+    #     branch, produces a pull request nothing will ever look at again. Hence
+    #     the grace window - before it, silence is CI starting; after it, silence
+    #     is all there's ever going to be.
+    #   - **A conflicting branch.** Nothing in this system rebases, so it stays
+    #     conflicting until a person or an agent acts.
+    #
+    # Each row says which of the three it is, because the fix differs: a red check
+    # wants a look at the failure, an empty rollup wants a look at the workflow
+    # triggers, and a conflict wants a rebase.
     gh pr list --state open --limit 100 \
-        --json number,title,url,isDraft,statusCheckRollup \
+        --json number,title,url,isDraft,mergeable,createdAt,statusCheckRollup \
         --jq '
 def check_state: if (.conclusion // "") != "" then .conclusion else (.state // "") end;
 def blocking: check_state as $s
   | $s != "" and $s != "PENDING" and $s != "SUCCESS" and $s != "SKIPPED";
-.[]
+($ENV.GENESIS_PR_GRACE_HOURS // "1" | tonumber) as $grace
+| .[]
 | . as $pr
+# `try`, because one unparseable timestamp must not take the whole listing down
+# with it. Age only ever gates the no-checks branch, so falling back to 0 costs
+# at most a quiet row - a report that dies on a single odd value costs all of them.
+| (try ((now - ($pr.createdAt | fromdateiso8601)) / 3600) catch 0) as $age
 | [$pr.statusCheckRollup[]? | select(blocking)] as $red
-| select(($red | length) > 0)
-| "#\($pr.number) \(if $pr.isDraft then "[draft] " else "" end)\($pr.title)\n  \($pr.url)\n  red: \([$red[] | .name // .context // "check"] | join(", "))"'
+| (if ($red | length) > 0 then
+       "red: " + ([$red[] | .name // .context // "check"] | join(", "))
+   elif ($pr.statusCheckRollup | length) == 0 and $age >= $grace then
+       "no checks have reported in \($age | floor)h - nothing will ever merge this"
+   elif $pr.mergeable == "CONFLICTING" then
+       "conflicts with the base branch"
+   else null end) as $why
+| select($why != null)
+| "#\($pr.number) \(if $pr.isDraft then "[draft] " else "" end)\($pr.title)\n  \($pr.url)\n  \($why)"'
 }
 
 release_one() {
@@ -588,7 +618,7 @@ json.dump(filtered, sys.stdout)
         # fires on one going red, so a pull request with a failing check is
         # finished work that will never land and never asks anyone for anything.
         # Empty here means nothing is stuck.
-        echo "=== Pull Requests Stalled On A Red Check (nothing will merge these) ==="
+        echo "=== Stalled Pull Requests (red, unchecked, or conflicting - nothing will merge these) ==="
         format_red_prs
         echo ""
         echo "=== Blocked ==="
@@ -907,9 +937,9 @@ Commands:
             List open issues no run can select — no milestone:N label, or
             every milestone on them already signed off — stalest first
             (empty = every open issue is reachable)
-  red-prs   List open pull requests stalled on a check that concluded as
-            anything other than a pass — the exact complement of what the
-            merge sweep will take (empty = nothing is stuck)
+  red-prs   List open pull requests the merge sweep will never take — a check
+            concluded as anything other than a pass, no check has reported at
+            all, or the branch conflicts (empty = nothing is stuck)
   blocked   List all blocked issues
   recent    List recently updated issues (default: last 24h)
   summary   Overview of project state

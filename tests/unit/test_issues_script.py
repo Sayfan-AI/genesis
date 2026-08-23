@@ -1048,7 +1048,8 @@ class TestSweepIsABackstop:
         )
 
 
-def _pr(number: int, *checks: str, draft: bool = False) -> dict:
+def _pr(number: int, *checks: str, draft: bool = False, mergeable: str = "MERGEABLE",
+        age_hours: float = 48) -> dict:
     """A pull request with a check rollup. Each check is `NAME:STATE`.
 
     A state is put in `conclusion` unless it's PENDING, which is the legacy
@@ -1067,6 +1068,16 @@ def _pr(number: int, *checks: str, draft: bool = False) -> dict:
         "title": f"pr {number}",
         "url": f"https://github.com/o/r/pull/{number}",
         "isDraft": draft,
+        "mergeable": mergeable,
+        # Old enough that the grace window has passed. The window exists so a
+        # pull request whose CI hasn't started yet doesn't read as one whose CI
+        # never will, so a fixture without an age would test the wrong thing.
+        # Whole seconds, which is what GitHub returns. jq's `fromdateiso8601`
+        # rejects fractional ones, so a fixture carrying microseconds would be
+        # testing a shape the API never produces.
+        "createdAt": (
+            datetime.now(timezone.utc) - timedelta(hours=age_hours)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "statusCheckRollup": rollup,
     }
 
@@ -1133,4 +1144,88 @@ class TestRedPullRequestsAreDerivedFromState:
         run where nothing was wrong."""
         proc, _ = run("summary", GH_PR_LIST_JSON="[]")
         assert proc.returncode == 0, proc.stderr
-        assert "Stalled On A Red Check" in proc.stdout
+        assert "=== Stalled Pull Requests" in proc.stdout
+
+
+class TestPullRequestsStarvedWithoutAnythingGoingRed:
+    """The two ways the merge sweep refuses forever without a check ever failing.
+
+    Refusing them is correct — genesis-merge.yml never merges an empty rollup,
+    because on a repo that has CI an empty one usually means CI hasn't started,
+    and it never merges a conflicting branch. Refusing them *in silence* is the
+    bug (#33): the sweep looks, declines, and looks again next hour forever, while
+    the board shows an open pull request that reads as work in flight.
+
+    Every case below carries a sentinel that must still be reported, so an empty
+    section can't pass for the exclusion working when the cause is a crash.
+    """
+
+    def test_a_pull_request_no_check_ever_reported_on_is_surfaced(self, run) -> None:
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=json.dumps([_pr(12)]))
+        assert proc.returncode == 0, proc.stderr
+        assert "#12" in proc.stdout
+        assert "no checks have reported" in proc.stdout
+
+    def test_a_fresh_pull_request_with_no_checks_yet_is_not_surfaced(self, run) -> None:
+        """Before the grace window, silence is CI starting. After it, silence is
+        all there's ever going to be."""
+        prs = json.dumps([_pr(12, age_hours=0), _pr(13, "test:FAILURE")])
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=prs)
+        assert "#12" not in proc.stdout
+        assert "#13" in proc.stdout, "the sentinel proves the listing ran at all"
+
+    def test_the_grace_window_is_configurable(self, run) -> None:
+        prs = json.dumps([_pr(12, age_hours=3)])
+        assert "#12" in run("red-prs", GH_PR_LIST_JSON=prs)[0].stdout
+        quiet = run("red-prs", GH_PR_LIST_JSON=prs, GENESIS_PR_GRACE_HOURS="24")[0]
+        assert "#12" not in quiet.stdout
+
+    def test_a_conflicting_branch_is_surfaced(self, run) -> None:
+        """Nothing in this system rebases, so it stays conflicting until someone
+        acts."""
+        prs = json.dumps([_pr(12, "test:SUCCESS", mergeable="CONFLICTING")])
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=prs)
+        assert "#12" in proc.stdout
+        assert "conflicts" in proc.stdout
+
+    def test_a_green_mergeable_pull_request_is_still_not_surfaced(self, run) -> None:
+        """Broadening the report must not turn it into a list of open pull
+        requests — that one is the merge sweep's, and it will take it."""
+        prs = json.dumps([_pr(12, "test:SUCCESS"), _pr(13, "test:FAILURE")])
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=prs)
+        assert "#12" not in proc.stdout
+        assert "#13" in proc.stdout
+
+    def test_a_still_running_check_is_not_surfaced(self, run) -> None:
+        prs = json.dumps([_pr(12, "test:PENDING"), _pr(13, "test:FAILURE")])
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=prs)
+        assert "#12" not in proc.stdout
+        assert "#13" in proc.stdout
+
+    def test_each_row_says_which_of_the_three_it_is(self, run) -> None:
+        """The fix differs by cause: a red check wants a look at the failure, an
+        empty rollup wants a look at the workflow triggers, and a conflict wants a
+        rebase. A row that only says "stalled" makes the reader open all three."""
+        prs = json.dumps([
+            _pr(11, "test:FAILURE"),
+            _pr(12),
+            _pr(13, "test:SUCCESS", mergeable="CONFLICTING"),
+        ])
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=prs)
+        assert "red: test" in proc.stdout
+        assert "no checks have reported" in proc.stdout
+        assert "conflicts" in proc.stdout
+
+    def test_one_unparseable_timestamp_does_not_take_the_listing_down(self, run) -> None:
+        """Found while building this: `fromdateiso8601` rejects fractional
+        seconds, and an unguarded call made jq abort the whole program — so a
+        single odd timestamp turned the entire report into an empty section, which
+        reads as all-clear. Age only gates the no-checks branch, so falling back
+        costs at most one quiet row.
+        """
+        bad = _pr(12, "test:FAILURE")
+        bad["createdAt"] = "2026-08-21T01:31:52.779382Z"
+        proc, _ = run("red-prs", GH_PR_LIST_JSON=json.dumps([bad, _pr(13, "test:FAILURE")]))
+        assert proc.returncode == 0, proc.stderr
+        assert "#12" in proc.stdout, "a red check must still report with an odd timestamp"
+        assert "#13" in proc.stdout, "and it must not take the rest of the listing with it"
