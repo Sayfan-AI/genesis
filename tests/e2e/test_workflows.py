@@ -190,23 +190,30 @@ def test_auto_merge_is_not_keyed_to_which_gating_workflow_finishes_last() -> Non
     trap is the sweep being derived from repository state rather than from
     whatever woke it — so any trigger at all reaches every mergeable pull
     request, and the hourly cron bounds how long a missed one waits.
+
+    Both copies, because genesis now lands its own bot pull requests (issue #39)
+    and would starve one exactly the same way. The two are allowed to differ in
+    what wakes them; neither is allowed to depend on it.
     """
-    body = "\n".join(
-        line
-        for line in MERGE_WORKFLOW.read_text().splitlines()
-        if not line.strip().startswith("#")
-    )
-    assert "schedule:" in body and "cron:" in body, (
-        "with no cron, a gating workflow missing from the workflow_run list means "
-        "a green pull request waits for a human"
-    )
-    assert "gh pr list --state open" in body, (
-        "the sweep must ask what is open, not what the triggering event was about"
-    )
-    assert "github.event_name" not in body and "github.event.workflow_run" not in body, (
-        "the job branches on which trigger woke it, so the trigger list is "
-        "load-bearing again and the next unlisted gate reintroduces the trap"
-    )
+    for workflow in (MERGE_WORKFLOW, GENESIS_MERGE):
+        body = "\n".join(
+            line
+            for line in workflow.read_text().splitlines()
+            if not line.strip().startswith("#")
+        )
+        assert "schedule:" in body and "cron:" in body, (
+            f"{workflow.name} has no cron, so a gating workflow missing from the "
+            "workflow_run list means a green pull request waits for a human"
+        )
+        assert "gh pr list --state open" in body, (
+            f"{workflow.name} must ask what is open, not what the triggering "
+            "event was about"
+        )
+        assert "github.event_name" not in body and "github.event.workflow_run" not in body, (
+            f"{workflow.name} branches on which trigger woke it, so the trigger "
+            "list is load-bearing again and the next unlisted gate reintroduces "
+            "the trap"
+        )
 
 
 def test_every_orchestrator_workflow_sweeps_claims_before_the_agent() -> None:
