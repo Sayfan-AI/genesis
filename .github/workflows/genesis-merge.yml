@@ -1,0 +1,225 @@
+name: Genesis Auto-Merge
+
+# Nothing here calls an LLM. "This pull request is bot-authored, not a draft, and
+# green on every check" is a predicate, not a judgement, and the version this
+# replaced handed the whole job — find the pull requests, merge them, close the
+# task issue, re-dispatch the orchestrator — to a claude-code-action prompt on a
+# 10-turn budget. On MaKlaude that run hit max-turns partway through and dropped
+# the re-dispatch, which happens to be the last line of the prompt and the one
+# line the loop depends on. Every merge succeeded and the dev system still went
+# quiet until a human poked it. Shell steps can't run out of turns.
+#
+# This is genesis's own copy of templates/workflows/genesis-merge.yml, and it is
+# deliberately a copy rather than a symlink or a generated file: genesis is not a
+# dev system, and the three places it differs are all places where being the
+# framework changes the answer. Each one is commented below. When the template
+# changes, decide whether the change applies here too — the test in
+# tests/e2e/test_workflows.py holds the merge *predicate* identical and lets the
+# triggers and the dispatch target differ, which is exactly the split that
+# matters.
+#
+# Why genesis has one at all (issue #39): genesis was the only repo in the family
+# that could not self-advance past a pull request. Every framework fix — the
+# turn-budget floor, the concurrency guard, ci.yml itself — sat open until a human
+# noticed. The asymmetry that made this a real question is that a dev repo
+# auto-merging its own work is contained, while genesis auto-merging a change to
+# templates/ propagates to every repo it seeds afterward. What makes it
+# acceptable is the author predicate below: only `[bot]`-authored pull requests
+# are eligible, so a human's change to templates/ still stops at a human, and the
+# bot's own work merges only behind a green ci.yml.
+
+on:
+  # Fast path: fires within seconds of CI going green. `workflow_run` matches on
+  # a workflow's `name:`, so this only does anything once the dev system owns a
+  # workflow literally named "CI" — a freshly scaffolded repo has none, which is
+  # exactly why this trigger can't be the only one. Seeded alone it's dead on
+  # arrival. Add your own workflow names to this list when you create CI under a
+  # different one.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  # Safety net, and the trigger that makes auto-merge work on day one. Same
+  # state-derived shape `genesis serve` converged on: don't wait for the right
+  # event to arrive, just look at what's open and mergeable. Hourly rather than
+  # every few minutes for two reasons — a private repo bills every job at a
+  # one-minute minimum, so a */15 sweep would spend 2,880 of the 2,000 free
+  # monthly minutes mostly finding nothing, and GitHub delays or silently drops
+  # short-interval schedules under load. Offset off the top of the hour for that
+  # same load reason.
+  schedule:
+    - cron: '23 * * * *'
+  # Escape hatch. An operator — or an agent that just watched a pull request go
+  # green — can force a sweep instead of waiting up to an hour for the cron.
+  workflow_dispatch: {}
+
+# Every call below authenticates as the GitHub App, so the default GITHUB_TOKEN
+# needs no scopes at all. The App identity is load-bearing beyond least
+# privilege: pushes made with GITHUB_TOKEN don't start new workflow runs, so a
+# merge performed with it would land on main and trigger nothing downstream.
+permissions: {}
+
+# Its own group, and specifically NOT the shared
+# `genesis-orchestrator-${{ github.repository }}` that genesis-orchestrator.yml
+# and genesis-events.yml sit in. Sharing that one on MaKlaude meant a triage run
+# already holding the group cancelled the merge run a green pull request had just
+# fired: the pull request went green, was never merged, and the milestone stalled
+# with the work finished. Merges only need to serialize against other merges — a
+# server-side squash running alongside an orchestrator session is harmless.
+# `cancel-in-progress: false` because a cancelled merge is a lost merge and the
+# next sweep is an hour out.
+concurrency:
+  group: genesis-merge-${{ github.repository }}  # NOT genesis-evolver-*, see above
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    # No `if:` on the triggering event, deliberately. The sweep derives what to
+    # do from repository state rather than from whatever woke it, so a CI run
+    # that failed on pull request A still merges the unrelated pull request B
+    # that went green ten minutes ago. It's also what lets one job body serve
+    # all three triggers without branching on `github.event_name`.
+    steps:
+      # No checkout: no step here reads a file from the repo, and a checkout is
+      # pure latency on a job billed by the started minute.
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          # `client-id`, not the deprecated `app-id`. The secret still holds the
+          # numeric App ID and needs no adopter action - see the note in genesis's
+          # own CLAUDE.md for why the rename is safe on already-scaffolded repos.
+          client-id: ${{ secrets.GENESIS_APP_ID }}
+          private-key: ${{ secrets.GENESIS_APP_PRIVATE_KEY }}
+          permission-contents: write # the squash commit, and --delete-branch
+          permission-pull-requests: write # merging the pull request itself
+          permission-issues: write # the merge closes linked task issues
+          # `gh workflow run` needs actions: write, and this line is most of
+          # issue #28. The token used to ask for `permission-workflows: write`,
+          # which governs *editing workflow files* and has nothing to do with
+          # dispatching runs, so every re-trigger below 403'd and the loop went
+          # quiet after each otherwise-successful merge.
+          permission-actions: write
+
+      - name: Find pull requests that satisfy every merge precondition
+        id: candidates
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/ready.jq <<'JQ'
+          # A check run reports `conclusion` once it finishes and an empty string
+          # while it's still going; a legacy status context reports `state`
+          # instead. Treating "" as "not concluded" is what keeps an in-progress
+          # check from reading as a pass.
+          def check_state:
+            if (.conclusion // "") != "" then .conclusion else (.state // "") end;
+
+          # Oldest first. The stalest work should land first, so a long-running
+          # pull request can't be starved by fresher ones jumping the queue.
+          sort_by(.createdAt // "")
+          | map(
+              select(.isDraft | not)
+            # The dev system lands its own work. A pull request opened by a
+            # person stays a person's decision, always.
+            | select((.author.login // "") | endswith("[bot]"))
+            | select(.mergeable == null or .mergeable == "MERGEABLE")
+            # Two deliberate strictnesses, both of which look redundant next to
+            # `mergeStateStatus == CLEAN` and aren't. GitHub reports CLEAN
+            # whenever no branch protection *requires* the check that failed, so
+            # a red pull request sails through that test. And a pull request
+            # with no checks at all is never merged: in a repo that has CI, an
+            # empty rollup almost always means CI hasn't started yet, not that
+            # there's nothing to run.
+            | select((.statusCheckRollup | length) > 0)
+            | select(all(.statusCheckRollup[];
+                         check_state == "SUCCESS" or check_state == "SKIPPED"))
+            )
+          JQ
+
+          gh pr list --state open --json number,title,isDraft,mergeable,author,statusCheckRollup,createdAt > /tmp/prs.json
+          jq -f /tmp/ready.jq /tmp/prs.json > /tmp/ready.json
+
+          jq -r '.[] | "ready: PR #\(.number) \(.title)"' /tmp/ready.json
+          echo "numbers=$(jq -r 'map(.number) | join(",")' /tmp/ready.json)" >> "$GITHUB_OUTPUT"
+
+      # ---- PRE-MERGE GATE SEAM ------------------------------------------------
+      # A veto the predicate above can't see belongs HERE: a step between
+      # `candidates` and `merge` that reads steps.candidates.outputs.numbers and
+      # writes a narrowed list of its own.
+      #
+      # The first one is genesis issue #41, "don't merge over an unaddressed
+      # human comment", and its reporting half already exists:
+      # `bash .genesis/scripts/issues.sh unanswered-comments` prints one
+      # `#<number>  unanswered <age> — @who on PR "title"` line per thread whose
+      # newest comment is a person's. A gate here drops those numbers from the
+      # list. It needs an `actions/checkout` step, which this job deliberately
+      # doesn't have yet — nothing else here reads a file from the repo.
+      #
+      # Keep vetoes out of the jq filter above. That filter is the merge
+      # predicate shared with genesis's automerge.py and has to stay identical to
+      # it; a gate is local policy layered on top, and the two have different
+      # reasons to change.
+      # -------------------------------------------------------------------------
+
+      - name: Squash-merge them
+        id: merge
+        if: steps.candidates.outputs.numbers != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          NUMBERS: ${{ steps.candidates.outputs.numbers }}
+        run: |
+          set -euo pipefail
+          merged=""
+          for n in ${NUMBERS//,/ }; do
+            if gh pr merge "$n" --squash --delete-branch; then
+              echo "merged PR #$n"
+              merged="${merged:+$merged,}$n"
+            else
+              # Not fatal, and specifically not `exit 1`. A merge can lose a race
+              # with a human, or branch protection can refuse it; the next sweep
+              # retries either way. One refusal must not cost the re-trigger that
+              # the pull requests merged alongside it earned.
+              echo "could not merge PR #$n; leaving it for the next sweep" >&2
+            fi
+          done
+          echo "merged=$merged" >> "$GITHUB_OUTPUT"
+
+      # Closing the task issue is deliberately NOT a step here. GitHub closes it
+      # server-side when a pull request whose body carries `Closes #<n>` merges
+      # into the default branch, which is free and exactly right. The agent step
+      # this workflow replaced re-derived "the corresponding task issue" by
+      # guessing from the branch and title, and a guess that closes the wrong
+      # issue is worse than no step at all. `genesis serve` leans on the same
+      # server-side behaviour, so worker agents have to write the closing
+      # keyword either way.
+
+      # DIFFERS FROM THE TEMPLATE: genesis has no orchestrator. Its loop is the
+      # evolver, which works the `needs:evolver` queue, so that is what gets
+      # woken. Same reasoning otherwise - the merge is bot-authored end to end,
+      # so nothing else notices it.
+      - name: Re-trigger the evolver
+        # `always()` so a merge step that died partway through still dispatches
+        # for the pull requests it did land. This dispatch used to be the final
+        # line of an LLM prompt, so anything that ended the run early — max-turns
+        # above all — took the entire loop down with it.
+        #
+        # Gated on something actually having merged, though: the hourly sweep
+        # usually finds nothing, and waking a 40-turn agent to re-read an
+        # unchanged repo 24 times a day is how a month of Actions minutes and
+        # model credit gets spent on no work.
+        #
+        # A dispatch is needed at all because the merge is bot-authored end to
+        # end, and genesis-evolver.yml only fires on `needs:evolver` issue and
+        # comment events, a weekly cron, and this. Without this step a green pull
+        # request merges into silence until Monday.
+        if: always() && steps.merge.outputs.merged != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        # `--ref` isn't optional. Without it `gh workflow run` first resolves the
+        # default branch over the API, and that lookup is what failed on MaKlaude,
+        # taking the dispatch down with it.
+        run: gh workflow run genesis-evolver.yml --ref main

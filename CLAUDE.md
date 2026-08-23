@@ -175,6 +175,29 @@ disables every `genesis-*` workflow. The mode-independent carriers are the repo'
 `CLAUDE.md` and — for genesis to seed, not for the dev system to edit —
 `.claude/agents/*.md`. Put rules there.
 
+## Genesis Merges Its Own Bot Pull Requests
+
+`.github/workflows/genesis-merge.yml` is genesis's own copy of the template it
+seeds, and it lands `[bot]`-authored pull requests once `ci.yml` is green
+(issue #39). Before it, genesis was the only repo in the family that couldn't
+self-advance past a pull request, and every framework fix — the turn-budget floor,
+the concurrency guard, `ci.yml` itself — sat open until a human noticed.
+
+**A human's pull request is still a human's decision.** The eligibility predicate
+requires `endswith("[bot]")` on the author, and that's what makes this acceptable
+at all: a dev repo auto-merging its own work is contained, while genesis
+auto-merging a change to `templates/` propagates to every repo it seeds
+afterwards. Bot work behind a green gate is bounded; a person's change to the
+templates isn't, and doesn't qualify.
+
+It's a copy, not a symlink, and differs from the template in exactly two places,
+both commented in the file: it dispatches `genesis-evolver.yml` rather than an
+orchestrator genesis doesn't have, and it says so. `tests/e2e/test_workflows.py`
+holds the merge *predicate* identical across the two while letting the wiring
+differ, and separately asserts that every `gh workflow run` target is a workflow
+that exists beside it — copying the template's dispatch across verbatim would have
+landed the work and then silently failed to wake anything.
+
 ## GitHub App Token Input
 
 Every token step uses `client-id: ${{ secrets.GENESIS_APP_ID }}`, which reads odd on

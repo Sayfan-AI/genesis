@@ -534,3 +534,70 @@ def test_no_workflow_uses_the_deprecated_app_id_input() -> None:
                 assert "client-id:" in body, (
                     f"{workflow.name} mints an App token with no client-id"
                 )
+
+
+# ---------- genesis's own auto-merge (#39) ----------
+
+GENESIS_MERGE = REPO_ROOT / ".github" / "workflows" / "genesis-merge.yml"
+
+
+def test_genesis_can_land_its_own_bot_pull_requests() -> None:
+    """Genesis was the only repo in the family that couldn't self-advance past a
+    pull request, so every framework fix sat open until a human noticed."""
+    assert GENESIS_MERGE.is_file(), "genesis has no auto-merge workflow of its own"
+
+
+def test_genesis_auto_merge_runs_the_same_predicate_as_the_template() -> None:
+    """The *rule* is shared; the wiring around it isn't.
+
+    Genesis's copy legitimately differs in what wakes it and what it dispatches
+    afterwards — it has an evolver, not an orchestrator. What must never drift is
+    which pull requests are eligible, because that's the same predicate
+    `automerge.py` implements and the same one every seeded repo gets. Comparing
+    the jq program rather than the whole file is what lets the intended
+    differences stay legal while the unintended one fails.
+    """
+    template = (TEMPLATES_DIR / "workflows" / "genesis-merge.yml").read_text()
+    own = GENESIS_MERGE.read_text()
+    pattern = re.compile(r"<<'JQ'\n(.*?)\n\s*JQ\n", re.S)
+    template_jq = pattern.search(template)
+    own_jq = pattern.search(own)
+    assert template_jq and own_jq, "one of the merge workflows lost its jq predicate"
+    assert template_jq.group(1) == own_jq.group(1), (
+        "genesis's auto-merge predicate has drifted from the one it seeds; the "
+        "framework must not land its own work on a looser rule than it ships"
+    )
+
+
+def test_only_bot_authored_pull_requests_are_eligible_in_genesis() -> None:
+    """The whole reason auto-merging genesis is acceptable.
+
+    A dev repo auto-merging its own work is contained; genesis auto-merging a
+    change to `templates/` propagates to every repo it seeds afterwards. The
+    author predicate is what keeps that bounded — a person's change to the
+    templates still stops at a person.
+    """
+    jq = re.search(r"<<'JQ'\n(.*?)\n\s*JQ\n", GENESIS_MERGE.read_text(), re.S).group(1)
+    assert 'endswith("[bot]")' in jq, (
+        "genesis's auto-merge would land human-authored pull requests, which is "
+        "the case the decision in issue #39 deliberately excluded"
+    )
+
+
+def test_every_dispatch_target_is_a_workflow_that_exists_beside_it() -> None:
+    """`gh workflow run` on a filename that isn't there fails at run time only.
+
+    Genesis's copy dispatches `genesis-evolver.yml` because genesis has no
+    orchestrator; copying the template's `genesis-orchestrator.yml` across would
+    have produced a merge that lands the work and then quietly fails to wake
+    anything — the same silent-stall shape the dispatch exists to prevent.
+    """
+    dispatch = re.compile(r"gh workflow run (\S+\.yml)")
+    for directory in (TEMPLATES_DIR / "workflows", REPO_ROOT / ".github" / "workflows"):
+        present = {p.name for p in directory.glob("*.yml")}
+        for workflow in sorted(directory.glob("*.yml")):
+            for target in dispatch.findall(workflow.read_text()):
+                assert target in present, (
+                    f"{workflow.name} dispatches {target}, which does not exist in "
+                    f"{directory.name}/ — the dispatch would 404 at run time"
+                )
