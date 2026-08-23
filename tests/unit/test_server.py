@@ -566,8 +566,15 @@ def _fake_sessions(plane, streams: list[list[str]]) -> list[list[str]]:
     list of argv the plane used, so tests can assert on --resume."""
     calls: list[list[str]] = []
     it = iter(streams)
+    real_popen = subprocess.Popen
 
     def fake_popen(cmd, **kwargs):
+        # Only `claude` launches are scripted. The plane also forks `issues.sh`
+        # to release claims, and `subprocess.run` builds a Popen underneath — so
+        # without this, a release would consume a session from the script and
+        # then fail as a stream that isn't there.
+        if cmd and cmd[0] != "claude":
+            return real_popen(cmd, **kwargs)
         calls.append(cmd)
         proc = MagicMock()
         proc.pid = 4242
@@ -1027,3 +1034,228 @@ def test_no_claude_invocation_bypasses_the_accumulators() -> None:
         "are accounted for (_run_session and ask_judge). A new one must add its "
         "cost to both `spent` and `run_spent`."
     )
+
+
+# ---------- releasing what a finished session claimed (#48) ----------
+#
+# `issues.sh claim` writes `in-progress` at pickup and, before this, nothing ever
+# took it back. Measured on MaKlaude issue #195: claimed 02:18, session quiet at
+# 03:17, killed by the deadline at 03:33, `session deadline reached - not
+# continuing` at 03:33:30 - clean tree, no branch, no commit, no pull request,
+# and the label still there. `next --milestone 6` skipped the issue and picked a
+# different one until a human removed the label by hand.
+
+
+@pytest.fixture
+def issues_script(tmp_path):
+    """A stand-in for the seeded `issues.sh` that records how it was called.
+
+    The plane really does fork it, so the path check, the argv and the exported
+    identity are all exercised rather than asserted against a mock's memory of
+    the call. Each line is `<GENESIS_SESSION>|<argv>`, which is what lets a test
+    check that the identity a session would have claimed under is the same one
+    the release keys on.
+    """
+    script = tmp_path / ".genesis" / "scripts" / "issues.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    record = tmp_path / "issues-calls.txt"
+    script.write_text(f'#!/bin/sh\necho "$GENESIS_SESSION|$*" >> "{record}"\n')
+
+    def calls() -> list[str]:
+        return record.read_text().splitlines() if record.exists() else []
+
+    return calls
+
+
+def _releases(calls: list[str]) -> list[str]:
+    return [c for c in calls if "|release " in c]
+
+
+def test_a_chain_the_ladder_declines_to_continue_releases_its_claims(
+    plane, issues_script
+) -> None:
+    """The measured case. The ladder stops, so whatever the chain claimed is now
+    held by nobody, and the next run must be able to select it."""
+    _fake_sessions(plane, [_session_stream("error_max_turns", tool_calls=0)])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    released = _releases(issues_script())
+    assert len(released) == 1, f"expected exactly one release, got {issues_script()}"
+    assert "--session serve-" in released[0]
+
+
+def test_the_release_says_which_rung_stopped_the_chain(plane, issues_script) -> None:
+    """The reason lands on the issue as prose. "the claim expired" would tell a
+    human nothing, and that is half of why an age-based expiry is the wrong
+    shape: it cannot explain itself."""
+    # A deadline already in the past when the ladder checks it, which is the
+    # rung that fired on MaKlaude issue #195.
+    plane.session_timeout = -1
+    _fake_sessions(plane, [_session_stream("error_max_turns")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    assert "deadline" in _releases(issues_script())[0]
+
+
+def test_a_resumed_chain_keeps_its_claim(plane, issues_script) -> None:
+    """The resumed run is still the worker.
+
+    Releasing at every session end would hand the issue to a second worker while
+    the first is mid-thought with its transcript on disk - the same two-branches-
+    one-issue collision the whole design is arranged to avoid.
+    """
+    calls = _fake_sessions(
+        plane,
+        [
+            _session_stream("error_max_turns"),
+            _session_stream("error_max_turns", tool_calls=0),
+        ],
+    )
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    assert len(calls) == 2, "the chain must actually have resumed for this to mean anything"
+    assert len(_releases(issues_script())) == 1, (
+        "the claim must survive the resume and be released once, when the chain ends"
+    )
+
+
+def test_a_chain_that_finished_keeps_its_claims(plane, issues_script) -> None:
+    """A session ending in success is not the ladder declining anything.
+
+    It may have opened a pull request and left `in-progress` on deliberately, in
+    which case the claim still describes reality. Releasing there would be the
+    expensive direction; the backstop sweep covers it if the claim really has
+    rotted.
+    """
+    _fake_sessions(plane, [_session_stream("success")])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    assert _releases(issues_script()) == []
+
+
+def test_a_session_claims_under_the_chains_identity(plane) -> None:
+    """The label carries no identity, so the plane has to supply one, and the
+    child process is the only thing that can write it onto the issue."""
+    plane.session_token = "serve-deadbeef"
+    assert plane._session_env()["GENESIS_SESSION"] == "serve-deadbeef"
+
+
+def test_each_chain_claims_under_a_fresh_identity(plane, issues_script) -> None:
+    """Per chain, not per process. A shared token would let a chain that died
+    release a claim an earlier chain finished cleanly and is still holding."""
+    for _ in range(2):
+        _fake_sessions(plane, [_session_stream("error_max_turns", tool_calls=0)])
+        try:
+            plane.run_orchestrator(None)
+        finally:
+            plane._stop_patch.stop()
+
+    tokens = {c.split("|")[0] for c in _releases(issues_script())}
+    assert len(tokens) == 2, f"chains shared a claim identity: {tokens}"
+
+
+def test_the_release_keys_on_the_identity_the_session_claimed_under(
+    plane, issues_script
+) -> None:
+    """The two halves have to be the same string, or the release matches nothing
+    and the claim sits there exactly as it did before any of this existed."""
+    _fake_sessions(plane, [_session_stream("error_max_turns", tool_calls=0)])
+    try:
+        plane.run_orchestrator(None)
+    finally:
+        plane._stop_patch.stop()
+
+    exported, argv = _releases(issues_script())[0].split("|", 1)
+    assert exported
+    assert f"--session {exported}" in argv
+
+
+def test_a_repo_without_the_issue_manager_is_not_an_error(plane, capsys) -> None:
+    """`serve` can run against a repo that never adopted `issues.sh`. There are no
+    claims to release there, which is a no-op and not a failure."""
+    plane.session_token = "serve-abc"
+    plane.release_claims("whatever")
+    assert "release" not in capsys.readouterr().out
+
+
+def test_a_failing_release_never_kills_the_plane(plane, tmp_path, capsys) -> None:
+    """Claim bookkeeping runs on the path where a session has *already* failed.
+    Turning a failed release into a crashed control plane would trade a stuck
+    label for a stopped dev system."""
+    script = tmp_path / ".genesis" / "scripts" / "issues.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("#!/bin/sh\necho 'boom' >&2\nexit 1\n")
+
+    plane.session_token = "serve-abc"
+    plane.release_claims("the session deadline was reached")
+
+    assert "exited 1" in capsys.readouterr().out
+
+
+# ---------- the backstop sweep ----------
+
+
+def test_the_sweep_window_clears_the_session_cap(plane) -> None:
+    """A window inside the session cap races a live session, which is the whole
+    reason age is the second layer. Twice the cap, never under the floor."""
+    plane.session_timeout = 3600
+    assert plane._claim_sweep_hours() >= 2
+
+    plane.session_timeout = 6 * 3600
+    assert plane._claim_sweep_hours() >= 12
+
+    plane.session_timeout = 60
+    assert plane._claim_sweep_hours() == server.CLAIM_SWEEP_MIN_HOURS
+
+
+def test_the_sweep_asks_for_the_window_it_derived(plane, issues_script) -> None:
+    plane.session_timeout = 4 * 3600
+    plane.sweep_stale_claims(force=True)
+
+    sweeps = [c for c in issues_script() if "sweep-claims" in c]
+    assert sweeps == ["|sweep-claims --older-than 8"]
+
+
+def test_the_sweep_is_throttled_between_polls(plane, issues_script) -> None:
+    """It enforces a window measured in hours and the poll loop ticks every
+    minute; running it on every tick would be one API call a minute to learn
+    nothing."""
+    plane.sweep_stale_claims(force=True)
+    plane.sweep_stale_claims()
+    plane.sweep_stale_claims()
+
+    assert len([c for c in issues_script() if "sweep-claims" in c]) == 1
+
+
+def test_serve_sweeps_the_board_before_the_first_session(plane, monkeypatch) -> None:
+    """The plane most likely to be holding a claim nothing can release is the one
+    that died without deciding anything, and this process is often its
+    replacement. Sweeping after the first session would let that session pick
+    around the very issue that was stranded."""
+    order: list[str] = []
+    monkeypatch.setattr(server, "enable_workflows", MagicMock())
+    monkeypatch.setattr(server, "disable_workflows", MagicMock())
+    monkeypatch.setattr(server.shutil, "which", lambda _: "/usr/local/bin/claude")
+    monkeypatch.setattr(server, "_gh_token", lambda: "token")
+    monkeypatch.setattr(plane, "_prime_high_water_if_needed", lambda *a, **k: None)
+    monkeypatch.setattr(
+        plane, "sweep_stale_claims", lambda force=False: order.append("sweep")
+    )
+    # 127 aborts serve straight after the initial run, before the poll loop.
+    monkeypatch.setattr(plane, "run_orchestrator", lambda *a, **k: order.append("run") or 127)
+
+    plane.serve()
+
+    assert order[:2] == ["sweep", "run"]

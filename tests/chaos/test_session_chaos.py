@@ -148,6 +148,35 @@ def test_a_hung_session_is_killed_by_the_deadline(plane, script, monkeypatch):
     assert rc != 0 or plane.last_result_subtype != "success"
 
 
+def test_a_session_the_deadline_kills_hands_its_issue_back(
+    plane, script, issues_script, monkeypatch
+):
+    """MaKlaude issue #195 in miniature (#48).
+
+    A session goes quiet, the deadline terminates it, and the label it applied at
+    pickup outlives it. For 18 minutes `next --milestone 6` skipped that issue and
+    picked a different one; the tree was clean, there was no branch and no commit,
+    so nothing at all was under way. A human removed the label by hand.
+
+    Worth running here rather than only as a unit test because a killed process
+    is the shape that produces *no* result event: the ladder's resume predicate
+    reads that as "not mid-task" and never engages, so a release hung off the
+    resume predicate alone would silently skip the very case that was measured.
+    """
+    monkeypatch.setenv("GENESIS_COST_CEILING", "100")
+    plane.session_timeout = 3
+    script([{"hang": True}])
+
+    plane.run_orchestrator(None)
+
+    assert plane.last_result_subtype is None, (
+        "the scenario is only meaningful if the session died without reporting"
+    )
+    released = [c for c in issues_script() if "|release " in c]
+    assert len(released) == 1, f"the killed session kept its claim: {issues_script()}"
+    assert "--session serve-" in released[0]
+
+
 def test_a_crashing_session_is_not_mistaken_for_success(plane, script, monkeypatch):
     """No result event at all is an abnormal ending, not a clean finish."""
     monkeypatch.setenv("GENESIS_COST_CEILING", "100")

@@ -31,6 +31,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -48,6 +49,14 @@ from genesis.workflows import (
 LOCK_PATH = Path(".genesis/.orchestrator.lock")
 ETAG_PATH = Path(".genesis/.poll-etag")
 HIGHWATER_PATH = Path(".genesis/.poll-highwater")
+
+# The seeded issue manager, which owns the `in-progress` label: `claim` writes it
+# at pickup and `release` / `sweep-claims` take it back. The plane shells out to
+# it rather than reimplementing the same GitHub calls in Python, so both modes
+# release claims the same way and a dev system can invoke the same primitive.
+# Absent in a repo that doesn't use it, which every claim path treats as "there
+# is nothing here to release" rather than as an error.
+ISSUES_SCRIPT = Path(".genesis/scripts/issues.sh")
 
 RELEVANT_EVENT_TYPES = frozenset(
     {"IssuesEvent", "IssueCommentEvent", "PullRequestEvent"}
@@ -117,6 +126,16 @@ MAX_FOLLOWUP_CHAIN = 3
 # Budget for the judge itself. It reads evidence handed to it and answers with one
 # word, so it needs no tools and almost no turns.
 JUDGE_MAX_TURNS = 2
+
+# Floor for the backstop sweep's window, in hours, and how often the plane runs
+# it. The window itself is derived from the session cap in `_claim_sweep_hours` —
+# it has to stay clear of how long a session can legitimately hold a claim, or the
+# sweep races a healthy run and puts two workers on one issue. Fifteen minutes
+# between sweeps because this is the backstop for a control plane that has
+# already died: nothing about it is urgent, and what it enforces is measured in
+# hours. The primary release is in run_orchestrator, at the ladder's decision.
+CLAIM_SWEEP_MIN_HOURS = 2.0
+CLAIM_SWEEP_INTERVAL_S = 900
 
 # `Write` is required: without it the agent can edit existing files but cannot
 # create any, so any task needing a new file, test, or agent definition is
@@ -495,6 +514,12 @@ class LocalControlPlane:
     # because a bound an operator trusts has to say when it is guessing.
     cost_is_lower_bound: bool = False
     recent_tools: list[str] = field(default_factory=list)
+    # Identity every session in the current chain claims work under, minted per
+    # chain rather than per process: chains run one after another, and a token
+    # shared between them would let a chain that died release the claims of an
+    # earlier chain that finished cleanly and is legitimately still holding one.
+    session_token: str = ""
+    last_claim_sweep: float = 0.0
     pending_followup: bool = False
     continuation_index: int = 0
     followup_chain: int = 0
@@ -689,6 +714,13 @@ class LocalControlPlane:
         # continuations could quietly run for three times the configured timeout.
         deadline = time.time() + self.session_timeout
 
+        # The identity every session in this chain claims work under. Fresh per
+        # chain, so releasing at the end takes back what this chain claimed and
+        # not what a previous one is still legitimately holding. Random rather
+        # than derived from the pid: two chains a second apart in one process
+        # would otherwise collide, and the collision releases someone else's claim.
+        self.session_token = f"serve-{uuid.uuid4().hex[:12]}"
+
         task = prompt.splitlines()[0] if prompt else "the current unit of work"
         self.continuation_index = 0
         before = session_work_marker()
@@ -699,15 +731,25 @@ class LocalControlPlane:
         spent = self.last_cost
         self.run_spent += self.last_cost
 
+        # Why the ladder stopped, in the words the release comment carries. A
+        # human looking at an issue whose `in-progress` label vanished needs to
+        # know which rung took it back; "the claim expired" would tell them
+        # nothing, which is half of why an age-based expiry is the wrong shape.
+        stop_reason = "the session ended without finishing"
+
         for attempt in range(1, MAX_CONTINUATIONS + 1):
             if self.shutdown or not _died_mid_task(self.last_result_subtype):
+                if self.shutdown:
+                    stop_reason = "the control plane is shutting down"
                 break
             session_id = self.last_session_id
             if not session_id:
                 log("  hit max turns but no session id was reported - cannot resume")
+                stop_reason = "the session died with no id to resume from"
                 break
             if time.time() > deadline:
                 log("  session deadline reached - not continuing")
+                stop_reason = "the session deadline was reached, so it won't be resumed"
                 break
 
             go, why = self._should_continue(task, before, spent)
@@ -731,6 +773,7 @@ class LocalControlPlane:
             )
             if not go:
                 log(f"  not continuing: {why}")
+                stop_reason = why
                 break
 
             log(f"  hit max turns; resuming {session_id[:8]} "
@@ -740,6 +783,10 @@ class LocalControlPlane:
             rc = self._run_session(None, deadline, resume=session_id)
             spent += self.last_cost
             self.run_spent += self.last_cost
+        else:
+            # Every continuation used and the chain is still unfinished. This is
+            # the one exit that isn't a `break`, so it needs its own reason.
+            stop_reason = f"the continuation cap of {MAX_CONTINUATIONS} was reached"
 
         # The loop's own output does not wake it: the agent authenticates as the
         # App, so closing an issue or merging a pull request emits a *bot* event,
@@ -764,6 +811,27 @@ class LocalControlPlane:
             # half-finished task until some unrelated repo event happened along.
             self.pending_followup = True
             log(f"  still incomplete (${spent:.2f} spent) - will pick it up on the next tick")
+
+        # Anything but a clean finish hands the claims back, which is deliberately
+        # wider than the resume predicate above: a session killed outright — the
+        # deadline, SIGKILL, a CLI that dies before emitting a result — reports no
+        # subtype at all, so `_died_mid_task` reads False and the ladder is never
+        # even entered. Nothing is going to resume that either, and what it
+        # claimed is held by nobody.
+        #
+        # This runs before the follow-up pass rather than after, because that pass
+        # is a *fresh* session with none of this chain's context: it re-selects
+        # work through `issues.sh next`, and `next` skips anything still labelled
+        # `in-progress`. A claim left on would make the follow-up walk past the
+        # very task it was queued to rescue, which is what MaKlaude issue #195
+        # measured.
+        if self.last_result_subtype != "success":
+            self.release_claims(stop_reason)
+
+        # Outside a chain the plane holds no claims, and a sweeper that still
+        # names a finished chain would exempt that chain's claims from the
+        # backstop it no longer has any business protecting.
+        self.session_token = ""
         return rc
 
     def run_due_triggers(self, token: str) -> None:
@@ -849,7 +917,105 @@ class LocalControlPlane:
         elif not self.identity_logged:
             log("  agent uses your personal gh credential - its commits will look like yours")
             self.identity_logged = True
+
+        # What the session claims work under. `issues.sh claim` writes it into a
+        # marker comment on the issue, which is the only reason a claim can later
+        # be matched back to the chain that made it - the `in-progress` label
+        # carries no identity at all.
+        env["GENESIS_SESSION"] = self.session_token
         return env
+
+    # ----- claims -----
+
+    def _run_issues_script(self, args: list[str]) -> None:
+        """Run one deterministic `issues.sh` subcommand, echoing what it did.
+
+        As the App, through `_session_env`, because the App is who wrote the label
+        being taken back - a release attributed to the operator would make the
+        board's history read as though a human intervened.
+
+        Never raises. Claim bookkeeping runs on the path where a session has
+        already failed, and turning a failed release into a crashed control plane
+        would trade a stuck label for a stopped dev system.
+        """
+        if not ISSUES_SCRIPT.is_file():
+            return
+        try:
+            out = subprocess.run(
+                ["bash", str(ISSUES_SCRIPT), *args],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+                env=self._session_env(),
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            log(f"  {args[0]} failed to run: {e}")
+            return
+        for line in (out.stdout or "").splitlines():
+            if line.strip():
+                log(f"  {line.strip()}")
+        if out.returncode != 0:
+            log(f"  {args[0]} exited {out.returncode}: {(out.stderr or '').strip()[:200]}")
+
+    def release_claims(self, reason: str) -> None:
+        """Give back the issues this chain claimed, now that nothing will finish them.
+
+        The release keys on the ladder's not-continuing decision rather than on
+        how old a claim is, and that choice is the whole design. `in-progress`
+        looks identical whether a live session applied it four seconds ago or a
+        killed one applied it an hour ago, so any age-based expiry races a slow
+        but healthy session and hands its issue to a second worker - two branches
+        and a merge conflict, neither run aware of the other. The ladder, by
+        contrast, knows both that the session is over and that nobody will resume
+        it, which is liveness rather than a guess at liveness.
+
+        Measured (#48, from MaKlaude issue #195): claimed 02:18, quiet 03:17,
+        killed by the session deadline 03:33, `session deadline reached - not
+        continuing` at 03:33:30 - and the label still sat there. Clean tree, no
+        branch, no commit, no pull request, so no part of the task was under way,
+        yet `next --milestone 6` skipped the issue and picked something else until
+        a human removed the label by hand.
+
+        A chain that IS resumed keeps its claims: this runs once, when the chain
+        ends, so every continuation in between is still the same worker holding
+        the same issue. A chain that ends in success keeps them too - it may have
+        left a pull request open and the claim still describes reality; the sweep
+        is what covers that if it turns out it doesn't.
+        """
+        if not self.session_token:
+            return
+        self._run_issues_script(
+            ["release", "--session", self.session_token, "--reason", reason]
+        )
+
+    def _claim_sweep_hours(self) -> float:
+        """How stale a claim must be before the backstop takes it back.
+
+        Twice the session cap, because a chain may legitimately hold a claim for
+        the whole of it - the deadline covers every continuation, not each one -
+        and a window inside that range would release live work. Doubling leaves
+        room for the clock skew between whichever host made the claim and this
+        one, since the age comes from GitHub's own comment timestamp.
+        """
+        return max(CLAIM_SWEEP_MIN_HOURS, 2 * self.session_timeout / 3600)
+
+    def sweep_stale_claims(self, force: bool = False) -> None:
+        """Release claims whose session can't be accounted for by anyone.
+
+        Strictly a backstop for the case `release_claims` structurally cannot
+        reach: a control plane that is SIGKILLed, or a GitHub Actions run the
+        runner cancels, decides nothing and therefore releases nothing. Age is
+        the only evidence available about somebody else's dead process, which is
+        exactly why this is the second layer and not the first.
+        """
+        now = time.time()
+        if not force and now - self.last_claim_sweep < CLAIM_SWEEP_INTERVAL_S:
+            return
+        self.last_claim_sweep = now
+        self._run_issues_script(
+            ["sweep-claims", "--older-than", f"{self._claim_sweep_hours():g}"]
+        )
 
     def _spend(self, amount: float) -> str:
         """Format a running total, saying so when it is known to be incomplete.
@@ -1196,6 +1362,12 @@ class LocalControlPlane:
         # replay every relevant historical event on the events page.
         self._prime_high_water_if_needed(token)
 
+        # Before the first session picks anything, not after. The plane most
+        # likely to be holding an unreleasable claim is the one that died without
+        # deciding anything, and this process is frequently its replacement - so
+        # the board wants clearing while nothing is running on it.
+        self.sweep_stale_claims(force=True)
+
         # Initial run. If it fails because claude is broken (rc=127), abort
         # rather than entering the poll loop with workflows off.
         rc = self.run_orchestrator(None)
@@ -1229,6 +1401,12 @@ class LocalControlPlane:
             # loop can open work it is structurally unable to land.
             if self.merge_ready_prs():
                 self.pending_followup = True
+
+            # The claims this plane can't see the end of: a GitHub Actions run
+            # cancelled mid-flight, or a sibling process killed. Self-throttled,
+            # because it enforces a window measured in hours and the poll loop
+            # ticks every minute.
+            self.sweep_stale_claims()
 
             # genesis-ci-failure.yml's job. A workflow_run conclusion is not in the
             # repo events feed either, so a red check is invisible to local mode

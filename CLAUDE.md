@@ -86,6 +86,26 @@ template is unclassified or declares no `--max-turns` at all. Two separate dev-s
 workflows died at 20 turns three weeks apart before this floor existed — when a run
 dies at max-turns, raise the whole class and record why.
 
+## Claims
+
+`in-progress` is the dev system's concurrency protocol — `issues.sh next` skips any
+issue carrying it — so the rules about taking it back are load-bearing:
+
+- **A claim records the session that made it.** `claim` writes a marker comment
+  naming `GENESIS_SESSION` (or the Actions run id). The label alone carries no
+  identity and no timestamp, so a claim without the marker can't be matched to a
+  session or dated, and `claim` gives the label back rather than hold one.
+- **Release keys on the ladder's not-continuing decision, not on age.** When the
+  continuation ladder in `server.py` declines to resume a chain, the plane releases
+  that chain's claims. A chain that *is* resumed keeps them, and so does one that
+  ends in success — it may have a pull request open.
+- **`sweep-claims` is the backstop, and its window must clear the session cap.**
+  The plane passes twice `session_timeout`, and the script refuses anything under
+  an hour. A shorter window races a healthy session and puts two workers on one
+  issue: two branches, a merge conflict, neither run aware of the other. That
+  false positive is more expensive than the stuck label it would fix, which is why
+  age is the second layer and never the first.
+
 ## CI
 
 `.github/workflows/ci.yml` runs the suite on every push to `main` and every PR. It is

@@ -436,7 +436,7 @@ Shell scripts that provide core capabilities to every dev system. No binary dist
 ### Scripts
 
 - **`log.sh`** — called by CC hooks. Reads hook stdin JSON, pushes structured logs to Loki via curl. Without Loki configured it only echoes to stderr, which Claude Code captures into its own transcript — no per-tool-call trail in an Actions run (the Actions tab still records that the run happened).
-- **`issues.sh`** — thin wrapper around `gh` CLI. Provides `create`, `list`, `close`, `assign` subcommands.
+- **`issues.sh`** — thin wrapper around `gh` CLI. Provides `create`, `list`, `close`, `assign` subcommands, plus the claim lifecycle: `next` picks and claims a unit of work, `claim` marks one `in-progress` and records which session did it, `release` hands a claim back, and `sweep-claims` is the age-based backstop for claims nobody released.
 
 Local mode (`genesis serve`) is a subcommand of the genesis CLI itself, not a script seeded into the dev repo. See **Execution Model > Local Mode**.
 
@@ -451,7 +451,21 @@ bash .genesis/scripts/issues.sh create --title "Implement auth" --labels "milest
 bash .genesis/scripts/issues.sh list --status open --milestone 1
 bash .genesis/scripts/issues.sh close --id 5 --reason completed
 bash .genesis/scripts/issues.sh assign --id 5 --to worker-1
+
+# Claims
+ISSUE=$(bash .genesis/scripts/issues.sh next --milestone 1)   # pick + claim, exit 3 if nothing to work
+bash .genesis/scripts/issues.sh release --id 5 --reason "blocked on a dependency"
+bash .genesis/scripts/issues.sh sweep-claims --older-than 2   # backstop; default window is 2h
 ```
+
+### Claims
+
+`in-progress` is the concurrency protocol: `next` skips any issue that carries it, so two runs never pick the same task. The label alone carries no identity and no timestamp, which is why nothing could safely take one back — it looks the same whether a live session applied it four seconds ago or a killed one applied it an hour ago. `claim` therefore also leaves a marker comment naming the claiming session (`GENESIS_SESSION` from the control plane, the run id under Actions).
+
+Two layers give the label back, in this order:
+
+1. **The control plane releases on decision.** When the continuation ladder declines to resume a chain, `genesis serve` runs `release --session <token>` for that chain. This is liveness, not a guess at liveness: the ladder knows both that the session is over and that nobody will resume it. A chain that *is* resumed keeps its claims, because the resumed run is still the worker.
+2. **`sweep-claims` releases on age, as a backstop only.** A control plane that is SIGKILLed, or an Actions run the runner cancels, reaches no decision at all. The window must clear the session cap (`GENESIS_SESSION_TIMEOUT`) — the plane passes twice its own — because a shorter one races a healthy session and puts two workers on one issue, which is two branches and a merge conflict with neither run aware of the other.
 
 ### Configuration
 
