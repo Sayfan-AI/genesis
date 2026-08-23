@@ -1,5 +1,6 @@
 """Test 1: New repo with embedded dev system."""
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -58,6 +59,56 @@ def test_new_repo_has_seed_agents(tmp_dir: Path) -> None:
         assert agent_file.exists(), f"Missing agent: {agent}"
         content = agent_file.read_text()
         assert len(content) > 0
+
+
+def test_new_repo_claude_md_names_only_agents_it_actually_ships(tmp_dir: Path) -> None:
+    """The roster in prose must equal the roster on disk (issue #30).
+
+    This section used to be a fixed "Agent Roster" naming six roles — onboarding,
+    project manager, human interaction, evolver, health/self-review, workers —
+    of which genesis seeds three. A fresh dev system read its own CLAUDE.md and
+    was told it had a project manager and a health agent when it had neither, and
+    was told the *project's* architecture before anything had been built or seen
+    to fail. That's the premature commitment issue #30 is about, and the phantom
+    entries are the measurable half of it.
+
+    Asserting set equality rather than absence of the old names catches both
+    directions: a role documented into existence with no file behind it, and a
+    seeded agent nobody wrote down.
+    """
+    repo = tmp_dir / PROJECT
+    scaffold_new_repo(repo, GOAL, PROJECT)
+
+    section = re.search(
+        r"^## Agents[ ]*$(.*?)(?=^## |\Z)",
+        (repo / "CLAUDE.md").read_text(),
+        re.M | re.S,
+    )
+    assert section, "the scaffolded CLAUDE.md has no Agents section"
+
+    # The roster is the first contiguous run of bullets; the bullets further down
+    # are the questions a proposed role has to answer.
+    documented: set[str] = set()
+    for line in section.group(1).splitlines():
+        if line.startswith("- "):
+            name = re.match(r"- \*\*([^*]+)\*\*", line)
+            assert name, f"roster entry is not a bolded name: {line}"
+            documented.add(name.group(1))
+        elif documented:
+            break
+
+    on_disk = set()
+    for agent_file in sorted((repo / ".claude" / "agents").glob("*.md")):
+        front_matter = re.search(r"^name:\s*(\S+)\s*$", agent_file.read_text(), re.M)
+        assert front_matter, f"{agent_file.name} has no `name:` front-matter"
+        on_disk.add(front_matter.group(1))
+
+    assert documented == on_disk, (
+        f"CLAUDE.md documents {sorted(documented)} but .claude/agents holds "
+        f"{sorted(on_disk)}; a roster that names roles the repo doesn't have "
+        "commits the dev system to an architecture it never chose"
+    )
+    assert len(on_disk) == len(SEED_AGENTS)
 
 
 def test_new_repo_has_workflows(tmp_dir: Path) -> None:

@@ -59,7 +59,7 @@ On each run:
 ## What NOT to Do
 
 - Don't change things that are working. Focus on what's failing or inefficient.
-- Don't create agents speculatively. Only when you see a clear recurring pattern.
+- Don't create agents speculatively. Only when you see a clear recurring pattern — and answer the four questions under "Agents" in CLAUDE.md in the issue that proposes the role. You are the only thing standing between this project and a roster it invented before it had evidence.
 - Don't duplicate what's in the code or git history into memory.
 - Don't touch the orchestrator's task management — you evolve the system, not the project plan.
 
