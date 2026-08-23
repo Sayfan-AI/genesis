@@ -23,8 +23,13 @@ permissions:
 
 # One evolver at a time. `gh issue create --label` fires BOTH an `opened` and a
 # `labeled` event, which started two 40-turn agents on the same issue (genesis
-# issue #37) racing to open competing PRs. The seeded dev-system templates have
-# had a concurrency group for a while; genesis's own workflow never got one.
+# issue #37) racing to open competing PRs.
+#
+# This comment used to claim the seeded templates had had a concurrency group for
+# a while and that genesis's own workflow never got one. That was exactly
+# backwards - no template had one at all, and the wrong comment is plausibly why
+# genesis issues #11 and #22 sat open looking handled. They got one in PR #57;
+# the parity test in tests/e2e/test_workflows.py now checks rather than asserts.
 concurrency:
   group: genesis-evolver-${{ github.repository }}
   cancel-in-progress: false
