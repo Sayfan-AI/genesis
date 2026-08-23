@@ -217,3 +217,21 @@ genesis-dev-bot.private-key.pem
 *.pem
 
 .playwright-mcp/
+
+# genesis local control plane runtime state (`genesis serve`).
+#
+# The same rule genesis seeds into every repo it creates, because genesis is
+# served by the control plane it ships: `genesis serve` runs against this repo
+# too, and writes `.orchestrator.lock`, `.poll-etag`, `.poll-highwater`,
+# `.disabled-by-genesis` and `.trigger-state` here as it goes. The seeded copy
+# lives in `templates/gitignore` and carries the full reasoning; this is the
+# other half of the pair, and it was missing for as long as the pair existed
+# (issue #72). Nothing reported it: a fresh checkout has no runtime state, so CI
+# can't see the difference and `main` stayed green throughout.
+#
+# `.genesis/.*` rather than `.genesis/*` for the reason the template gives — a
+# dotfile directly under `.genesis/` is per-machine state, and anything the dev
+# system tracks there is not a dotfile. This repo has no tracked `.genesis/`
+# content today, which is exactly why the broader pattern looks harmless here
+# and must not be copied back to the template.
+.genesis/.*

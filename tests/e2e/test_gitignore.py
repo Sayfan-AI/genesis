@@ -223,3 +223,76 @@ def test_an_adopted_repo_without_a_gitignore_gets_one(
     scaffold_existing_repo(repo, GOAL, PROJECT)
 
     assert _ignored(repo, ".genesis/.trigger-state")
+
+
+# --- genesis's own repo -----------------------------------------------------
+#
+# Everything above interrogates an artifact genesis produced. These ask the same
+# questions of genesis itself, which is served by the control plane it ships:
+# `genesis serve` runs against this repo and writes the same runtime state here.
+#
+# It didn't ignore any of it (issue #72). The rule landed in `templates/gitignore`
+# for issue #40 and never crossed back, which is the drift class CLAUDE.md
+# documents for `.github/workflows/` vs `templates/workflows/`, running in the
+# other direction. Nothing reported it for the same reason the original went
+# unnoticed: a fresh checkout has no runtime state, so CI cannot see the
+# difference and `main` stays green.
+
+GENESIS_REPO = Path(__file__).parents[2]
+
+
+def test_genesis_ignores_the_runtime_state_it_writes_here() -> None:
+    """Genesis is one of the repos `genesis serve` runs against, so it needs the
+    rule it seeds. The unnamed file matters most for the same reason it does in a
+    scaffolded repo — the rule has to hold for the next thing serve writes."""
+    for name in (
+        ".genesis/.disabled-by-genesis",
+        ".genesis/.orchestrator.lock",
+        ".genesis/.poll-etag",
+        ".genesis/.poll-highwater",
+        ".genesis/.trigger-state",
+        ".genesis/.some-runtime-file-genesis-has-not-invented-yet",
+    ):
+        assert _ignored(GENESIS_REPO, name), (
+            f"{name} is not ignored in genesis's own repo. `genesis serve` runs "
+            "here too, and this tree has no tracked .genesis/ content, so git "
+            "collapses the lot to one `?? .genesis/` line and a single `git add "
+            "-A` commits a PID, two poll cursors and one machine's "
+            "paused-workflow list"
+        )
+
+
+def test_genesis_does_not_over_ignore_its_own_dot_genesis() -> None:
+    """The same negative control the scaffolded repo gets.
+
+    This tree has no tracked `.genesis/` content today, which is precisely what
+    makes the over-broad `.genesis/*` look harmless here — and it would be copied
+    back to the template as an improvement.
+    """
+    for name in (
+        ".genesis/config.toml",
+        ".genesis/scripts/issues.sh",
+    ):
+        assert not _ignored(GENESIS_REPO, name), (
+            f"{name} is ignored: genesis's own rule has been broadened past the "
+            "dotfile convention the template depends on"
+        )
+
+
+def test_genesis_and_its_template_carry_the_same_rule() -> None:
+    """The pairing itself, which is the thing that drifted.
+
+    The two cases above would also pass on a rule that merely behaves right
+    today. This one fails if the pattern is ever changed on one side of the pair
+    and not the other — the failure mode that produced issue #72 and, before it,
+    issues #4, #11, #14, #15 and #22.
+    """
+    template = (GENESIS_REPO / "templates" / "gitignore").read_text()
+    own = (GENESIS_REPO / ".gitignore").read_text()
+
+    for label, content in (("templates/gitignore", template), (".gitignore", own)):
+        assert any(line.strip() == GITIGNORE_PATTERN for line in content.splitlines()), (
+            f"{label} no longer contains the rule `{GITIGNORE_PATTERN}` that "
+            "src/genesis/scaffold.py writes and tests for. Change both sides of "
+            "the pair, or the one that wasn't changed silently stops matching"
+        )
