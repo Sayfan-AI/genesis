@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Genesis issue manager — abstraction over gh CLI
-# Supports: create, list, unanswered-comments, close, assign, comment, label,
-#           claim, next, release, sweep-claims, view
+# Supports: create, list, unanswered-comments, unselectable-work, close, assign,
+#           comment, label, claim, next, release, sweep-claims, view
 set -euo pipefail
 
 CMD="${1:-help}"
@@ -271,6 +271,138 @@ release_one() {
     echo "released #$1"
 }
 
+# Open work the loop's own selection rules can never choose.
+#
+# Every other section of `summary` keys on a state that needs someone to ACT —
+# it's blocked, nobody answered — or lists what changed. None of them keys on
+# SELECTABILITY: whether a run can ever pick the item up at all. An issue filed
+# with no `milestone:N` label is in no such state. It sits in the Open Issues
+# listing looking completely healthy, and by every question the other nets ask,
+# it is.
+#
+# Why that's fatal here specifically: the orchestrator's hard rules say milestone
+# work outranks discretionary work, and that a discretionary finding is "filed and
+# moved on" from. So an unmilestoned issue is filed and then nothing ever selects
+# it. Measured in Sayfan-AI/MaKlaude on 2026-08-15 — three issues died that way in
+# a single day. MaKlaude issue #167 dropped out of milestone 5 when the label came
+# off and sat untouched until a human re-added it; MaKlaude issue #186 was filed
+# unmilestoned and never picked up; MaKlaude issue #202 became selectable only
+# because the human labelled it by hand. Each one looked filed and was abandoned.
+#
+# The adjacent case is the same defect one step later: an open issue whose
+# milestone has already been signed off. The completion gate is closed, the loop
+# has moved on, and nothing comes back for it.
+#
+# This is a detector rather than a sharper prompt because the evidence is an
+# ABSENCE spread over days — no run failed, no check went red, nothing looped — so
+# no single agent cycle holds the history to notice "this has been unselectable
+# since Tuesday". The instruction half already exists (the orchestrator's "every
+# issue you file gets a milestone:N label"); this is the half that works when the
+# instruction is forgotten.
+#
+# Because it prints every tick, the exclusions carry more weight than the
+# detections — a backstop that cries wolf is one the loop learns to skip:
+#
+#   - needs:human            a person is holding it, deliberately outside the
+#                            milestone task flow: plan gates, completion gates,
+#                            and escalations, which carry this label too, so one
+#                            exemption covers them all.
+#   - genesis:onboarding     issue #1 PRODUCES the roadmap, so it predates every
+#                            milestone by construction and can never carry one.
+#   - wontfix/duplicate/invalid
+#                            "we're deliberately not doing this" is a legitimate
+#                            third answer to why an issue carries no milestone.
+#                            Without it, the only way to silence a true-but-
+#                            unhelpful report is to close the issue and lose the
+#                            record of the decision.
+#
+# Deliberately NOT exempt: `needs:evolver`. Routing a finding to the framework
+# doesn't make its local half selectable — MaKlaude issue #202 sat unmilestoned
+# carrying exactly that kind of framework-facing finding.
+#
+# Every unknown resolves toward silence, for the same reason: an OPEN completion
+# gate means the milestone is still live, and one active milestone on a
+# multi-labelled issue is enough. If the issue list can't be read it says so
+# rather than printing nothing, because silence here reads as all-clear.
+format_unselectable_work() {
+    python3 - <<'PY'
+import json
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+MILESTONE = re.compile(r'^milestone:(\d+)$')
+# The completion gate as the orchestrator's hard rules mandate it: one
+# "Milestone N complete" issue, labelled needs:human. Only a CLOSED one counts —
+# an open gate means the milestone hasn't been signed off yet.
+SIGNED_OFF = re.compile(r'^milestone\s+(\d+)\s+complete\b', re.IGNORECASE)
+
+EXEMPT = {'needs:human', 'genesis:onboarding', 'wontfix', 'duplicate', 'invalid'}
+
+
+def gh_issues(state, limit):
+    proc = subprocess.run(
+        ['gh', 'issue', 'list', '--state', state, '--limit', str(limit),
+         '--json', 'number,title,state,labels,createdAt'],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except ValueError:
+        return None
+
+
+open_issues = gh_issues('open', 100)
+# A deeper page for the closed set: the completion gates looked up here are as
+# old as the project, while the open set is bounded by what's in flight.
+closed_issues = gh_issues('closed', 200)
+if open_issues is None or closed_issues is None:
+    print('(the issue list could not be read, so this check did not run — '
+          'do NOT read the empty section above it as all-clear)')
+    sys.exit(0)
+
+signed_off = {}
+for i in closed_issues:
+    m = SIGNED_OFF.match(str(i.get('title') or '').strip())
+    if m and m.group(1) not in signed_off:
+        signed_off[m.group(1)] = i['number']
+
+now = datetime.now(timezone.utc)
+
+rows = []
+for i in open_issues:
+    labels = [l['name'] for l in i.get('labels') or []]
+    if any(l in EXEMPT for l in labels):
+        continue
+
+    milestones = sorted({m.group(1) for m in (MILESTONE.match(l) for l in labels) if m})
+    if not milestones:
+        reason = 'no milestone:N label, so no run can select it'
+    else:
+        gates = [(n, signed_off.get(n)) for n in milestones]
+        # One active milestone is enough to keep it reachable.
+        if any(gate is None for _, gate in gates):
+            continue
+        reason = '%s already signed off (%s), so nothing will come back for it' % (
+            ', '.join('milestone:%s' % n for n, _ in gates),
+            ', '.join('#%d' % gate for _, gate in gates))
+
+    created = datetime.fromisoformat(i['createdAt'].replace('Z', '+00:00'))
+    rows.append(((now - created).days, i, reason, labels))
+
+# Stalest first, like every other report here: the item that has been
+# unreachable longest is the one being forgotten.
+rows.sort(key=lambda r: -r[0])
+
+for age, i, reason, labels in rows:
+    suffix = ' (%s)' % ','.join(labels) if labels else ''
+    print('#%d  open %dd — %s%s\n      %s' % (
+        i['number'], age, i.get('title', ''), suffix, reason))
+PY
+}
+
 case "$CMD" in
     create)
         TITLE="" LABELS="" BODY="" MILESTONE="" ASSIGNEE=""
@@ -364,6 +496,14 @@ json.dump(filtered, sys.stdout)
         format_unanswered_comments "$WINDOW_DAYS"
         ;;
 
+    unselectable-work)
+        # Open issues the work-selection rules can never choose — no milestone:N
+        # label, or every milestone on them already signed off (empty = every
+        # open issue is reachable). Not a distress state: these look healthy
+        # under Open Issues, which is exactly why they get abandoned.
+        format_unselectable_work
+        ;;
+
     blocked)
         # Shortcut: list all blocked issues
         gh issue list --state open --label "blocked" --json "$FIELDS" --limit 100 | format_issues
@@ -394,6 +534,17 @@ json.dump(filtered, sys.stdout)
         # a reply — which is why it prints even when empty.
         echo "=== Unanswered Human Comments (a person spoke; answer before acting) ==="
         format_unanswered_comments "$DEFAULT_COMMENT_WINDOW_DAYS"
+        echo ""
+        # Unconditional, and the one section that asks a different question of
+        # the board. The others ask "what needs someone to act?" or "what
+        # changed?"; this asks "what can the loop never even choose?" — an issue
+        # with no milestone:N label is listed under Open Issues above like any
+        # other while being unreachable by the orchestrator's own priority
+        # rules, which is how three issues were filed and then abandoned in a
+        # single day in a sibling dev system. Empty here means every open issue
+        # is reachable.
+        echo "=== Unselectable Work (open but no run can pick it up) ==="
+        format_unselectable_work
         echo ""
         echo "=== Blocked ==="
         gh issue list --state open --label "blocked" --json "$FIELDS" --limit 100 | format_issues
@@ -707,6 +858,10 @@ Commands:
             loop has not answered, stalest first. Closed threads are reported
             only when the loop closed them AFTER the comment (empty = nothing
             waiting on a reply)
+  unselectable-work
+            List open issues no run can select — no milestone:N label, or
+            every milestone on them already signed off — stalest first
+            (empty = every open issue is reachable)
   blocked   List all blocked issues
   recent    List recently updated issues (default: last 24h)
   summary   Overview of project state

@@ -86,7 +86,15 @@ case "$1 $2" in
     # `claim` reads the label back through this path.
     emit "${GH_VIEW_JSON-'{"labels":[{"name":"in-progress"}]}'}" ;;
   "issue list")
-    emit "${GH_LIST_JSON-[]}" ;;
+    # `unselectable-work` is the one caller that reads BOTH states in a single
+    # run - open issues to judge, closed ones for the completion gates - so the
+    # canned reply is keyed on --state. Everything else asks for one state and
+    # takes GH_LIST_JSON.
+    [ -n "${GH_LIST_FAILS-}" ] && exit 1
+    case " $* " in
+      *" --state closed "*) emit "${GH_CLOSED_JSON-[]}" ;;
+      *) emit "${GH_LIST_JSON-[]}" ;;
+    esac ;;
   "issue edit")
     [ -n "${GH_EDIT_FAILS-}" ] && exit 1
     echo "https://github.com/o/r/issues/1" ;;
@@ -137,6 +145,57 @@ def _thread(
     if pr:
         t["pull_request"] = {"url": f"https://api.github.com/repos/o/r/pulls/{num}"}
     return t
+
+
+def _issue(
+    num: int,
+    title: str = "a task",
+    days_ago: float = 1,
+    labels: tuple[str, ...] = (),
+    state: str = "OPEN",
+) -> dict:
+    """An issue as `gh issue list --json number,title,state,labels,createdAt` returns it."""
+    return {
+        "number": num,
+        "title": title,
+        "state": state,
+        "labels": [{"name": name} for name in labels],
+        "createdAt": _iso(days_ago=days_ago),
+    }
+
+
+def _gate(num: int, milestone: int, days_ago: float = 30) -> dict:
+    """The completion gate the orchestrator's hard rules mandate: one
+    "Milestone N complete" issue, labelled needs:human."""
+    return _issue(
+        num,
+        f"Milestone {milestone} complete",
+        days_ago,
+        ("needs:human", f"milestone:{milestone}"),
+    )
+
+
+# Reported in every exclusion case below, so an empty section can never be
+# mistaken for "the exclusion worked" when the real cause is a crash, a typo in
+# the subcommand name, or a stub that answered nothing.
+SENTINEL = _issue(999, "an unmilestoned finding nothing excludes", days_ago=2)
+
+
+@pytest.fixture
+def unselectable(run):
+    """Run `unselectable-work` over canned open and closed issue lists."""
+
+    def _go(open_issues: list[dict], closed_issues: list[dict] | None = None, **env: str) -> str:
+        proc, _ = run(
+            "unselectable-work",
+            GH_LIST_JSON=json.dumps(open_issues),
+            GH_CLOSED_JSON=json.dumps(closed_issues or []),
+            **env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout
+
+    return _go
 
 
 @pytest.fixture
@@ -515,6 +574,181 @@ class TestUnansweredComments:
         assert "do NOT read" in proc.stdout
 
 
+class TestUnselectableWork:
+    """The one input no other net keys on: whether a run can select the work.
+
+    Every other section of `summary` asks what needs someone to act — it's
+    blocked, nobody answered — or lists what changed. An issue filed with no
+    `milestone:N` label answers none of those: it's listed under Open Issues like
+    any other while the orchestrator's own priority rules make it unreachable, so
+    it's filed and then abandoned. Three died that way in one day in a sibling
+    dev system (MaKlaude issues #167, #186 and #202).
+
+    Detection is two state comparisons, so nothing below spends long on it. The
+    exclusions are the design, because this prints on every tick. Each exclusion
+    is its own case, with the others deliberately unable to fire, and every one
+    of them carries SENTINEL — an issue that must still be reported — so a
+    passing test names the rule that did the work and proves the detector ran.
+    """
+
+    def test_reports_an_unmilestoned_issue(self, unselectable) -> None:
+        """The live shape: a real bug, filed, and selectable by nobody."""
+        out = unselectable(
+            [_issue(202, "label silently drops all but the last --add", 4, ("bug",))]
+        )
+        assert "#202" in out
+        assert "open 4d" in out
+        assert "label silently drops" in out
+        # The reason is what turns a listing into an instruction.
+        assert "no milestone:N label" in out
+
+    def test_reports_work_on_a_signed_off_milestone(self, unselectable) -> None:
+        """The same defect one step later — the loop has moved past the milestone.
+
+        The gate's number is in the output because that's the fact a reader needs
+        to choose between re-milestoning the issue and closing it.
+        """
+        out = unselectable(
+            [_issue(167, "trust should expire on invalidation", 9, ("milestone:5",))],
+            [_gate(182, 5)],
+        )
+        assert "#167" in out
+        assert "open 9d" in out
+        assert "milestone:5" in out
+        assert "signed off" in out
+        assert "#182" in out
+
+    def test_an_issue_on_an_active_milestone_is_not_reported(self, unselectable) -> None:
+        """By far the most common case: this is exactly what `next` will pick."""
+        out = unselectable(
+            [_issue(196, "the current task", 1, ("milestone:6",))],
+            [_gate(182, 5)],
+        )
+        assert out.strip() == ""
+
+    def test_an_open_completion_gate_leaves_its_milestone_live(self, unselectable) -> None:
+        """Direction matters: only a CLOSED gate is a sign-off.
+
+        An open "Milestone N complete" issue means the human hasn't signed off,
+        so its milestone's work is still selectable. Reading it as a sign-off
+        would report every live task on the milestone being finished.
+        """
+        out = unselectable([_issue(197, "the current task", 1, ("milestone:6",)), _gate(205, 6)])
+        assert out.strip() == ""
+
+    def test_needs_human_is_not_reported(self, unselectable) -> None:
+        """Exclusion 1. Plan gates, completion gates and escalations all carry it.
+
+        No milestone label, so the detection would otherwise fire; nothing else
+        here can exclude it. A person is holding these deliberately outside the
+        task flow, and they're already visible to the human.
+        """
+        out = unselectable([_issue(188, "Milestone 6 plan", 2, ("needs:human",)), SENTINEL])
+        assert "#188" not in out
+        assert "#999" in out
+
+    def test_the_onboarding_issue_is_not_reported(self, unselectable) -> None:
+        """Exclusion 2. Issue #1 PRODUCES the roadmap, so it predates every
+        milestone by construction — reporting it would be a permanent false
+        positive on the one issue that legitimately carries no milestone."""
+        onboarding = _issue(1, "Onboarding: the goal", 20, ("genesis:onboarding",))
+        out = unselectable([onboarding, SENTINEL])
+        assert "Onboarding" not in out
+        assert "#999" in out
+
+    @pytest.mark.parametrize("label", ["wontfix", "duplicate", "invalid"])
+    def test_declined_work_is_not_reported(self, unselectable, label: str) -> None:
+        """Exclusion 3. "We're deliberately not doing this" is a legitimate third
+        answer to why an issue carries no milestone, alongside "forgotten" and
+        "scheduled". Without it the only way to silence a true-but-unhelpful
+        report is to close the issue and lose the record of the decision."""
+        declined = _issue(77, "a finding we decided against", 12, ("bug", label))
+        out = unselectable([declined, SENTINEL])
+        assert "#77" not in out
+        assert "#999" in out
+
+    def test_needs_evolver_is_still_reported(self, unselectable) -> None:
+        """A deliberate NON-exemption, and the reason it's tested.
+
+        Routing a finding to the framework doesn't make its local half
+        selectable. MaKlaude issue #202 sat unmilestoned carrying exactly that
+        kind of framework-facing finding and was picked up by nobody.
+        """
+        out = unselectable(
+            [_issue(204, "the scaffold has no signal for this", 3, ("needs:evolver",))]
+        )
+        assert "#204" in out
+
+    def test_one_active_milestone_is_enough(self, unselectable) -> None:
+        """An issue that outlived a milestone and was re-labelled onto the next
+        is reachable through the live one. Every unknown resolves toward
+        silence, and a multi-labelled issue is the case where that bites."""
+        out = unselectable(
+            [_issue(186, "backport the guard", 7, ("milestone:5", "milestone:6"))],
+            [_gate(182, 5)],
+        )
+        assert out.strip() == ""
+
+    def test_stalest_first(self, unselectable) -> None:
+        """Same order as every other report here: longest unreachable, first."""
+        out = unselectable(
+            [
+                _issue(300, "filed yesterday", 1),
+                _issue(301, "filed three weeks ago", 21),
+                _issue(302, "filed last week", 7),
+            ]
+        )
+        assert out.index("#301") < out.index("#302") < out.index("#300")
+
+    def test_a_closed_issue_is_not_reported(self, unselectable) -> None:
+        """Only open work can be abandoned. The closed list is read for the
+        completion gates and for nothing else, so an unmilestoned issue in it
+        must not become a finding."""
+        out = unselectable([], [_issue(185, "a finished decision", 6, ("bug",), state="CLOSED")])
+        assert out.strip() == ""
+
+    def test_empty_means_all_clear(self, unselectable) -> None:
+        assert unselectable([]).strip() == ""
+
+    def test_an_unreadable_issue_list_says_so_rather_than_printing_nothing(self, run) -> None:
+        """Silence is this section's all-clear signal, so a failed read has to
+        say it didn't run — otherwise an outage reads as a clean board."""
+        proc, _ = run("unselectable-work", GH_LIST_FAILS="1")
+        assert proc.returncode == 0, proc.stderr
+        assert "could not be read" in proc.stdout
+        assert "do NOT read" in proc.stdout
+
+    def test_the_labelling_rule_names_the_detector(self) -> None:
+        """Prevention and detection have to be readable as one pair.
+
+        The rule telling the orchestrator to label every issue it files predates
+        this check, and an agent that reads only the rule has no way to learn
+        that a backstop exists or what the section means when it names an issue.
+        Asserted on the agent definition because that is a carrier both
+        execution modes read — under `genesis serve` every workflow is disabled.
+        """
+        text = (TEMPLATES / "agents" / "orchestrator.md").read_text()
+        rule = text.split("Every issue you file gets a `milestone:N` label")[1]
+        assert "unselectable-work" in rule.split("\n")[0]
+
+    def test_it_asks_for_the_fields_it_filters_on(self, run) -> None:
+        """Both states, with labels and createdAt.
+
+        Dropping `labels` would make every issue look unmilestoned and the
+        section would report the whole board; dropping the closed query would
+        make every signed-off milestone look active and the second detection
+        would never fire again. Neither shows up in the output of a passing
+        case, so the query is asserted directly.
+        """
+        proc, calls = run("unselectable-work", GH_LIST_JSON="[]", GH_CLOSED_JSON="[]")
+        assert proc.returncode == 0, proc.stderr
+        listings = [c for c in calls if c.startswith("issue list")]
+        assert any("--state open" in c for c in listings)
+        assert any("--state closed" in c for c in listings)
+        for c in listings:
+            assert "labels" in c and "createdAt" in c
+
+
 class TestSummarySection:
     """Unconditional, like the other sections: empty is the all-clear signal.
 
@@ -535,9 +769,25 @@ class TestSummarySection:
         section = proc.stdout.split("=== Unanswered Human Comments")[1]
         assert "#7" in section.split("=== Blocked")[0]
 
+    def test_the_unselectable_section_prints_even_when_the_board_is_reachable(
+        self, run
+    ) -> None:
+        proc, _ = run("summary", GH_LIST_JSON="[]", GH_CLOSED_JSON="[]")
+        assert proc.returncode == 0, proc.stderr
+        assert "=== Unselectable Work" in proc.stdout
+
+    def test_the_unselectable_section_carries_the_finding(self, run) -> None:
+        """The membership half. A detector nothing prints is a detector nobody
+        reads, and `summary` is the one report every run starts with."""
+        listing = json.dumps([_issue(186, "filed and never selected", 5, ("bug",))])
+        proc, _ = run("summary", GH_LIST_JSON=listing, GH_CLOSED_JSON="[]")
+        section = proc.stdout.split("=== Unselectable Work")[1]
+        assert "#186" in section.split("=== Blocked")[0]
+
     def test_help_documents_the_command_and_its_window(self, run) -> None:
         proc, _ = run("help")
         assert "unanswered-comments" in proc.stderr
+        assert "unselectable-work" in proc.stderr
         assert "--window-days" in proc.stderr
 
 

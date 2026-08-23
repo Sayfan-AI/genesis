@@ -192,6 +192,8 @@ genesis/
 │   ├── scripts/          # log.sh, issues.sh, activate.sh
 │   ├── workflows/        # GitHub Actions orchestrator workflows
 │   ├── claude_md.md.j2   # CLAUDE.md template
+│   ├── gitignore         # Dev repo .gitignore (dotted on the way out; a
+│   │                     #   dotted name here would ignore templates/ itself)
 │   └── settings.json     # CC hooks configuration
 ├── tests/
 │   ├── unit/             # Unit tests for cli/server/workflows

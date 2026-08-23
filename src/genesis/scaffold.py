@@ -80,6 +80,16 @@ SEED_SCRIPTS = [
     "claude-dir-guard.sh",
 ]
 
+# The dev repo's `.gitignore`, carried in the template tree WITHOUT the leading
+# dot: a file named `templates/.gitignore` would be a live ignore file for
+# genesis's own templates directory. The scaffold renames it on the way out.
+GITIGNORE_TEMPLATE = "gitignore"
+
+# What "the genesis section is already here" is decided by. The pattern itself
+# rather than the comment above it: a stale rule under a matching comment is
+# exactly the case this must not treat as done.
+GITIGNORE_PATTERN = ".genesis/.*"
+
 # Turn-budget classes for the Claude-invoking workflow templates.
 #
 # "orchestrator" — open-ended work, and dispatched subagents spend from the same
@@ -161,6 +171,33 @@ def _write_seed_scripts(base: Path) -> None:
         dst.chmod(0o755)
 
 
+def _write_gitignore(base: Path) -> None:
+    """Write, or extend, the dev repo's `.gitignore` with the genesis section.
+
+    An ignore rule is the only thing between `genesis serve`'s per-machine state
+    and the repo's history: local mode writes its control-plane state as dotfiles
+    under `.genesis/`, agents here read `git status` to decide what a run
+    changed, and `git add -A` sits on several of their paths.
+
+    An existing `.gitignore` is appended to, never replaced — genesis is a guest
+    in an adopted repo. The append is skipped when the pattern is already
+    present, so re-scaffolding a repo doesn't stack duplicate sections.
+    """
+    section = (TEMPLATES_DIR / GITIGNORE_TEMPLATE).read_text()
+    path = base / ".gitignore"
+    if not path.exists():
+        path.write_text(section)
+        return
+    existing = path.read_text()
+    # A line that IS the rule, not prose that mentions it — the section's own
+    # comment spells the pattern out, and so would a note explaining why someone
+    # removed the rule.
+    if any(line.strip() == GITIGNORE_PATTERN for line in existing.splitlines()):
+        return
+    separator = "\n" if existing.endswith("\n") else "\n\n"
+    path.write_text(existing + separator + section)
+
+
 def _write_settings(base: Path) -> None:
     settings_path = base / ".claude" / "settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,6 +273,7 @@ def scaffold_new_repo(
     _write_settings(path)
     _write_genesis_config(path, project_name, goal)
     _write_seed_scripts(path)
+    _write_gitignore(path)
 
     # Onboarding issue
     _write_onboarding_issue(path, project_name, goal)
@@ -279,6 +317,7 @@ def scaffold_existing_repo(
     _write_settings(path)
     _write_genesis_config(path, project_name, goal)
     _write_seed_scripts(path)
+    _write_gitignore(path)
 
     # Onboarding issue
     _write_onboarding_issue(path, project_name, goal)
@@ -327,6 +366,7 @@ def scaffold_external_dev_repo(
     _write_settings(dev_path)
     _write_genesis_config(dev_path, project_name, goal, target_repos)
     _write_seed_scripts(dev_path)
+    _write_gitignore(dev_path)
 
     # Onboarding issue with target repo references
     _write_onboarding_issue(dev_path, project_name, goal, target_repos)
