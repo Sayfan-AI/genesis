@@ -277,6 +277,49 @@ secret too would have cost every existing dev repo a manual step for nothing.
 
 `tests/e2e/test_workflows.py` fails any template that goes back to `app-id`.
 
+## Genesis Also Has A `.claude/` Directory
+
+Everything under *What a Scaffolded `settings.json` Can and Can't Grant* describes
+what genesis **seeds**. It's true of this repo too, and for a long time nothing
+here said so (issue #74). Genesis had the gate script in `templates/` and nowhere
+else, no `hooks` key at all in its own `.claude/settings.json`, and
+`.claude/agents/evolver.md` telling its own evolver — under **What You Can
+Modify** — that it could edit `.claude/agents/`. It can't. Re-measured on a
+trusted local workspace, the most permissive case there is: `Write
+.claude/.evolver-write-probe` → refused.
+
+That combination is worse than the one a seeded dev system gets, because here the
+false promise sits in the agent's own definition. A run that acts on its charter
+spends turns on a write that can never land and leaves no diagnosis behind —
+`error_max_turns`, the worst failure shape in this system, and the one
+`genesis-evolver.yml` has already died of twice.
+
+So genesis carries the gate at the same repo-relative path a scaffolded repo uses,
+`.genesis/scripts/claude-dir-guard.sh`, byte-identical to the template's. Identical
+is what makes the template copy's unit tests cover this one, and the shared path is
+what lets the hook declaration be compared as text.
+`tests/e2e/test_claude_gate.py` pins both halves: the two scripts identical, both
+`settings.json` files declaring the hook at that path, and the charter's **What You
+Can Modify** section naming no path under `.claude/`.
+
+**Arming it took a human once, and that's not a wart to be automated away.** The
+hook declaration is itself a write under `.claude/`, so the gate can't arm itself
+and the charter can't correct itself — genesis had to name both edits on the issue
+and wait. An installer script a human runs would work, because the harness reads
+the Bash command string and not what a child process does, and that's exactly the
+reason there isn't one: a script that writes `.claude/` on request is a route
+*around* the gate the moment an agent runs it, which is the failure
+`host-guard.sh`'s own notes warn about. The only lever that genuinely works,
+`bypassPermissions`, hands a session the ability to rewrite its own operating
+rules. Two rare pastes beat a self-write tool.
+
+**What this means for genesis's evolver in practice:** it evolves the framework,
+not its own front matter. A prose rule goes in *this* file, which reaches sessions
+in both execution modes. An edit under `.claude/` gets proposed on the task issue
+as the exact file content — not a description of it — labeled `needs:human`. That's
+the same protocol the gate's message names, so the charter and the hook that stops
+it tell one story.
+
 ## Self-Improvement
 
 This project opts in to self-improvement. Update this CLAUDE.md and project workflows as the design evolves. Keep `docs/` as the living design documents.
