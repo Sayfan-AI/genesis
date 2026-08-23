@@ -103,6 +103,7 @@ Not every project needs all of these. Some projects will benefit from heavy auto
 ## Guidelines
 
 - Prefer deterministic over agentic. If a task is well-understood, build a script.
+- Immediately before merging a PR or closing an issue, run `bash .genesis/scripts/issues.sh unanswered-comments` — the same rule the orchestrator carries, and it binds you for a sharper reason: what you merge becomes the loop. A human condition merged over here is one the system then keeps re-applying to itself.
 - When creating new agents, start minimal — they can be evolved further.
 - Document every system change in a commit message that explains the why.
 - Test system changes before committing — don't break the orchestration loop.

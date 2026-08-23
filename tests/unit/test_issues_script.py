@@ -24,14 +24,17 @@ to that canned JSON rather than returning a pre-filtered answer, because for
 would leave the part most likely to be wrong untested.
 """
 
+import json
 import os
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 
-ISSUES_SH = Path(__file__).parents[2] / "templates" / "scripts" / "issues.sh"
+TEMPLATES = Path(__file__).parents[2] / "templates"
+ISSUES_SH = TEMPLATES / "scripts" / "issues.sh"
 
 # The shell the script must work under, not merely the one that happens to be on
 # PATH. macOS /bin/bash is 3.2, which is the empty-array trap; CI Linux is 5.x.
@@ -58,6 +61,20 @@ emit() {
   fi
 }
 
+# `unanswered-comments` reaches GitHub through `gh api` from inside python rather
+# than through `gh issue`, in two shapes: the repo-wide comment feed, and one
+# thread at a time. The thread lookup is keyed out of a JSON object so a test can
+# hand each thread its own state, and an absent key answers the way a real 404
+# does - non-zero, which the script must read as "unknown", not "open".
+if [ "$1" = "api" ]; then
+  [ -n "${GH_API_FAILS-}" ] && exit 1
+  case "$2" in
+    */issues/comments*) printf '%s' "${GH_COMMENTS_JSON-[]}" ;;
+    *) printf '%s' "${GH_THREADS_JSON-null}" | jq -e --arg n "${2##*/}" '.[$n]' ;;
+  esac
+  exit $?
+fi
+
 case "$1 $2" in
   "issue view")
     # `claim` reads the label back through this path.
@@ -75,6 +92,60 @@ exit 0
 # silently did not. The second is the lying board `claim` exists to catch.
 LABEL_STUCK = '{"labels":[{"name":"in-progress"}]}'
 LABEL_MISSING = '{"labels":[]}'
+
+# The two actor shapes `unanswered-comments` has to tell apart. A GitHub App
+# carries type "Bot"; a PAT-backed bot account carries neither, which is why the
+# script also reads the `[bot]` login suffix.
+HUMAN = {"login": "gigi", "type": "User"}
+APP_BOT = {"login": "genesis-dev-bot[bot]", "type": "Bot"}
+SUFFIX_BOT = {"login": "some-runner[bot]", "type": "User"}
+
+
+def _iso(minutes_ago: float = 0, days_ago: float = 0) -> str:
+    when = datetime.now(timezone.utc) - timedelta(days=days_ago, minutes=minutes_ago)
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _comment(num: int, user: dict = HUMAN, **age: float) -> dict:
+    return {
+        "issue_url": f"https://api.github.com/repos/o/r/issues/{num}",
+        "created_at": _iso(**age),
+        "user": user,
+        "html_url": f"https://github.com/o/r/issues/{num}#issuecomment-{num}0",
+    }
+
+
+def _thread(
+    num: int,
+    title: str = "a task",
+    closed_by: dict | None = None,
+    pr: bool = False,
+    **closed_age: float,
+) -> dict:
+    t: dict = {"number": num, "title": title, "state": "open"}
+    if closed_by is not None:
+        t.update(state="closed", closed_at=_iso(**closed_age), closed_by=closed_by)
+    if pr:
+        t["pull_request"] = {"url": f"https://api.github.com/repos/o/r/pulls/{num}"}
+    return t
+
+
+@pytest.fixture
+def unanswered(run):
+    """Run `unanswered-comments` over a canned comment feed and thread set."""
+
+    def _go(*args: str, comments: list[dict], threads: list[dict], **env: str) -> str:
+        proc, _ = run(
+            "unanswered-comments",
+            *args,
+            GH_COMMENTS_JSON=json.dumps(comments),
+            GH_THREADS_JSON=json.dumps({str(t["number"]): t for t in threads}),
+            **env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout
+
+    return _go
 
 
 @pytest.fixture
@@ -247,3 +318,210 @@ class TestNextSelects:
         )
         assert proc.returncode == 1
         assert proc.stdout.strip() == ""
+
+
+class TestUnansweredComments:
+    """The one input no other net keys on: a person having said something.
+
+    Detection is a single comparison - a thread's newest comment is
+    human-authored - so nothing below spends long on it. The four exclusions are
+    the design, because this section prints on every tick and a backstop that
+    cries wolf is one the loop learns to skip. Each exclusion gets its own case,
+    with the *other three* deliberately unable to fire, so a passing test names
+    which rule did the work.
+    """
+
+    def test_reports_a_trailing_human_comment_on_an_open_thread(self, unanswered) -> None:
+        out = unanswered(
+            comments=[_comment(7, minutes_ago=90)],
+            threads=[_thread(7, title="Milestone 2 plan")],
+        )
+        assert "#7" in out
+        assert "unanswered 1h" in out
+        assert "@gigi" in out
+        assert 'issue "Milestone 2 plan"' in out
+        # The URL is the point of the line: the reader has to be able to go and
+        # read what the person actually asked for.
+        assert "issuecomment-70" in out
+
+    def test_reports_when_the_loop_closed_over_the_human(self, unanswered) -> None:
+        """MaKlaude issue #141 exactly: the person spoke, then the bot closed.
+
+        This is the shape that survives all four exclusions, and the only reason
+        the closed branch exists at all - a close hides the thread from every
+        other section of `summary` while the request is still unmet.
+        """
+        out = unanswered(
+            comments=[_comment(141, minutes_ago=90)],
+            threads=[_thread(141, closed_by=APP_BOT, minutes_ago=60)],
+        )
+        assert "#141" in out
+        assert "the loop closed this over them" in out
+
+    def test_a_bot_reply_last_is_not_reported(self, unanswered) -> None:
+        """Exclusion 1. The loop has answered; nothing is waiting."""
+        out = unanswered(
+            comments=[_comment(7, user=APP_BOT, minutes_ago=90)],
+            threads=[_thread(7)],
+        )
+        assert out.strip() == ""
+
+    def test_a_bot_without_the_type_is_still_a_bot(self, unanswered) -> None:
+        """Exclusion 1, via the `[bot]` login suffix rather than type "Bot".
+
+        A PAT-backed bot account has no Bot type. Reading only the type would
+        report every one of the loop's own comments back to it.
+        """
+        out = unanswered(
+            comments=[_comment(7, user=SUFFIX_BOT, minutes_ago=90)],
+            threads=[_thread(7)],
+        )
+        assert out.strip() == ""
+
+    def test_outside_the_window_is_not_reported(self, unanswered) -> None:
+        """Exclusion 2. Open thread, human comment - only the age excludes it."""
+        out = unanswered(comments=[_comment(7, days_ago=8)], threads=[_thread(7)])
+        assert out.strip() == ""
+
+    def test_the_window_flag_widens_it(self, unanswered) -> None:
+        """Proves the age is what excluded the case above, not something else."""
+        out = unanswered(
+            "--window-days", "30", comments=[_comment(7, days_ago=8)], threads=[_thread(7)]
+        )
+        assert "#7" in out
+
+    def test_the_window_env_var_widens_it(self, unanswered) -> None:
+        out = unanswered(
+            comments=[_comment(7, days_ago=8)],
+            threads=[_thread(7)],
+            GENESIS_COMMENT_WINDOW_DAYS="30",
+        )
+        assert "#7" in out
+
+    def test_a_comment_after_the_close_is_not_reported(self, unanswered) -> None:
+        """Exclusion 3: the closing note - "LGTM", "signed off", "Closing."
+
+        That is the dominant shape of a human comment trailing a thread, and the
+        largest false-positive class. The closer here is a *bot*, so exclusion 4
+        can't be what's doing the work.
+        """
+        out = unanswered(
+            comments=[_comment(7, minutes_ago=10)],
+            threads=[_thread(7, closed_by=APP_BOT, minutes_ago=60)],
+        )
+        assert out.strip() == ""
+
+    def test_a_human_closer_is_not_reported(self, unanswered) -> None:
+        """Exclusion 4: a person who comments and then closes has answered.
+
+        The comment predates the close here, so exclusion 3 can't be what's doing
+        the work - only the identity of the closer can.
+        """
+        out = unanswered(
+            comments=[_comment(7, minutes_ago=90)],
+            threads=[_thread(7, closed_by=HUMAN, minutes_ago=60)],
+        )
+        assert out.strip() == ""
+
+    def test_stalest_first(self, unanswered) -> None:
+        """Same order as every other report: the one going unanswered longest."""
+        out = unanswered(
+            comments=[_comment(8, days_ago=1), _comment(7, days_ago=3)],
+            threads=[_thread(7), _thread(8)],
+        )
+        assert out.index("#7") < out.index("#8")
+
+    def test_feed_order_does_not_decide_which_comment_is_newest(self, unanswered) -> None:
+        """The bot's reply is newest but arrives second in the feed.
+
+        Trusting the feed's order would take the human's comment as the newest and
+        report a thread the loop has already answered - the exact way this section
+        would start crying wolf.
+        """
+        out = unanswered(
+            comments=[
+                _comment(7, minutes_ago=90),
+                _comment(7, user=APP_BOT, minutes_ago=30),
+            ],
+            threads=[_thread(7)],
+        )
+        assert out.strip() == ""
+
+    def test_a_pr_thread_says_pr(self, unanswered) -> None:
+        out = unanswered(
+            comments=[_comment(154, minutes_ago=90)],
+            threads=[_thread(154, title="add the thing", pr=True)],
+        )
+        assert 'PR "add the thing"' in out
+
+    def test_empty_means_all_clear(self, unanswered) -> None:
+        assert unanswered(comments=[], threads=[]).strip() == ""
+
+    def test_an_unreadable_thread_is_not_reported(self, unanswered) -> None:
+        """A 404 or a rate limit must not be guessed at in either direction."""
+        out = unanswered(comments=[_comment(7, minutes_ago=90)], threads=[])
+        assert out.strip() == ""
+
+    def test_an_unreadable_api_says_so_rather_than_printing_nothing(self, run) -> None:
+        """Silence here would read as all-clear, which is the failure inverted."""
+        proc, _ = run("unanswered-comments", GH_API_FAILS="1")
+        assert proc.returncode == 0, proc.stderr
+        assert "could not be read" in proc.stdout
+        assert "do NOT read" in proc.stdout
+
+
+class TestSummarySection:
+    """Unconditional, like the other sections: empty is the all-clear signal.
+
+    Printing the section only when it has content makes "nothing waiting"
+    indistinguishable from "this check silently stopped running", which is the
+    class of invisible nothing-happened the whole command exists to close.
+    """
+
+    def test_the_section_prints_even_when_nothing_is_waiting(self, run) -> None:
+        proc, _ = run("summary", GH_COMMENTS_JSON="[]")
+        assert proc.returncode == 0, proc.stderr
+        assert "=== Unanswered Human Comments" in proc.stdout
+
+    def test_the_section_carries_the_finding(self, run) -> None:
+        comments = json.dumps([_comment(7, minutes_ago=90)])
+        threads = json.dumps({"7": _thread(7, title="Milestone 2 plan")})
+        proc, _ = run("summary", GH_COMMENTS_JSON=comments, GH_THREADS_JSON=threads)
+        section = proc.stdout.split("=== Unanswered Human Comments")[1]
+        assert "#7" in section.split("=== Blocked")[0]
+
+    def test_help_documents_the_command_and_its_window(self, run) -> None:
+        proc, _ = run("help")
+        assert "unanswered-comments" in proc.stderr
+        assert "--window-days" in proc.stderr
+
+
+class TestRecheckBeforeMergeIsSeeded:
+    """The report only helps the *next* run; the damage happens at merge time.
+
+    So the rule has to reach the session that is about to merge, in **both**
+    execution modes. Under `genesis serve` every `genesis-*` workflow is disabled,
+    so a rule carried only by a workflow prompt reaches nobody there. `CLAUDE.md`
+    and `.claude/agents/*.md` are the two carriers that survive both modes, which
+    is why these assert on those templates and not on a workflow.
+    """
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "agents/orchestrator.md",
+            "agents/evolver.md",
+            "claude_md.md.j2",
+        ],
+    )
+    def test_the_carrier_tells_the_session_to_re_check(self, template: str) -> None:
+        text = (TEMPLATES / template).read_text()
+        assert "issues.sh unanswered-comments" in text
+        assert "before" in text.lower()
+
+    def test_claude_md_exempts_the_narrow_class_by_classification(self) -> None:
+        """Not by a second list: a narrow runner is exempt by being classified,
+        never by someone remembering to add it somewhere."""
+        text = (TEMPLATES / "claude_md.md.j2").read_text()
+        assert "narrow-class runner is exempt" in text
+        assert "by\nits classification" in text or "by its classification" in text
