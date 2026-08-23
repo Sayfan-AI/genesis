@@ -337,3 +337,44 @@ def test_a_run_budget_stop_re_enables_the_workflows_it_disabled(plane, script, m
     assert plane.shutdown is True
     assert disable.called, "serve must have disabled workflows to begin with"
     assert enable.called, "a budget stop must restore the workflows it disabled"
+
+
+def test_a_resume_that_loads_nothing_does_not_end_the_chain(plane, script, sessions_run, monkeypatch):
+    """The production near-miss (#43), end to end.
+
+    A resume came back in six seconds as `success turns=0 cost=$0.00`, which is
+    not an abnormal ending, so the chain ended holding real uncommitted work and
+    $6.47 already spent. It survived only because the follow-up pass happened to
+    launch a fresh session seconds later — luck, not mechanism.
+    """
+    monkeypatch.setenv("GENESIS_COST_CEILING", "100")
+    empty = {"tools": 0, "subtype": "success", "turns": 0, "cost": 0.0}
+    script([
+        {"tools": 5, "subtype": "error_max_turns", "turns": 41, "cost": 1.0, "commit": "a.txt"},
+        empty,
+        empty,
+    ], judge="STOP")
+
+    plane.run_orchestrator(None)
+
+    assert sessions_run() >= 3, "the empty resume should have been retried once"
+    assert plane.pending_followup, (
+        "a chain that could not be resumed must be handed on explicitly, not "
+        "reported as a clean finish"
+    )
+
+
+def test_the_dev_repos_pre_agent_step_runs_under_serve(plane, script, repo, monkeypatch):
+    """A net a dev system built to be deterministic stays deterministic across
+    execution modes, or "we made this a script so nobody has to remember it" is
+    only true in CI (#44)."""
+    monkeypatch.setenv("GENESIS_COST_CEILING", "100")
+    marker = repo / "pre-session-ran.txt"
+    hook = repo / ".genesis" / "scripts" / "pre-session.sh"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(f"#!/usr/bin/env bash\necho 'checked the gates'\ntouch '{marker}'\n")
+
+    script([{"tools": 2, "subtype": "success", "turns": 3, "cost": 1.0}])
+    plane.run_orchestrator(None)
+
+    assert marker.exists(), "serve launched the agent without running the repo's pre-step"

@@ -100,6 +100,26 @@ workflow prompt, for the reason the next section gives: local mode disables ever
 `genesis-*` workflow, so a rule carried only by a workflow prompt reaches nobody
 there.
 
+### Deterministic Steps That Must Run Before the Agent
+
+A check that needs no judgement should be a script, and a script that has to run
+*before* the agent gets its first turn goes in **`.genesis/scripts/pre-session.sh`**.
+
+Wiring it only as a workflow step isn't enough. Under `genesis serve` every
+`genesis-*` workflow is disabled and the session is launched directly, so a step
+placed ahead of the agent step in YAML silently stops existing in the mode the
+project may actually be running in — and the check goes back to being an agent's
+judgement call, which is the thing making it a script was meant to replace. That
+happened: a stale-gate nudge was written precisely because an unanswered
+`needs:human` gate is the one failure with no safety net, and one then sat open 21
+days across ~85 scheduled ticks.
+
+`serve` runs `pre-session.sh` before every session it launches, bounded and
+non-fatal — a net that hangs or fails must not stop the loop it protects. Keep it
+idempotent, keep it fast, and compose several checks inside it rather than adding
+more conventional paths. For the Actions side, wire the same script as a step
+before the agent step, so both modes run the same file.
+
 ## Changing Your Own `.claude/`
 
 You can't, and no configuration change makes you able to. This is measured, not
