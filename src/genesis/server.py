@@ -645,24 +645,21 @@ class LocalControlPlane:
                             self.recent_tools.append(summary)
                             del self.recent_tools[:-12]
                 elif kind == "result":
-                    self.last_result_subtype = event.get("subtype")
-                    # A "successful" session that used no tools did nothing, and
-                    # nothing is the failure this whole system exists to notice.
-                    # Seen for real: fifteen such runs in a row reported success
-                    # for $0.00 while quietly consuming the event backlog.
+                    # ONE PROCESS CAN EMIT MORE THAN ONE OF THESE. Measured (#78,
+                    # #79): a leftover task notification from a background job the
+                    # agent had started itself flushed an empty turn and an early
+                    # `result`, the continuation prompt landed 20ms later, and the
+                    # same process carried on and emitted a second `result` 27
+                    # seconds after that. Two result events, one session.
                     #
-                    # The advice used to say "check that the agent profile is
-                    # authenticated", pointing at profile isolation that commit
-                    # 4776803 removed - a message sending its reader to a
-                    # mechanism that no longer exists is worse than none, because
-                    # they spend the search before concluding it's stale (#43).
-                    if turns == 0 and event.get("subtype") == "success":
-                        log(
-                            "  WARNING: session ran no tools at all and reported "
-                            "success - `claude -p` either could not authenticate "
-                            "(check ANTHROPIC_API_KEY) or, on a resume, failed to "
-                            "load the session it was given"
-                        )
+                    # So nothing here may assume it is seeing the last one.
+                    # `last_result_subtype`, `last_tool_calls` and
+                    # `last_session_id` are last-write-wins on purpose, and that is
+                    # correct for all three: the terminal event carries the outcome
+                    # that mattered, and `turns` is cumulative across the stream so
+                    # its final value is the session total. Cost is the one that
+                    # has to accumulate, because each event reports only its own.
+                    self.last_result_subtype = event.get("subtype")
                     loki_push(
                         "session-outcome",
                         {
@@ -677,7 +674,11 @@ class LocalControlPlane:
                         },
                     )
                     self.last_tool_calls = turns
-                    self.last_cost = float(event.get("total_cost_usd") or 0)
+                    # `+=`, not `=`. `_run_session` zeroes this before launching,
+                    # so accumulating gives the process total. Overwriting charged
+                    # only the final event, which is the same undercount shape as
+                    # the unaccounted judge sessions in issue #50, one layer down.
+                    self.last_cost += float(event.get("total_cost_usd") or 0)
                     if event.get("session_id"):
                         self.last_session_id = event["session_id"]
                     cost = event.get("total_cost_usd") or 0
@@ -1392,6 +1393,33 @@ class LocalControlPlane:
             # plane — the progress feed is never allowed to block the run.
             reader.join(timeout=10)
             self.orch_proc = None
+            self._warn_if_the_session_did_nothing()
+
+    def _warn_if_the_session_did_nothing(self) -> None:
+        """Flag a session that reported success without doing anything.
+
+        Seen for real: fifteen such runs in a row reported success for $0.00 while
+        quietly consuming the event backlog, which is the failure this whole system
+        exists to notice.
+
+        Checked here, after the reader has joined, rather than inside the result
+        branch. A process can emit more than one `result` event, and the per-event
+        version fired on the first one - so a session that flushed an early empty
+        result and then worked normally got told to go and check its API key
+        (#79). By this point `last_tool_calls` and `last_result_subtype` describe
+        the session rather than a moment in it.
+
+        Note the message is about what to check, not about what happened. An
+        earlier version named a mechanism that had been deleted, which cost its
+        reader the whole search before they worked out the advice was stale.
+        """
+        if self.last_tool_calls == 0 and self.last_result_subtype == "success":
+            log(
+                "  WARNING: session ran no tools at all and reported success - "
+                "`claude -p` either could not authenticate (check "
+                "ANTHROPIC_API_KEY) or, on a resume, failed to load the session "
+                "it was given"
+            )
 
     # ----- main loop -----
 
