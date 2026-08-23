@@ -29,6 +29,10 @@ Per-session keys:
     hang     sleep forever instead of finishing, to exercise the deadline
     crash    exit non-zero without emitting a result event
     garbage  emit an unparseable line before the result
+
+When $FAKE_CLAUDE_TIMELINE is set, every invocation also appends one word to that
+file - `session`, `resume` or `judge` - interleaved with the lines the fake
+`issues.sh` writes there. See `note()`.
 """
 from __future__ import annotations
 
@@ -44,6 +48,24 @@ SESSION_ID = "chaos00-0000-0000-0000-00000000000"
 
 def emit(obj: dict) -> None:
     print(json.dumps(obj), flush=True)
+
+
+def note(kind: str) -> None:
+    """Append one line to the shared timeline, when a scenario asked for one.
+
+    The counter file says how many times this ran; the timeline says *when*,
+    relative to the other thing the plane forks. Ordering is a property the
+    control plane makes claims about in prose — a killed chain hands its issue
+    back "before the follow-up pass rather than after", because that pass
+    re-selects work through `issues.sh next` and `next` skips anything still
+    labelled `in-progress`. A count can't tell a release that happened first
+    from one that happened second, and second is the bug.
+    """
+    path = os.environ.get("FAKE_CLAUDE_TIMELINE")
+    if not path:
+        return
+    with open(path, "a") as handle:
+        handle.write(kind + "\n")
 
 
 def main() -> int:
@@ -63,6 +85,7 @@ def main() -> int:
     if "--max-turns" in argv:
         budget = int(argv[argv.index("--max-turns") + 1])
         if budget <= 2:
+            note("judge")
             print(json.dumps({
                 "type": "result",
                 "subtype": "success",
@@ -76,6 +99,7 @@ def main() -> int:
     sessions = spec.get("sessions") or [{}]
     step = sessions[min(n, len(sessions) - 1)]
     counter.write_text(str(n + 1))
+    note("resume" if "--resume" in argv else "session")
 
     emit({"type": "system", "subtype": "init", "session_id": SESSION_ID})
 

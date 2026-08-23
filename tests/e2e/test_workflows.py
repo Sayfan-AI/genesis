@@ -175,6 +175,76 @@ def test_merge_workflow_leaves_room_for_a_pre_merge_gate() -> None:
     assert "steps.candidates.outputs.numbers" in content
 
 
+def test_auto_merge_is_not_keyed_to_which_gating_workflow_finishes_last() -> None:
+    """MaKlaude issue #33, measured on its PR #30.
+
+    The repo grew a second gating workflow — `E2E (kind)` alongside `CI` — and
+    the merge workflow's `workflow_run` list named only the first. `CI` finished
+    first, fired the merge attempt, and was correctly turned away because e2e was
+    still pending. `E2E (kind)` then went green and fired nothing, because it
+    wasn't in the list. The pull request sat MERGEABLE and CLEAN and unmerged
+    until a human noticed. PR #32 was queued up behind it to hit the same trap.
+
+    The list can't be the fix: it's a guess at names a dev system hasn't chosen
+    yet, and the trap reappears the day it adds a third gate. What removes the
+    trap is the sweep being derived from repository state rather than from
+    whatever woke it — so any trigger at all reaches every mergeable pull
+    request, and the hourly cron bounds how long a missed one waits.
+
+    Both copies, because genesis now lands its own bot pull requests (issue #39)
+    and would starve one exactly the same way. The two are allowed to differ in
+    what wakes them; neither is allowed to depend on it.
+    """
+    for workflow in (MERGE_WORKFLOW, GENESIS_MERGE):
+        body = "\n".join(
+            line
+            for line in workflow.read_text().splitlines()
+            if not line.strip().startswith("#")
+        )
+        assert "schedule:" in body and "cron:" in body, (
+            f"{workflow.name} has no cron, so a gating workflow missing from the "
+            "workflow_run list means a green pull request waits for a human"
+        )
+        assert "gh pr list --state open" in body, (
+            f"{workflow.name} must ask what is open, not what the triggering "
+            "event was about"
+        )
+        assert "github.event_name" not in body and "github.event.workflow_run" not in body, (
+            f"{workflow.name} branches on which trigger woke it, so the trigger "
+            "list is load-bearing again and the next unlisted gate reintroduces "
+            "the trap"
+        )
+
+
+def test_every_orchestrator_workflow_sweeps_claims_before_the_agent() -> None:
+    """The GitHub Actions answer to a silent `error_max_turns` death.
+
+    A run that dies mid-agent decides nothing and therefore releases nothing:
+    Actions has no continuation ladder, so the `in-progress` label `issues.sh
+    claim` wrote at pickup outlives the run that wrote it, and every later run
+    skips that issue. The sweep is the only thing that takes it back, and it has
+    to be a shell step ahead of the agent — inside the prompt it would be the
+    first casualty of the very budget death it exists to clean up after.
+
+    Both orchestrator-class workflows need it, not just the cron. `genesis-events`
+    fires far more often, claims work the same way, and dies the same way; it
+    carried no sweep at all, so a claim stranded by an event-driven run waited for
+    a scheduled run up to six hours later to notice it.
+    """
+    for name in ORCHESTRATOR_CLASS_TEMPLATES:
+        content = _template(name)
+        assert "issues.sh sweep-claims" in content, (
+            f"{name} can strand a claim and never takes one back"
+        )
+        assert content.index("issues.sh sweep-claims") < content.index(
+            "anthropics/claude-code-action"
+        ), f"{name} sweeps after the agent step, so a run that dies never sweeps"
+        sweep = _step(content, "Release claims nobody is working")
+        assert "continue-on-error: true" in sweep, (
+            f"{name} lets a failed backstop stop the work it is backing up"
+        )
+
+
 def test_workflows_have_correct_permissions() -> None:
     for name in ["genesis-orchestrator.yml", "genesis-events.yml", "genesis-evolver.yml"]:
         content = (TEMPLATES_DIR / "workflows" / name).read_text()
