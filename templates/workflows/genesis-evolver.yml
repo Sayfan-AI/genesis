@@ -26,6 +26,12 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
           permission-workflows: write
+          # Without this every `gh run list` from inside the agent returns
+          # 403 Resource not accessible by integration, which silently removes
+          # failed workflow runs from the evolver's signal set - one of its
+          # primary inputs - and leaves it reviewing a system it cannot see
+          # failing (genesis issue #14, hit on the-gigi/butterfly). Read-only.
+          permission-actions: read
 
       - uses: anthropics/claude-code-action@v1
         with:

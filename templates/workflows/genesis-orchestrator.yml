@@ -6,6 +6,22 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch: {}
 
+# One group shared by the scheduled and the event-driven orchestrator, because
+# the collisions that hurt are between them, not within either. Measured twice:
+# two `workflow_dispatch` runs 4 seconds apart each filed a "Milestone 1 plan"
+# issue (genesis issue #22), and a human closing a milestone issue fired
+# `issues:closed` and `issue_comment:created` together, so two runs both passed
+# their duplicate check before either had created anything and filed 10 task
+# issues for 5 tasks (genesis issue #11). An in-prompt "no duplicate issues" rule
+# cannot win that race - the second run checks before the first has written.
+#
+# `cancel-in-progress: false` on purpose. Each event may carry state that only
+# exists in that event - an issue-closed approval signal, a human's comment - and
+# dropping the queued run drops the signal. Queue, don't cancel.
+concurrency:
+  group: genesis-orchestrator-${{ github.repository }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   issues: write
@@ -26,8 +42,42 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
           permission-workflows: write
+          # Without this every `gh run list` from inside the agent returns
+          # 403 Resource not accessible by integration, which silently removes
+          # failed workflow runs from the evolver's signal set - one of its
+          # primary inputs - and leaves it reviewing a system it cannot see
+          # failing (genesis issue #14, hit on the-gigi/butterfly). Read-only.
+          permission-actions: read
+
+      # A scheduled run while a `needs:human` gate is open reads the state,
+      # confirms the gate, and exits - about $0.13 to learn nothing. Measured on
+      # `ronny-learns-ai`: one gate issue sat open 4+ days and produced ~17 idle
+      # runs for ~$2.21 (genesis issue #15). Deterministic over agentic - "is
+      # anything waiting on a person" is a query, not a judgement.
+      #
+      # This guard belongs ONLY on the scheduled workflow. A human closing the
+      # gate issue, or commenting on it, arrives through genesis-events.yml, and
+      # that IS the signal to advance - gating it there would make clearing the
+      # gate impossible and wedge the project permanently. The events workflow is
+      # also what keeps this from deadlocking on a stale label: no cron run will
+      # touch it, but any human action still wakes the loop.
+      - name: Skip the run if a human gate is open
+        id: gate
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          count=$(gh issue list --label "needs:human" --state open --json number --jq length)
+          if [ "${count:-0}" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping the LLM run: $count open needs:human issue(s) are waiting on a person."
+            gh issue list --label "needs:human" --state open --json number,title \
+              --jq '.[] | "  #\(.number) \(.title)"'
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: anthropics/claude-code-action@v1
+        if: steps.gate.outputs.skip != 'true'
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}

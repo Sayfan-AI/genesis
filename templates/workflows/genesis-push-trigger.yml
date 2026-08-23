@@ -7,7 +7,7 @@ on:
 jobs:
   trigger-orchestrator:
     runs-on: ubuntu-latest
-    if: github.actor != 'genesis-dev-bot[bot]'
+    if: ${{ !endsWith(github.actor, '[bot]') }}  # see genesis-events.yml
     steps:
       - uses: actions/create-github-app-token@v3
         id: app-token
