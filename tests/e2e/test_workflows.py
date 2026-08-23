@@ -207,3 +207,71 @@ def test_template_action_pins_match_genesis_own_workflows() -> None:
             f"templates/workflows pins {action} at more than one version "
             f"({sorted(versions)}); a scaffolded repo should be internally consistent"
         )
+
+
+def test_every_claude_workflow_grants_the_tools_that_actually_get_granted() -> None:
+    """Tool grants have to come from `claude_args`, not from `permissions.allow`.
+
+    Issue #7 proposed adding `Edit(*)` / `Write(*)` to the scaffolded
+    `.claude/settings.json`. Probed against a real session, that would be inert
+    where it matters: an untrusted workspace drops the repo's allow-list outright,
+    reporting
+
+        Ignoring N permissions.allow entries from .claude/settings.json:
+        this workspace has not been trusted
+
+    and every GitHub Actions checkout is untrusted. So the entries would appear to
+    grant something, do nothing on the runner, and quietly start working once a
+    developer accepted a trust dialog locally - the worst kind of config, one that
+    behaves differently depending on who is looking at it.
+
+    What does grant tools in both modes is `--allowedTools`, passed here through
+    `claude_args` and in local mode through `server.ALLOWED_TOOLS`. `Write` is
+    called out separately because without it an agent can edit files that exist
+    and create none, so any task needing a new test, script or agent definition is
+    impossible to satisfy - and the symptom is a confused agent, not an error.
+    """
+    for workflow in _claude_workflows(TEMPLATES_DIR / "workflows"):
+        content = workflow.read_text()
+        match = re.search(r"claude_args:\s*\"([^\"]*)\"", content)
+        assert match, f"{workflow.name} invokes Claude with no claude_args"
+        args = match.group(1)
+        assert "--allowedTools" in args, (
+            f"{workflow.name} grants no tools; a permissions.allow entry in "
+            "settings.json will not do it, because an untrusted workspace drops it"
+        )
+        granted = args.split("--allowedTools", 1)[1].split()[0].split(",")
+        assert "Read" in granted and "Bash" in granted, (
+            f"{workflow.name} cannot read the repo or run a command: {granted}"
+        )
+
+
+def test_the_orchestrator_class_can_create_files_not_only_edit_them() -> None:
+    """`Write` is the one that's easy to leave out and hard to diagnose.
+
+    Without it the agent edits existing files fine and silently cannot create any,
+    so a task needing a new test or a new agent definition fails in a way that
+    reads as the model being unhelpful. The narrow merge runner is exempt: its
+    fixed procedure writes nothing.
+    """
+    from genesis.scaffold import WORKFLOW_TURN_CLASSES
+
+    for workflow in _claude_workflows(TEMPLATES_DIR / "workflows"):
+        if WORKFLOW_TURN_CLASSES.get(workflow.name) != "orchestrator":
+            continue
+        args = re.search(r"claude_args:\s*\"([^\"]*)\"", workflow.read_text()).group(1)
+        granted = args.split("--allowedTools", 1)[1].split()[0].split(",")
+        assert {"Write", "Edit"} <= set(granted), (
+            f"{workflow.name} is orchestrator-class but cannot create files: {granted}"
+        )
+
+
+def test_local_mode_grants_the_same_tools_as_the_workflows() -> None:
+    """A rule that holds in one execution mode and not the other is worse than no
+    rule: it makes a project's behaviour depend on how it happens to be driven."""
+    from genesis import server
+
+    granted = set(server.ALLOWED_TOOLS.split(","))
+    assert {"Read", "Write", "Edit", "Bash"} <= granted, (
+        f"genesis serve grants fewer tools than the workflows do: {sorted(granted)}"
+    )

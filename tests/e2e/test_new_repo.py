@@ -110,6 +110,14 @@ def test_new_repo_has_settings_with_hooks(tmp_dir: Path) -> None:
     log_at = next(i for i, c in enumerate(pre) if "log.sh" in c)
     assert guard_at < log_at, f"host-guard must run before the logger: {pre}"
 
+    # Same reasoning for the .claude/ gate. It is the only thing that turns an
+    # unactionable "you haven't granted it yet" into a named request, and it is a
+    # file on disk doing nothing at all unless it is declared here — which is
+    # exactly the class of failure it exists to report (#49).
+    assert any("claude-dir-guard.sh" in c for c in pre), f".claude gate not wired: {pre}"
+    gate_at = next(i for i, c in enumerate(pre) if "claude-dir-guard.sh" in c)
+    assert gate_at < log_at, f"the .claude gate must run before the logger: {pre}"
+
 
 def test_new_repo_has_genesis_config(tmp_dir: Path) -> None:
     repo = tmp_dir / PROJECT

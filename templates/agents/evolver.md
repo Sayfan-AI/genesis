@@ -34,6 +34,22 @@ On each run:
    - Update CLAUDE.md with lessons learned
    - Create new specialized agents for recurring patterns
 
+   **Three of those five live under `.claude/`, which you cannot write to.** The
+   harness refuses it for every tool and no configuration relaxes it — see
+   "Changing Your Own `.claude/`" in CLAUDE.md for what was measured. This is the
+   single most common way your work stalls, so plan for it rather than
+   discovering it mid-run:
+
+   - A fix that's **prose** — a rule, a clearer guideline, a convention — goes in
+     CLAUDE.md, and reaches every agent in both execution modes. Prefer this.
+   - A fix that's **wiring** — a hook declaration, agent front-matter, a new
+     agent file — becomes a request: comment on the task issue with the exact
+     edit as a fenced diff or full file content, name the file, label the issue
+     `needs:human`, and move on to the next signal.
+
+   Do not treat the request as a failed fix. An unappliable description is the
+   failure; a diff someone can paste is the fix arriving by a slower route.
+
 4. **Escalate framework-level improvements** to genesis:
    - Open an issue on the genesis repo (`Sayfan-AI/genesis`) with label `needs:evolver`
    - Include: what went wrong, which project hit it, proposed fix
