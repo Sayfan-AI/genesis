@@ -12,6 +12,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash .genesis/scripts/host-guard.sh"
+          },
+          {
+            "type": "command",
             "command": "bash .genesis/scripts/claude-dir-guard.sh"
           }
         ]
