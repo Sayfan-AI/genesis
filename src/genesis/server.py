@@ -72,6 +72,11 @@ ISSUES_SCRIPT = Path(".genesis/scripts/issues.sh")
 # where forgetting is visible in a file it owns.
 PRE_SESSION_SCRIPT = Path(".genesis/scripts/pre-session.sh")
 
+# Where the harness reads its hook declarations. Consulted only to answer "is the
+# pre-session script already going to run on its own", so the plane doesn't run it
+# a second time.
+CLAUDE_SETTINGS = Path(".claude/settings.json")
+
 # Bounded and non-fatal, both deliberate. These run before every session, so a
 # hung net would wedge the loop it was written to protect, and a net that fails
 # is still a better outcome than a control plane that stops. The workflow-step
@@ -1040,6 +1045,24 @@ class LocalControlPlane:
             and self.last_cost == 0.0
         )
 
+    def _pre_session_hook_is_declared(self) -> bool:
+        """True when .claude/settings.json already runs the script on SessionStart.
+
+        Reads defensively and answers False on anything it can't parse: the cost of
+        a wrong False is running a net twice, and the cost of a wrong True is not
+        running it at all. Those don't weigh the same.
+        """
+        try:
+            settings = json.loads(CLAUDE_SETTINGS.read_text())
+            entries = (settings.get("hooks") or {}).get("SessionStart") or []
+            return any(
+                PRE_SESSION_SCRIPT.name in (hook.get("command") or "")
+                for entry in entries
+                for hook in (entry.get("hooks") or [])
+            )
+        except (OSError, ValueError, AttributeError, TypeError):
+            return False
+
     def run_pre_session_steps(self) -> None:
         """Run the dev repo's own pre-agent checks, the way a workflow step would.
 
@@ -1055,8 +1078,17 @@ class LocalControlPlane:
         Bounded and non-fatal: this runs before a session, and a net that hangs or
         fails must not be able to stop the loop it protects. Output is echoed so
         the terminal shows what ran, which is the local equivalent of a step's log.
+
+        Skipped when the script is already declared on `SessionStart`, which is how
+        genesis seeds it. That hook is the seam both execution modes share - it
+        fires under GitHub Actions and under serve alike - so it's the mechanism,
+        and this call is the fallback for a repo that has unwired it. Running both
+        would run every net twice a session, and "idempotent" is a contract the
+        control plane shouldn't lean on when it can simply not do it twice.
         """
         if not PRE_SESSION_SCRIPT.is_file():
+            return
+        if self._pre_session_hook_is_declared():
             return
         try:
             out = subprocess.run(

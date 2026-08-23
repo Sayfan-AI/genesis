@@ -1410,3 +1410,66 @@ def test_a_hanging_pre_session_script_cannot_wedge_the_loop(plane, monkeypatch) 
     start = time.time()
     plane.run_pre_session_steps()
     assert time.time() - start < 10, "the pre-session step was not bounded"
+
+
+def test_the_pre_session_script_runs_once_when_the_hook_declares_it(plane) -> None:
+    """The hook is the mechanism; the plane's own call is the fallback.
+
+    `SessionStart` is the one seam both execution modes share — it fires under
+    GitHub Actions and under serve alike — which is what closes the half of #44
+    the plane alone can't reach. But then the plane calling it too would run every
+    net twice a session, and leaning on "idempotent" for that is a contract the
+    control plane doesn't need to lean on.
+    """
+    script = Path(server.PRE_SESSION_SCRIPT)
+    script.parent.mkdir(parents=True, exist_ok=True)
+    counter = Path("pre-session-runs.txt").resolve()
+    script.write_text(f"#!/usr/bin/env bash\necho x >> {counter}\n")
+
+    settings = Path(server.CLAUDE_SETTINGS)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({
+        "hooks": {"SessionStart": [{"matcher": "", "hooks": [
+            {"type": "command", "command": "bash .genesis/scripts/pre-session.sh"},
+        ]}]}
+    }))
+
+    plane.run_pre_session_steps()
+    assert not counter.exists(), (
+        "the plane ran the script itself even though the harness hook will run it"
+    )
+
+
+def test_the_plane_still_runs_it_when_the_hook_is_absent(plane) -> None:
+    """A repo that unwired the hook, or an older scaffold that never had it, must
+    not silently lose its pre-agent nets."""
+    script = Path(server.PRE_SESSION_SCRIPT)
+    script.parent.mkdir(parents=True, exist_ok=True)
+    counter = Path("pre-session-runs.txt").resolve()
+    script.write_text(f"#!/usr/bin/env bash\necho x >> {counter}\n")
+
+    settings = Path(server.CLAUDE_SETTINGS)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"hooks": {"SessionStart": [
+        {"matcher": "", "hooks": [{"type": "command", "command": "bash .genesis/scripts/log.sh session-start"}]}
+    ]}}))
+
+    plane.run_pre_session_steps()
+    assert counter.exists(), "the pre-agent nets did not run in either place"
+
+
+def test_an_unreadable_settings_file_errs_toward_running_it(plane) -> None:
+    """A wrong False runs a net twice. A wrong True doesn't run it at all. Those
+    don't weigh the same."""
+    script = Path(server.PRE_SESSION_SCRIPT)
+    script.parent.mkdir(parents=True, exist_ok=True)
+    counter = Path("pre-session-runs.txt").resolve()
+    script.write_text(f"#!/usr/bin/env bash\necho x >> {counter}\n")
+
+    settings = Path(server.CLAUDE_SETTINGS)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    for content in ("not json", "[]", '{"hooks": null}', ""):
+        counter.unlink(missing_ok=True)
+        settings.write_text(content)
+        plane.run_pre_session_steps()
+        assert counter.exists(), f"settings {content!r} silently disabled the nets"

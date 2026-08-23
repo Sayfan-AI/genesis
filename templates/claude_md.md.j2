@@ -172,11 +172,16 @@ happened: a stale-gate nudge was written precisely because an unanswered
 `needs:human` gate is the one failure with no safety net, and one then sat open 21
 days across ~85 scheduled ticks.
 
-`serve` runs `pre-session.sh` before every session it launches, bounded and
-non-fatal — a net that hangs or fails must not stop the loop it protects. Keep it
-idempotent, keep it fast, and compose several checks inside it rather than adding
-more conventional paths. For the Actions side, wire the same script as a step
-before the agent step, so both modes run the same file.
+It's already wired, in both modes, and runs exactly once in either. It's declared
+on `SessionStart` in `.claude/settings.json`, which the harness fires under GitHub
+Actions and under `serve` alike, and `serve` additionally invokes it directly when
+that declaration is missing. Nothing to remember; just fill the file in.
+
+Keep it idempotent, fast, and non-fatal — it's on the critical path of every
+session start, and a net that can stop the loop it protects is worse than the gap
+it fills. Compose several checks inside this one script rather than asking for
+more conventional paths: a list of files defaults its next member to unwired,
+which is the shape that produced the problem in the first place.
 
 ## Changing Your Own `.claude/`
 

@@ -1,5 +1,6 @@
 """Test 1: New repo with embedded dev system."""
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -125,7 +126,6 @@ def test_new_repo_has_settings_with_hooks(tmp_dir: Path) -> None:
     repo = tmp_dir / PROJECT
     scaffold_new_repo(repo, GOAL, PROJECT)
 
-    import json
 
     settings = json.loads((repo / ".claude" / "settings.json").read_text())
     hooks = settings["hooks"]
@@ -232,3 +232,27 @@ def test_new_repo_no_target_repos_in_claude_md(tmp_dir: Path) -> None:
 
     claude_md = (repo / "CLAUDE.md").read_text()
     assert "Target Repositories" not in claude_md
+
+
+def test_pre_agent_nets_are_wired_on_the_seam_both_modes_share(tmp_dir: Path) -> None:
+    """`SessionStart` is the only seam that fires under GitHub Actions *and* under
+    `genesis serve`.
+
+    A dev system is taught to make a judgement-free check a script and put it
+    ahead of the agent step in workflow YAML — and local mode disables every
+    workflow, so that step stops existing in the mode the project may actually run
+    in. Measured (#44): a stale-gate nudge written for the one failure with no
+    safety net, and then a gate sat open 21 days across ~85 ticks because the step
+    that would have caught it only lived in a workflow that was switched off.
+    """
+    repo = tmp_dir / PROJECT
+    scaffold_new_repo(repo, GOAL, PROJECT)
+
+    assert (repo / ".genesis" / "scripts" / "pre-session.sh").is_file(), (
+        "the pre-agent seam is documented but not seeded"
+    )
+    hooks = json.loads((repo / ".claude" / "settings.json").read_text())["hooks"]
+    start = [h["command"] for entry in hooks["SessionStart"] for h in entry["hooks"]]
+    assert any("pre-session.sh" in c for c in start), (
+        f"pre-session.sh is seeded but never declared, so it never runs: {start}"
+    )
