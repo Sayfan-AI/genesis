@@ -320,6 +320,18 @@ as the exact file content — not a description of it — labeled `needs:human`.
 the same protocol the gate's message names, so the charter and the hook that stops
 it tell one story.
 
+**A third half was missing, found by following that instruction:** the
+`needs:human` label didn't exist in this repo, so `gh issue edit --add-label
+needs:human` answered `'needs:human' not found` and the escape hatch dead-ended one
+step from working. A dev repo never hits this because `templates/scripts/escalate.sh`
+creates the label on demand, and genesis has no `escalate.sh`. The label now exists
+here (`B60205`, "Waiting on a person", matching what `escalate.sh` creates). No test
+pins it — it's repo state on GitHub, and this suite stays hermetic — so if it's ever
+deleted, recreate it rather than working around it. The general shape is worth
+noting: **porting a mechanism means porting everything it depends on, and a label is
+a dependency.** Two of the three halves here were files, which is why the third went
+unnoticed.
+
 ## Self-Improvement
 
 This project opts in to self-improvement. Update this CLAUDE.md and project workflows as the design evolves. Keep `docs/` as the living design documents.
