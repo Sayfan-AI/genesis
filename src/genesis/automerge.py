@@ -34,9 +34,23 @@ import json
 import os
 import subprocess
 
-# Matches the `endswith("[bot]")` in genesis-merge.yml: the dev system lands its
+# Matches the author predicate in genesis-merge.yml: the dev system lands its
 # own work, and a human's pull request stays a human's decision.
 BOT_SUFFIX = "[bot]"
+
+
+def is_bot_author(author: object) -> bool:
+    """True when a `gh pr list --json author` entry is a bot.
+
+    `gh` reports an App author as `{"login": "app/genesis-dev-bot", "is_bot":
+    true}`. `<slug>[bot]` is the REST and events-feed spelling, which is what
+    `is_bot_actor` sees and what this predicate was first written against, so
+    it matched no real bot pull request (genesis issue #93). `is_bot` is the
+    signal and the suffix is a fallback for REST-shaped input.
+    """
+    if not isinstance(author, dict):
+        return False
+    return author.get("is_bot") is True or str(author.get("login", "")).endswith(BOT_SUFFIX)
 
 
 def _gh(args: list[str], token: str | None, timeout: int = 60) -> tuple[int, str]:
@@ -80,7 +94,7 @@ def ready_to_merge(repo: str, token: str | None = None) -> list[dict]:
     for pr in prs:
         if pr.get("isDraft"):
             continue
-        if not str(pr.get("author", {}).get("login", "")).endswith(BOT_SUFFIX):
+        if not is_bot_author(pr.get("author")):
             continue
         if pr.get("mergeable") not in (None, "MERGEABLE"):
             continue
