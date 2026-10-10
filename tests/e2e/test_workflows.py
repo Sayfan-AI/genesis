@@ -541,6 +541,15 @@ def test_the_bot_filter_matches_the_suffix_not_a_list_of_names() -> None:
         )
 
 
+def test_the_push_trigger_skips_the_push_that_created_main() -> None:
+    """Genesis can only disable the seed workflows after the push that creates
+    them, so that push fires `genesis-push-trigger.yml` before any secret exists.
+    It failed at the token step on every new dev system, the first run each one
+    ever had (issue #88). The branch-creating push is always the scaffold."""
+    content = _template("genesis-push-trigger.yml")
+    assert "!github.event.created" in content
+
+
 def test_the_two_execution_modes_agree_on_what_a_bot_is() -> None:
     """A project's loop-breaking must not depend on how it happens to be driven."""
     from genesis.server import is_bot_actor
