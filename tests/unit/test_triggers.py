@@ -102,6 +102,39 @@ def test_failed_runs_survives_a_broken_gh(monkeypatch) -> None:
     assert triggers.failed_runs("o/r", None) == []
 
 
+def test_open_human_gates_ignores_automation_failures(monkeypatch) -> None:
+    """Same predicate as the workflow step (issue #15): a dead run's escalation
+    means the next run may succeed, so it is not a reason to skip the cron."""
+    monkeypatch.setattr(
+        triggers.subprocess,
+        "run",
+        _gh_returns([
+            {"number": 1, "title": "Onboarding", "labels": [{"name": "needs:human"}]},
+            {"number": 2, "title": "Run died", "labels": [
+                {"name": "needs:human"}, {"name": "automation:failure"},
+            ]},
+        ]),
+    )
+    gates = triggers.open_human_gates("o/r")
+    assert [g["number"] for g in gates] == [1]
+
+
+def test_open_human_gates_reports_a_failed_query_as_unknown(monkeypatch) -> None:
+    """None, not []: the caller fails open on it, and the two must not be
+    confused with "checked, and nothing is waiting"."""
+    monkeypatch.setattr(
+        triggers.subprocess, "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 1, "", "HTTP 502"),
+    )
+    assert triggers.open_human_gates("o/r") is None
+
+    def boom(*a, **k):
+        raise OSError("gh missing")
+
+    monkeypatch.setattr(triggers.subprocess, "run", boom)
+    assert triggers.open_human_gates("o/r") is None
+
+
 def test_state_roundtrip_and_unreadable_state(tmp_path) -> None:
     p = tmp_path / ".trigger-state"
     triggers.save_state({"scheduled": 123.0}, p)

@@ -915,11 +915,9 @@ class LocalControlPlane:
         now = time.time()
 
         runs = triggers.failed_runs(self.repo, state.get("ci_failure_seen"), token)
-        due = (
-            triggers.ci_failure_due(runs)
-            or triggers.scheduled_due(state, now)
-            or triggers.evolver_due(state, now, Path(".claude/agents/evolver.md").is_file())
-        )
+        due = triggers.ci_failure_due(runs) or self._scheduled_unless_gated(state, now, token)
+        if due is None:
+            due = triggers.evolver_due(state, now, Path(".claude/agents/evolver.md").is_file())
         if due is None:
             return
 
@@ -936,6 +934,28 @@ class LocalControlPlane:
         else:
             state[due.name] = now
         triggers.save_state(state)
+
+    def _scheduled_unless_gated(self, state: dict, now: float, token: str):
+        """The cron trigger, skipped while a person owes the system an answer.
+
+        Only the cron is gated, as in `genesis-orchestrator.yml`. A human closing
+        or commenting on the gate arrives as an event, and that's the signal to
+        advance; gating events too would make the gate impossible to clear. A
+        skip stamps the schedule, so the next check is a full interval away
+        rather than a `gh` query on every tick.
+        """
+        due = triggers.scheduled_due(state, now)
+        if due is None:
+            return None
+        gates = triggers.open_human_gates(self.repo, token)
+        if not gates:
+            return due
+        log(f"Skipping the scheduled run: {len(gates)} open needs:human issue(s) are waiting on a person.")
+        for gate in gates:
+            log(f"  issue #{gate.get('number')} {gate.get('title', '')}")
+        state["scheduled"] = now
+        triggers.save_state(state)
+        return None
 
     def merge_ready_prs(self) -> list[int]:
         """Land any bot pull request whose checks are all green.

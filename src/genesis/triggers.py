@@ -140,6 +140,52 @@ def failed_runs(repo: str, since_iso: str | None, token: str | None = None) -> l
     return sorted(runs, key=lambda r: str(r.get("createdAt", "")))
 
 
+def open_human_gates(repo: str, token: str | None = None) -> list[dict] | None:
+    """Open `needs:human` issues that a scheduled run has no business waking up for.
+
+    The local-mode half of the "Skip the run if a human gate is open" step in
+    `genesis-orchestrator.yml` (issue #15). `serve` disables that workflow, so
+    without this a gate sat behind a full session every six hours: measured on
+    genesis-dashboard, the scheduled tick a minute after onboarding labelled
+    issue #1 spent $0.20 reading state to confirm the gate and exit (issue #87).
+
+    Same predicate as the workflow, `automation:failure` excluded: an escalation
+    that a dead run filed means the next run may succeed, so it isn't a reason
+    to stay home - and gating on it would let one transient error silence the
+    cron until a person closed the issue.
+
+    Returns None when the query fails, which the caller treats as "no gate".
+    Failing open costs one idle session; failing closed would stop the cron on
+    a gh hiccup with nothing in the log to say why.
+    """
+    import os
+
+    env = dict(os.environ)
+    if token:
+        env["GH_TOKEN"] = token
+        env["GITHUB_TOKEN"] = token
+    try:
+        result = subprocess.run(
+            [
+                "gh", "issue", "list", "--repo", repo, "--label", "needs:human",
+                "--state", "open", "--limit", "100", "--json", "number,title,labels",
+            ],
+            capture_output=True, text=True, timeout=45, env=env, check=False,
+        )
+        if result.returncode != 0:
+            return None
+        issues = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if not isinstance(issues, list):
+        return None
+    return [
+        i for i in issues
+        if isinstance(i, dict)
+        and "automation:failure" not in {l.get("name") for l in i.get("labels") or []}
+    ]
+
+
 def ci_failure_due(runs: list[dict]) -> Due | None:
     if not runs:
         return None
