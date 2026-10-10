@@ -18,6 +18,7 @@ So the tests come in pairs, and the two directions do not cost the same:
 """
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -29,10 +30,32 @@ BLOCKED = 2  # PreToolUse treats exit 2 as "refuse this call"
 ALLOWED = 0
 
 
-def run_guard(tool_name, tool_input):
-    payload = json.dumps({"tool_name": tool_name, "tool_input": tool_input})
+REPO = "/home/runner/work/proj/proj"
+HOME = "/home/runner"
+
+
+def run_guard(tool_name, tool_input, *, project_dir=None, cwd=None):
+    """Run the guard the way the harness does.
+
+    With neither `project_dir` nor `cwd`, the guard can't locate the repo and
+    falls back to gating any `.claude/` segment. Most cases below run that way on
+    purpose: it's the conservative branch, and a missing variable must never be
+    what disarms the gate. `CLAUDE_PROJECT_DIR` is stripped from the inherited
+    environment so a test run from inside a Claude Code session stays hermetic.
+    """
+    body = {"tool_name": tool_name, "tool_input": tool_input}
+    if cwd is not None:
+        body["cwd"] = cwd
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    env["HOME"] = HOME
+    if project_dir is not None:
+        env["CLAUDE_PROJECT_DIR"] = project_dir
     proc = subprocess.run(
-        ["bash", str(GUARD)], input=payload, capture_output=True, text=True
+        ["bash", str(GUARD)],
+        input=json.dumps(body),
+        capture_output=True,
+        text=True,
+        env=env,
     )
     return proc.returncode, proc.stderr
 
@@ -121,6 +144,96 @@ def test_writes_outside_claude_are_never_gated(path) -> None:
     """
     code, _ = run_guard("Write", {"file_path": path})
     assert code == ALLOWED, f"an unrelated write was gated: {path}"
+
+
+# ---------- only the repo's own .claude/ (genesis issue #89) ----------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"{HOME}/.claude/projects/-home-runner-work-proj-proj/memory/fact.md",
+        f"{HOME}/.claude/CLAUDE.md",
+        f"{HOME}/.claude/skills/mine/SKILL.md",
+        "/home/runner/work/other/other/.claude/settings.json",
+        "../other/.claude/settings.json",
+    ],
+)
+def test_a_claude_dir_outside_the_repo_is_not_gated(path) -> None:
+    """The user's ~/.claude/ holds auto-memory, the personal CLAUDE.md and user
+    skills, and the harness lets a session write all three. Gating them sent the
+    agent to file a needs:human comment for a write that would have landed."""
+    for tool in ("Write", "Edit"):
+        code, _ = run_guard(tool, {"file_path": path}, project_dir=REPO, cwd=REPO)
+        assert code == ALLOWED, f"{tool} {path} was gated"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".claude/settings.json",
+        "./.claude/agents/worker.md",
+        f"{REPO}/.claude/settings.json",
+        f"{REPO}/src/../.claude/agents/x.md",
+        "../.claude/settings.json",
+    ],
+)
+def test_the_repo_claude_dir_is_still_gated_when_the_root_is_known(path) -> None:
+    """`../.claude/` from a subdirectory climbs back into the repo, and a
+    relative path is read against the session's cwd, not the root."""
+    code, _ = run_guard(
+        "Write", {"file_path": path}, project_dir=REPO, cwd=f"{REPO}/src"
+        if path.startswith("../") else REPO
+    )
+    assert code == BLOCKED, f"{path} was not gated"
+
+
+def test_the_payload_cwd_locates_the_repo_when_the_env_var_is_absent() -> None:
+    code, _ = run_guard("Write", {"file_path": f"{HOME}/.claude/CLAUDE.md"}, cwd=REPO)
+    assert code == ALLOWED
+    code, _ = run_guard("Write", {"file_path": f"{REPO}/.claude/settings.json"}, cwd=REPO)
+    assert code == BLOCKED
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo '- fact' >> ~/.claude/projects/x/memory/MEMORY.md",
+        "printf x > $HOME/.claude/CLAUDE.md",
+        f"cp notes.md {HOME}/.claude/skills/mine/SKILL.md",
+    ],
+)
+def test_bash_writes_to_the_user_claude_dir_are_not_gated(command) -> None:
+    code, _ = run_guard("Bash", {"command": command}, project_dir=REPO, cwd=REPO)
+    assert code == ALLOWED, f"gated: {command}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf x >> .claude/agents/worker.md",
+        f"echo '{{}}' > {REPO}/.claude/settings.json",
+        "cat > .claude/agents/new.md <<'EOF'\nbody\nEOF",
+    ],
+)
+def test_bash_writes_to_the_repo_claude_dir_are_still_gated(command) -> None:
+    code, _ = run_guard("Bash", {"command": command}, project_dir=REPO, cwd=REPO)
+    assert code == BLOCKED, f"not gated: {command}"
+
+
+def test_a_heredoc_body_that_quotes_a_redirect_is_not_a_write() -> None:
+    """Measured on genesis issue #89: an issue body describing the gate quoted a
+    redirect onto a .claude/ path, and the whole `gh issue create` was refused.
+    A heredoc body is data. The redirect on the header line is still a write."""
+    command = (
+        'gh issue create --title t --body "$(cat <<\'EOF\'\n'
+        "the agent ran printf x >> .claude/agents/worker.md and was refused\n"
+        'EOF\n)"'
+    )
+    code, _ = run_guard("Bash", {"command": command}, project_dir=REPO, cwd=REPO)
+    assert code == ALLOWED
+    code, _ = run_guard("Bash", {"command": command})
+    assert code == ALLOWED, "heredoc bodies are data even when the root is unknown"
 
 
 # ---------- the message is the whole point ----------
