@@ -231,7 +231,22 @@ jobs:
         # taking the dispatch down with it. `main` is right by construction:
         # genesis renames the branch before the first push (publish_to_github in
         # github.py).
-        run: gh workflow run genesis-orchestrator.yml --ref main
+        #
+        # A disabled target is skipped, not failed. GitHub answers a dispatch to
+        # a disabled workflow with HTTP 422, which turned a run that had already
+        # landed its pull requests red - on genesis, whose evolver workflow is
+        # disabled, every auto-merge after genesis issue #93 was fixed. A red
+        # merge run reads as "the merge failed" to every reader, the evolver's
+        # failed-run collection included. Any other failure still goes red.
+        run: |
+          state=$(gh api "repos/$GH_REPO/actions/workflows/genesis-orchestrator.yml" --jq .state || true)
+          case "$state" in
+            disabled_*)
+              echo "::notice::genesis-orchestrator.yml is $state, so nothing to wake. The merge itself landed."
+              exit 0
+              ;;
+          esac
+          gh workflow run genesis-orchestrator.yml --ref main
 
       # Reasoning in escalate.sh. Nothing above calls a model, so this step isn't
       # here for a max-turns death — it's here because the failures this job

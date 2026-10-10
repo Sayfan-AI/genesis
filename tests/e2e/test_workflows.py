@@ -669,6 +669,15 @@ def test_only_bot_authored_pull_requests_are_eligible_in_genesis() -> None:
     )
 
 
+def test_a_disabled_dispatch_target_does_not_turn_a_landed_merge_red() -> None:
+    """Dispatching a disabled workflow is HTTP 422. Genesis's evolver workflow is
+    disabled, so every genesis auto-merge that landed work still finished red,
+    and a red merge run says "the merge failed" to anyone reading it."""
+    for path in (GENESIS_MERGE, TEMPLATES_DIR / "workflows" / "genesis-merge.yml"):
+        content = path.read_text()
+        assert "disabled_*)" in content, f"{path} fails its run on a disabled dispatch target"
+
+
 def test_every_dispatch_target_is_a_workflow_that_exists_beside_it() -> None:
     """`gh workflow run` on a filename that isn't there fails at run time only.
 
