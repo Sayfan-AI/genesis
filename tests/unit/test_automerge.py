@@ -21,14 +21,24 @@ from genesis import automerge
 from genesis.scaffold import TEMPLATES_DIR
 
 
-def pr(number=1, author="genesis-dev-bot[bot]", draft=False, mergeable="MERGEABLE",
-       checks=(("CI", "SUCCESS"),), created="2026-08-02T00:00:00Z", title="a change"):
+def pr(number=1, author="app/genesis-dev-bot", draft=False, mergeable="MERGEABLE",
+       checks=(("CI", "SUCCESS"),), created="2026-08-02T00:00:00Z", title="a change",
+       is_bot=None):
+    """A pull request as `gh pr list --json ...` reports it.
+
+    The author shape is the one `gh` emits, `{"login": "app/<slug>", "is_bot":
+    true}` for an App. These fixtures used to say `genesis-dev-bot[bot]`, a login
+    `gh pr list` never returns, and the suite passed while the predicate it
+    tested matched no real bot pull request (genesis issue #93).
+    """
+    if is_bot is None:
+        is_bot = author.startswith("app/")
     return {
         "number": number,
         "title": title,
         "isDraft": draft,
         "mergeable": mergeable,
-        "author": {"login": author},
+        "author": {"login": author, "is_bot": is_bot},
         "createdAt": created,
         "statusCheckRollup": [{"name": n, "conclusion": c} for n, c in checks],
     }
@@ -53,6 +63,22 @@ def test_merges_a_green_bot_pull_request() -> None:
     with patch.object(automerge, "_gh", gh):
         assert automerge.merge_ready("o/r", "tok", log=lambda *_: None) == [42]
     assert merges == [42]
+
+
+@pytest.mark.parametrize(
+    "author",
+    [
+        {"login": "app/genesis-dev-bot", "is_bot": True},
+        {"login": "app/dependabot", "is_bot": True},
+        {"login": "genesis-dev-bot[bot]"},
+    ],
+)
+def test_a_bot_author_is_recognised_in_every_shape_it_arrives_in(author) -> None:
+    """The first two are what `gh pr list` really returns. The third is REST's
+    spelling, kept so input from that side still qualifies."""
+    gh, merges = fake_gh([pr(number=5) | {"author": author}])
+    with patch.object(automerge, "_gh", gh):
+        assert automerge.merge_ready("o/r", "tok", log=lambda *_: None) == [5]
 
 
 @pytest.mark.parametrize(
@@ -156,6 +182,9 @@ LEGACY_STATUS = {"context": "legacy-ci", "state": "SUCCESS"}
         [pr(number=42)],
         [pr(draft=True)],
         [pr(author="the-gigi")],
+        [pr(number=12) | {"author": {"login": "app/dependabot", "is_bot": True}}],
+        [pr(number=13) | {"author": {"login": "genesis-dev-bot[bot]"}}],
+        [pr(number=14) | {"author": {"login": "the-gigi", "is_bot": False}}],
         [pr(checks=(("CI", "FAILURE"),))],
         [pr(checks=(("CI", "SUCCESS"), ("e2e", "PENDING")))],
         [pr(checks=())],

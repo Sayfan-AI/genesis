@@ -663,7 +663,7 @@ def test_only_bot_authored_pull_requests_are_eligible_in_genesis() -> None:
     templates still stops at a person.
     """
     jq = re.search(r"<<'JQ'\n(.*?)\n\s*JQ\n", GENESIS_MERGE.read_text(), re.S).group(1)
-    assert 'endswith("[bot]")' in jq, (
+    assert "is_bot" in jq and 'endswith("[bot]")' in jq, (
         "genesis's auto-merge would land human-authored pull requests, which is "
         "the case the decision in issue #39 deliberately excluded"
     )

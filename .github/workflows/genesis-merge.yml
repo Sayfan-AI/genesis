@@ -122,8 +122,12 @@ jobs:
           | map(
               select(.isDraft | not)
             # The dev system lands its own work. A pull request opened by a
-            # person stays a person's decision, always.
-            | select((.author.login // "") | endswith("[bot]"))
+            # person stays a person's decision, always. `gh pr list` reports an
+            # App author as `app/<slug>` with `is_bot`, never `<slug>[bot]` -
+            # that spelling is REST's - so the suffix alone matched no real bot
+            # pull request at all (genesis issue #93). It stays as the fallback
+            # for REST-shaped input.
+            | select((.author.is_bot == true) or ((.author.login // "") | endswith("[bot]")))
             | select(.mergeable == null or .mergeable == "MERGEABLE")
             # Two deliberate strictnesses, both of which look redundant next to
             # `mergeStateStatus == CLEAN` and aren't. GitHub reports CLEAN
