@@ -25,3 +25,14 @@ def git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
         ("GIT_COMMITTER_EMAIL", "tests@genesis.invalid"),
     ):
         monkeypatch.setenv(var, value)
+
+
+@pytest.fixture(autouse=True)
+def isolate_genesis_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every test out of the real ~/.config/genesis.
+
+    Root-level rather than e2e-only since `serve()` started reading the App
+    credentials from that file: a unit test that calls `server.serve()` would
+    otherwise load the developer's real App key.
+    """
+    monkeypatch.setenv("GENESIS_CONFIG_DIR", str(tmp_path / "genesis-config"))

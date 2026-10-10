@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from genesis.appauth import mint_installation_token
+from genesis.appauth import load_app_credentials, local_env_path, mint_installation_token
 from genesis.automerge import merge_ready
 from genesis import triggers
 from genesis.workflows import (
@@ -1719,6 +1719,10 @@ def serve() -> int:
         log(f"Failed to detect repository: {e}")
         log("Set GENESIS_REPO=owner/repo, or run inside a git repo with a GitHub remote.")
         return 1
+
+    loaded = load_app_credentials()
+    if loaded:
+        log(f"  loaded {', '.join(loaded)} from {local_env_path()}")
 
     plane = LocalControlPlane(
         repo=repo,

@@ -110,3 +110,67 @@ def test_private_key_is_not_left_on_disk(monkeypatch) -> None:
 
     assert seen, "openssl was never invoked"
     assert not os.path.exists(seen[0]), "temp key file outlived the call"
+
+
+# ---------- loading the credentials serve needs (the file the docstring names) ----------
+
+LOCAL_ENV = f"""# comment
+ANTHROPIC_API_KEY=sk-should-never-load
+GENESIS_GITHUB_APP_ID=12345
+GENESIS_GITHUB_APP_SECRET="{PEM}"
+GENESIS_LOKI_URL=https://logs.example
+"""
+
+
+def test_serve_loads_the_app_credentials_from_the_local_env(tmp_path) -> None:
+    """A shell that never sourced the file used to run every session as the
+    operator, with one log line to say so."""
+    path = tmp_path / ".env"
+    path.write_text(LOCAL_ENV)
+    environ: dict[str, str] = {}
+    loaded = appauth.load_app_credentials(environ, path)
+    assert loaded == ["GENESIS_GITHUB_APP_ID", "GENESIS_GITHUB_APP_SECRET"]
+    assert environ["GENESIS_GITHUB_APP_ID"] == "12345"
+    assert environ["GENESIS_GITHUB_APP_SECRET"] == PEM, "the multi-line PEM must be read whole"
+
+
+def test_only_the_app_credentials_are_loaded(tmp_path) -> None:
+    """Exporting ANTHROPIC_API_KEY into the plane would switch every local
+    session's Claude auth and billing to it."""
+    path = tmp_path / ".env"
+    path.write_text(LOCAL_ENV)
+    environ: dict[str, str] = {}
+    appauth.load_app_credentials(environ, path)
+    assert set(environ) == set(appauth.APP_CREDENTIAL_KEYS)
+
+
+def test_an_exported_value_wins_over_the_file(tmp_path) -> None:
+    path = tmp_path / ".env"
+    path.write_text(LOCAL_ENV)
+    environ = {"GENESIS_GITHUB_APP_ID": "999"}
+    assert appauth.load_app_credentials(environ, path) == ["GENESIS_GITHUB_APP_SECRET"]
+    assert environ["GENESIS_GITHUB_APP_ID"] == "999"
+
+
+def test_a_missing_file_or_placeholder_loads_nothing(tmp_path) -> None:
+    environ: dict[str, str] = {}
+    assert appauth.load_app_credentials(environ, tmp_path / "absent") == []
+    path = tmp_path / ".env"
+    path.write_text("GENESIS_GITHUB_APP_ID=\nGENESIS_GITHUB_APP_SECRET=\n")
+    assert appauth.load_app_credentials(environ, path) == []
+    assert environ == {}
+
+
+def test_the_seeded_placeholder_file_parses(tmp_path) -> None:
+    """The file `ensure_local_env` writes must be something this reads, quotes
+    and all, once the adopter pastes real values in."""
+    from genesis.scaffold import LOCAL_ENV_TEMPLATE
+
+    filled = LOCAL_ENV_TEMPLATE.replace("GENESIS_GITHUB_APP_ID=", "GENESIS_GITHUB_APP_ID=42")
+    path = tmp_path / ".env"
+    path.write_text(filled)
+    environ: dict[str, str] = {}
+    appauth.load_app_credentials(environ, path)
+    assert environ["GENESIS_GITHUB_APP_ID"] == "42"
+    assert environ["GENESIS_GITHUB_APP_SECRET"].startswith("-----BEGIN RSA PRIVATE KEY-----")
+    assert environ["GENESIS_GITHUB_APP_SECRET"].endswith("-----END RSA PRIVATE KEY-----")

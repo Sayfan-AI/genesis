@@ -26,17 +26,80 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 API = "https://api.github.com"
 
 # Env var naming the operator's escape hatch. Anything other than "app" (the
 # default) keeps the agent on whatever credential the shell already has.
 IDENTITY_ENV = "GENESIS_AGENT_IDENTITY"
+
+
+# The two values the token exchange needs, and the only two `serve` loads from
+# the adopter-local file. `ANTHROPIC_API_KEY` lives there too and is left alone
+# on purpose: local sessions run `claude` on the operator's own login, and
+# exporting the key into the plane would silently switch every session's auth
+# and billing to it.
+APP_CREDENTIAL_KEYS = ("GENESIS_GITHUB_APP_ID", "GENESIS_GITHUB_APP_SECRET")
+
+_ENV_LINE = re.compile(
+    r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)="
+    r"(?:\"((?:[^\"\\]|\\.)*)\"|'([^']*)'|([^\n]*))",
+    re.M,
+)
+
+
+def local_env_path() -> Path:
+    """`~/.config/genesis/.env`, or under GENESIS_CONFIG_DIR (mainly for tests)."""
+    override = os.environ.get("GENESIS_CONFIG_DIR")
+    base = Path(override) if override else Path.home() / ".config" / "genesis"
+    return base / ".env"
+
+
+def load_app_credentials(environ=None, path: Path | None = None) -> list[str]:
+    """Fill the App ID and key from the adopter-local `.env` if the shell didn't.
+
+    The module docstring's premise - "both already live in ~/.config/genesis/.env,
+    so local mode can perform the same exchange" - was true of the file and false
+    of the code: `mint_installation_token` reads the process environment only, so
+    a `serve` started from a shell that hadn't sourced the file ran every session
+    as the operator. The one sign was a log line. Measured on genesis-dashboard (genesis issue #98):
+    its task-4 pull request opened under the operator's login, which the bot-only
+    auto-merge then correctly refused to land.
+
+    A value already in the environment wins, so an operator who exports a
+    different App still gets it. Multi-line double-quoted values are read whole,
+    because the private key is one. Returns the names it loaded.
+    """
+    environ = os.environ if environ is None else environ
+    wanted = [k for k in APP_CREDENTIAL_KEYS if not (environ.get(k) or "").strip()]
+    if not wanted:
+        return []
+    try:
+        text = (path or local_env_path()).read_text()
+    except OSError:
+        return []
+    loaded = []
+    for m in _ENV_LINE.finditer(text):
+        key = m.group(1)
+        if key not in wanted or key in loaded:
+            continue
+        if m.group(2) is not None:
+            value = m.group(2)
+        elif m.group(3) is not None:
+            value = m.group(3)
+        else:
+            value = m.group(4).split(" #", 1)[0].strip()
+        if value:
+            environ[key] = value
+            loaded.append(key)
+    return loaded
 
 
 def _b64(raw: bytes) -> bytes:
