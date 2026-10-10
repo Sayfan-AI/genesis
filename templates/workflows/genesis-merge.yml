@@ -12,7 +12,7 @@ name: Genesis Auto-Merge
 # KEEP IN SYNC with `ready_to_merge()` in genesis's own src/genesis/automerge.py,
 # which is the `genesis serve` half of the same rule. They can't share code —
 # one is Python on the operator's laptop, the other is jq on a runner in a repo
-# that has never heard of genesis — so tests/e2e/test_workflows.py asserts the
+# that has never heard of genesis — so genesis's own test suite asserts the
 # two stay identical instead. Change the rule in one, change it in both.
 
 on:
