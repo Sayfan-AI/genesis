@@ -7,7 +7,14 @@ on:
 jobs:
   trigger-orchestrator:
     runs-on: ubuntu-latest
-    if: ${{ !endsWith(github.actor, '[bot]') }}  # see genesis-events.yml
+    # Bots for the reason genesis-events.yml gives. The branch-creating push is
+    # the scaffold itself: genesis pushes `main` before it can disable the seed
+    # workflows (they don't exist on GitHub until that push lands), so this one
+    # event fires before the App secrets exist and always failed at the token
+    # step - a red run as every new dev system's first commit, which its own
+    # evolver then had to investigate (genesis issue #88). `created` is true only
+    # for the push that made the ref, never for a later push to `main`.
+    if: ${{ !endsWith(github.actor, '[bot]') && !github.event.created }}
     steps:
       - uses: actions/create-github-app-token@v3
         id: app-token
