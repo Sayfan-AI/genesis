@@ -256,3 +256,30 @@ def test_pre_agent_nets_are_wired_on_the_seam_both_modes_share(tmp_dir: Path) ->
     assert any("pre-session.sh" in c for c in start), (
         f"pre-session.sh is seeded but never declared, so it never runs: {start}"
     )
+
+
+def test_a_scaffolded_repo_cites_only_tests_it_actually_has(tmp_dir: Path) -> None:
+    """Four seeded workflows said "Enforced at >= 30 by tests/e2e/test_workflows.py",
+    which is genesis's own test and never reaches a dev system (genesis issue #94,
+    hit as genesis-dashboard issue #13). A reader who trusts the comment has no
+    reason to write the enforcement test CLAUDE.md asks for, so the seed claimed a
+    guard from its first commit that nothing provided.
+
+    Checked on the scaffolded output, not on templates/, so a path the scaffold
+    does emit stays legal.
+    """
+    repo = tmp_dir / "cites"
+    scaffold_new_repo(repo, GOAL, PROJECT)
+    cited = re.compile(r"(?<![\w./-])(tests/[\w./-]+\.\w+)")
+    missing = []
+    for path in repo.rglob("*"):
+        if ".git" in path.parts or not path.is_file():
+            continue
+        try:
+            text = path.read_text()
+        except UnicodeDecodeError:
+            continue
+        for ref in cited.findall(text):
+            if not (repo / ref).exists():
+                missing.append(f"{path.relative_to(repo)} -> {ref}")
+    assert not missing, "the seed cites files it doesn't ship:\n" + "\n".join(missing)

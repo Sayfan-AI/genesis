@@ -156,7 +156,8 @@ jobs:
           # Orchestrator class — see the turn-budget floor in CLAUDE.md. It runs the
           # same agent definition as the scheduled and event orchestrators, and
           # reading a failing run's log then fixing on the branch is not cheaper
-          # than a cron tick's work. Enforced at >= 30 by tests/e2e/test_workflows.py.
+          # than a cron tick's work.
+          # Floor: 30. Enforce it with the test CLAUDE.md's Turn Budgets section asks for.
           claude_args: "--max-turns 40 --allowedTools Read,Write,Edit,Bash,Glob,Grep,Agent"
 
       # The safety net under the agent above. Triage is the run most likely to die

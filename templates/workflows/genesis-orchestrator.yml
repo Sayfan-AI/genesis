@@ -128,7 +128,7 @@ jobs:
             This is a scheduled run - assess project state and advance work.
           # Orchestrator class — see the turn-budget floor in CLAUDE.md. Open-ended
           # work, and dispatched subagents spend from this same budget.
-          # Enforced at >= 30 by tests/e2e/test_workflows.py.
+          # Floor: 30. Enforce it with the test CLAUDE.md's Turn Budgets section asks for.
           claude_args: "--max-turns 40 --allowedTools Read,Write,Edit,Bash,Glob,Grep,Agent"
 
       # The last line of defence, and the reason it's a step rather than a
