@@ -825,6 +825,7 @@ def test_only_one_scheduled_trigger_fires_per_tick(plane, monkeypatch, tmp_path)
     saved: list[dict] = []
     monkeypatch.setattr(server.triggers, "save_state", lambda st, *a: saved.append(st))
     monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
+    monkeypatch.setattr(server.triggers, "open_human_gates", lambda *a, **k: [])
     launched: list[str] = []
     monkeypatch.setattr(
         plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
@@ -836,11 +837,71 @@ def test_only_one_scheduled_trigger_fires_per_tick(plane, monkeypatch, tmp_path)
 
 def test_ci_failure_takes_priority_over_the_cron(plane, monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
+    monkeypatch.setattr(server.triggers, "open_human_gates", lambda *a, **k: [])
     monkeypatch.setattr(server.triggers, "save_state", lambda *a, **k: None)
     monkeypatch.setattr(
         server.triggers,
         "failed_runs",
         lambda *a, **k: [{"name": "CI", "headBranch": "main", "url": "u", "createdAt": "2026-08-02T01:00:00Z"}],
+    )
+    launched: list[str] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
+    )
+    plane.run_due_triggers("tok")
+    assert "A required check failed" in launched[0]
+
+
+def test_an_open_human_gate_skips_the_cron(plane, monkeypatch) -> None:
+    """Issue #87: local mode disables genesis-orchestrator.yml, and with it the
+    gate step, so a scheduled tick behind an open gate spent a session learning
+    nothing. The skip stamps the schedule so the next check is an interval away."""
+    state: dict = {"evolver": 10**12}
+    monkeypatch.setattr(server.triggers, "load_state", lambda *a: state)
+    saved: list[dict] = []
+    monkeypatch.setattr(server.triggers, "save_state", lambda st, *a: saved.append(dict(st)))
+    monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
+    monkeypatch.setattr(
+        server.triggers, "open_human_gates",
+        lambda *a, **k: [{"number": 1, "title": "Onboarding"}],
+    )
+    launched: list[str] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
+    )
+    plane.run_due_triggers("tok")
+    assert launched == []
+    assert saved and "scheduled" in saved[-1]
+
+
+def test_a_failed_gate_query_still_runs_the_cron(plane, monkeypatch) -> None:
+    """Failing open costs one idle session. Failing closed would stop the cron on
+    a gh hiccup, silently."""
+    monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
+    monkeypatch.setattr(server.triggers, "save_state", lambda *a, **k: None)
+    monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
+    monkeypatch.setattr(server.triggers, "open_human_gates", lambda *a, **k: None)
+    launched: list[str] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
+    )
+    plane.run_due_triggers("tok")
+    assert len(launched) == 1 and "scheduled run" in launched[0]
+
+
+def test_an_open_gate_does_not_hold_back_ci_failure_triage(plane, monkeypatch) -> None:
+    """The workflow gate sits on the cron only. A red check is new information,
+    and the triage workflow it stands in for has no gate step."""
+    monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
+    monkeypatch.setattr(server.triggers, "save_state", lambda *a, **k: None)
+    monkeypatch.setattr(
+        server.triggers,
+        "failed_runs",
+        lambda *a, **k: [{"name": "CI", "headBranch": "main", "url": "u", "createdAt": "2026-08-02T01:00:00Z"}],
+    )
+    monkeypatch.setattr(
+        server.triggers, "open_human_gates",
+        lambda *a, **k: [{"number": 1, "title": "Onboarding"}],
     )
     launched: list[str] = []
     monkeypatch.setattr(
@@ -856,6 +917,7 @@ def test_trigger_restores_the_planes_default_agent(plane, monkeypatch) -> None:
     monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
     monkeypatch.setattr(server.triggers, "save_state", lambda *a, **k: None)
     monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
+    monkeypatch.setattr(server.triggers, "open_human_gates", lambda *a, **k: [])
     monkeypatch.setattr(plane, "run_orchestrator", lambda event, prompt=None, label=None: 0)
     original = plane.agent
     plane.run_due_triggers("tok")
