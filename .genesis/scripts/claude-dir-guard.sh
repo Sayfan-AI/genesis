@@ -45,7 +45,7 @@ set -uo pipefail
 RAW="$(cat)"
 
 python3 - "$RAW" <<'PY'
-import json, re, sys
+import json, os, posixpath, re, sys
 
 raw = sys.argv[1] if len(sys.argv) > 1 else ""
 try:
@@ -61,18 +61,62 @@ if not isinstance(tool_input, dict):
     sys.exit(0)
 
 
+def absolute_dir(value):
+    if isinstance(value, str) and value.startswith("/"):
+        return posixpath.normpath(value.replace("\\", "/"))
+    return None
+
+
+# Where the repo is. The harness sets CLAUDE_PROJECT_DIR for hooks, and the
+# payload carries the session's cwd. Without either, the guard can't tell this
+# repo's .claude/ from anyone else's and falls back to matching any of them -
+# over-broad, but a missing variable must never quietly disarm the gate.
+ROOT = absolute_dir(os.environ.get("CLAUDE_PROJECT_DIR")) or absolute_dir(ctx.get("cwd"))
+CWD = absolute_dir(ctx.get("cwd")) or ROOT
+HOME = absolute_dir(os.environ.get("HOME"))
+
+
 def under_claude_dir(path):
     """True when `path` lands inside the repo's own .claude/ directory.
 
-    Matched on the path as written rather than resolved, because resolving means
-    touching the filesystem from a hook that runs on every single tool call. The
-    shapes that matter are the ones an agent actually emits: a repo-relative
-    path, a ./-prefixed one, and the absolute path the harness echoes back.
+    Only the repo's. The user's ~/.claude/ (auto-memory, the personal CLAUDE.md,
+    user skills) is writable and sessions are told to write there, so gating it
+    told the agent "retrying in another shape will not work" about a write that
+    would have worked (genesis issue #89).
+
+    Normalised lexically rather than resolved, because resolving means touching
+    the filesystem from a hook that runs on every single tool call. The shapes
+    that matter are the ones an agent actually emits: a repo-relative path, a
+    ./-prefixed one, a ~/ or $HOME one, and the absolute path the harness echoes
+    back.
     """
     if not isinstance(path, str) or not path:
         return False
-    normalised = path.replace("\\", "/")
-    return bool(re.search(r"(^|/)\.claude(/|$)", normalised))
+    p = path.replace("\\", "/")
+    if not re.search(r"(^|/)\.claude(/|$)", p):
+        return False
+    if ROOT is None:
+        return True
+    for prefix in ("~/", "$HOME/", "${HOME}/"):
+        if p.startswith(prefix):
+            if HOME is None:
+                return True
+            p = HOME + "/" + p[len(prefix):]
+            break
+    if not p.startswith("/"):
+        p = posixpath.join(CWD, p)
+    p = posixpath.normpath(p)
+    gated = posixpath.join(ROOT, ".claude")
+    return p == gated or p.startswith(gated + "/")
+
+
+# Heredoc bodies are data, not commands. Without this, an issue body that quotes
+# a redirect onto a .claude/ path - prose about the gate, say - trips it.
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n\s*\2[ \t]*(?=\n|$)", re.S)
+
+
+def heredoc_header(match):
+    return match.group(0).split("\n", 1)[0]
 
 
 # File-writing tools name their target directly. Read is deliberately absent: an
@@ -89,9 +133,11 @@ elif tool == "Bash":
     command = tool_input.get("command") or ""
     if not isinstance(command, str):
         sys.exit(0)
-    hit = bool(re.search(r">>?\s*['\"]?[^\s'\"|;&]*(^|/)?\.claude/", command)) or bool(
-        re.search(r"\b(tee|install|cp|mv|touch|mkdir)\b[^|;&]*?(^|[\s'\"=])\.?/?\.claude/", command)
-    )
+    code = HEREDOC.sub(heredoc_header, command)
+    targets = [m.group(1) for m in re.finditer(r">>?\s*['\"]?([^\s'\"|;&<>()]+)", code)]
+    for m in re.finditer(r"\b(?:tee|install|cp|mv|touch|mkdir)\b([^|;&\n]*)", code):
+        targets += [t.strip("'\"") for t in m.group(1).split()]
+    hit = any(under_claude_dir(t) for t in targets)
     target = command
 else:
     sys.exit(0)
