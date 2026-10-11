@@ -85,11 +85,17 @@ for i in issues:
 # authored by the human and read as unanswered until something replies. The
 # closed branch is unaffected — it requires a bot closer.
 #
+# The script's own claim and release notes are the one part of that it can fix,
+# because it wrote them and marked them: a comment carrying a `genesis-claim` or
+# `genesis-release` marker is never a person's, whoever's token posted it.
+# genesis-dashboard issue #16 was a claim note reported as an unanswered human.
+#
 # Prints nothing when nothing is waiting. If the API can't be read it says so
 # instead of printing nothing, because silence here would read as all-clear.
 format_unanswered_comments() {
     python3 - "$1" <<'PY'
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -118,6 +124,15 @@ def is_bot(actor):
     if not isinstance(actor, dict):
         return False
     return actor.get('type') == 'Bot' or str(actor.get('login', '')).endswith('[bot]')
+
+
+# Bodies this script writes itself. Matched on the marker, not the prose around
+# it, so rewording a claim note can't reopen the false positive.
+SCRIPT_NOTE = re.compile(r'<!-- genesis-(claim|release)[ -]')
+
+
+def is_script_note(comment):
+    return bool(SCRIPT_NOTE.search(str(comment.get('body') or '')))
 
 
 def ago(delta):
@@ -155,7 +170,7 @@ for c in comments:
 
 rows = []
 for num, c in newest.items():
-    if is_bot(c.get('user')):
+    if is_bot(c.get('user')) or is_script_note(c):
         continue
     created = ts(c['created_at'])
     age = now - created
@@ -205,6 +220,9 @@ PY
 # `<!--` opens a markdown HTML block, and everything after the `-->` on that
 # line then renders as raw text rather than prose.
 CLAIM_MARKER="genesis-claim"
+# What `release` leaves behind. Distinct from the claim marker, so a release note
+# can never be read back as somebody holding the issue.
+RELEASE_MARKER="genesis-release"
 
 # How long a claim may outlive the session holding it before the backstop sweep
 # takes it back. This is the only place age decides anything, and the window has
@@ -326,8 +344,11 @@ release_one() {
         echo "issues.sh: could not remove in-progress from #$1" >&2
         return 1
     fi
+    # The marker lets `unanswered-comments` recognise this note as the script's
+    # own when a session posted it under a human token. It must not start with
+    # `<!-- $CLAIM_MARKER `, which `claim_rows` parses as a live claim.
     gh issue comment "$1" --body \
-        "Claim released: $2. \`in-progress\` is off, so this issue is selectable again." \
+        "Claim released: $2. \`in-progress\` is off, so this issue is selectable again. <!-- $RELEASE_MARKER -->" \
         >/dev/null || true
     echo "released #$1"
 }
@@ -865,6 +886,11 @@ EOF
         # orchestrator calling this cannot forget to mark what it picked, because
         # picking and marking are the same call.
         #
+        # `needs:evolver` is skipped with the rest: that half of the work belongs to
+        # the framework, so an orchestrator that claims it can only release it
+        # again. genesis-dashboard handed the same such issue out twice. This is the
+        # opposite of `unselectable-work`, which keeps reporting it - see there.
+        #
         # Prints the issue number on stdout and nothing else, so callers can do
         # ISSUE=$(issues.sh next --milestone 6). Exits 3 with no output when there
         # is nothing to work, which is a distinct outcome from an error.
@@ -883,7 +909,8 @@ EOF
             --json number,createdAt,labels --limit 100 \
             --jq '[.[] | select(([.labels[].name] | index("blocked")) == null)
                        | select(([.labels[].name] | index("in-progress")) == null)
-                       | select(([.labels[].name] | index("needs:human")) == null)]
+                       | select(([.labels[].name] | index("needs:human")) == null)
+                       | select(([.labels[].name] | index("needs:evolver")) == null)]
                   | sort_by(.createdAt) | .[0].number // empty')"
         if [ -z "$CANDIDATE" ]; then
             exit 3
