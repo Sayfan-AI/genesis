@@ -21,6 +21,7 @@ Configuration (environment variables):
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import shutil
@@ -1748,8 +1749,15 @@ class LocalControlPlane:
                     break
                 log(f"GitHub API error: HTTP {e.code} {e.reason}")
                 continue
-            except urllib.error.URLError as e:
-                log(f"Network error polling events: {e}")
+            # Everything else a poll can die of is transport, and transport heals:
+            # a dropped keep-alive (`RemoteDisconnected`), a truncated body
+            # (`IncompleteRead`, or the JSON error it turns into), a read timeout.
+            # None of those is a URLError, so each used to reach the top-level
+            # handler and stop the plane. Measured on genesis-dashboard: one
+            # "Remote end closed connection without response" at 10:09 ended a
+            # plane that had been idling correctly behind a human gate.
+            except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
+                log(f"Network error polling events: {type(e).__name__}: {e}")
                 continue
 
             # genesis-merge.yml's job. A pull request going green is not an event
