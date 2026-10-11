@@ -38,6 +38,19 @@ def test_build_prompt_initial_run() -> None:
     assert "initial run" in prompt.lower()
 
 
+def test_build_prompt_follow_up_is_not_an_initial_run() -> None:
+    """Issue #114: a follow-up pass is told why it was queued, not that it's a
+    fresh start."""
+    prompt = server._build_prompt(
+        None, ".claude/agents/evolver.md",
+        followup=["the merge sweep landed PR #113", "the previous session changed the repo"],
+    )
+    assert ".claude/agents/evolver.md" in prompt
+    assert "initial run" not in prompt.lower()
+    assert "follow-up pass" in prompt
+    assert "- the merge sweep landed PR #113\n- the previous session changed the repo" in prompt
+
+
 def test_build_prompt_includes_event_metadata() -> None:
     event = {
         "id": "abc123",
@@ -1029,6 +1042,7 @@ def test_a_session_that_changed_the_repo_queues_another_pass(plane, monkeypatch)
         plane._stop_patch.stop()
     assert plane.pending_followup is True
     assert plane.followup_chain == 1
+    assert any("changed the repo" in r for r in plane.followup_reasons)
 
 
 def test_a_session_that_changed_nothing_does_not_queue_a_pass(plane, monkeypatch) -> None:

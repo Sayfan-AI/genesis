@@ -121,6 +121,40 @@ def test_a_merged_pull_request_wakes_the_loop(plane, script, loop, sessions_run,
     assert "follow-up pass" in capsys.readouterr().out
 
 
+def _record_prompts(plane, monkeypatch) -> list[str]:
+    """The prompt each fresh session in the run was launched with."""
+    prompts: list[str] = []
+    real = plane._run_session
+
+    def recording(prompt, *args, **kwargs):
+        if prompt is not None:  # a resume carries no prompt of its own
+            prompts.append(prompt)
+        return real(prompt, *args, **kwargs)
+
+    monkeypatch.setattr(plane, "_run_session", recording)
+    return prompts
+
+
+def test_the_merge_wake_says_what_it_is_following_up_on(
+    plane, script, loop, monkeypatch
+):
+    """Issue #114. The follow-up pass used to get the startup prompt, "This is a
+    local control plane initial run", so the session queued because PR #113 had
+    just merged was told it was a fresh start, re-surveyed the org from scratch,
+    and couldn't tell which of four reasons had launched it."""
+    script([{"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2}] * 4)
+    prompts = _record_prompts(plane, monkeypatch)
+
+    loop([[], []], merges=[[7, 9], []])
+
+    assert len(prompts) == 2, prompts
+    startup, followup = prompts
+    assert "initial run" in startup
+    assert "initial run" not in followup
+    assert "follow-up pass" in followup
+    assert "the merge sweep landed PR #7, PR #9" in followup
+
+
 def test_a_scheduled_run_answers_a_merge_wake_without_a_second_session(
     plane, script, loop, sessions_run, monkeypatch, capsys
 ):
@@ -187,9 +221,15 @@ def test_a_scheduled_run_that_lands_work_still_queues_its_own_follow_up(
         {"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2},
     ])
 
+    prompts = _record_prompts(plane, monkeypatch)
+
     run = loop([[], []], merges=[[7], []])
 
     assert run["polls"] == 2
+    assert "merge sweep" not in prompts[-1] and "changed the repo" in prompts[-1], (
+        "the scheduled session answered the merge wake, so the pass it queued "
+        f"must not still carry the merge as a reason: {prompts[-1]!r}"
+    )
     assert sessions_run() == 3, (
         f"ran {sessions_run()} sessions; a scheduled session that landed work "
         "should have queued one follow-up pass of its own"
