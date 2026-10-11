@@ -1036,7 +1036,15 @@ class LocalControlPlane:
         now = time.time()
 
         runs = triggers.failed_runs(self.repo, state.get("ci_failure_seen"), token)
-        due = triggers.ci_failure_due(runs, self.agent) or self._scheduled_unless_gated(
+        # A failure that a later run of the same workflow on the same branch
+        # already turned green has nothing left to triage (issue #123). The
+        # cursor still moves past it, so it can't come back as new later.
+        live = [r for r in runs if not r.get("superseded")]
+        if runs and not live:
+            log(f"Skipping {len(runs)} failed run(s) already fixed by a later green run")
+            state["ci_failure_seen"] = runs[-1].get("createdAt")
+            triggers.save_state(state)
+        due = triggers.ci_failure_due(live, self.agent) or self._scheduled_unless_gated(
             state, now, token
         )
         # The daily evolver cycle is a second agent on a second clock. When the

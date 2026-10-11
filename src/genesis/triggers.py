@@ -152,7 +152,47 @@ def failed_runs(repo: str, since_iso: str | None, token: str | None = None) -> l
         runs = [r for r in runs if not str(r.get("name", "")).startswith("Genesis")]
     if since_iso:
         runs = [r for r in runs if str(r.get("createdAt", "")) > since_iso]
-    return sorted(runs, key=lambda r: str(r.get("createdAt", "")))
+    runs = sorted(runs, key=lambda r: str(r.get("createdAt", "")))
+    if runs:
+        _mark_superseded(runs, repo, env)
+    return runs
+
+
+def _mark_superseded(runs: list[dict], repo: str, env: dict) -> None:
+    """Flag failures that a later success of the same workflow on the same branch fixed.
+
+    A red Genesis Auto-Merge on `main` went green 21 seconds later and stayed
+    green, and the plane still launched a session to triage it hours afterwards
+    (issue #123). Flagged runs aren't dropped: the caller still moves its cursor
+    past them, which a filter here couldn't, and without that a superseded
+    failure would come back as live once its success aged out of this query.
+
+    Fails open. If the query breaks, nothing is flagged, and the cost is one
+    triage session rather than a missed red check.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "run", "list", "--repo", repo, "--status", "success",
+                "--limit", "50", "--json", "name,headBranch,createdAt",
+            ],
+            capture_output=True, text=True, timeout=45, env=env, check=False,
+        )
+        successes = json.loads(result.stdout) if result.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return
+    if not isinstance(successes, list):
+        return
+    latest: dict[tuple[str, str], str] = {}
+    for s in successes:
+        if not isinstance(s, dict):
+            continue
+        key = (str(s.get("name", "")), str(s.get("headBranch", "")))
+        latest[key] = max(latest.get(key, ""), str(s.get("createdAt", "")))
+    for r in runs:
+        key = (str(r.get("name", "")), str(r.get("headBranch", "")))
+        if latest.get(key, "") > str(r.get("createdAt", "")):
+            r["superseded"] = True
 
 
 def open_human_gates(repo: str, token: str | None = None) -> list[dict] | None:

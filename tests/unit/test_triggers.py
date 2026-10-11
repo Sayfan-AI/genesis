@@ -116,6 +116,57 @@ def test_failed_runs_only_reports_what_is_new(monkeypatch) -> None:
     assert [r["name"] for r in runs] == ["E2E (kind)"]
 
 
+def _gh_failures_then_successes(failures, successes) -> object:
+    def run(cmd, **kwargs):
+        payload = successes if "success" in cmd else failures
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    return run
+
+
+def test_failed_runs_flags_a_failure_a_later_success_fixed(monkeypatch, tmp_path) -> None:
+    """Issue #123: a red Genesis Auto-Merge on `main` went green 21 seconds
+    later, and the plane still spent a session triaging it hours afterwards.
+    A success on another branch, or an earlier one, fixes nothing."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        triggers.subprocess,
+        "run",
+        _gh_failures_then_successes(
+            failures=[
+                {"name": "Genesis Auto-Merge", "headBranch": "main", "createdAt": "2026-10-10T22:47:59Z"},
+                {"name": "CI", "headBranch": "main", "createdAt": "2026-10-10T22:40:00Z"},
+                {"name": "CI", "headBranch": "feat/x", "createdAt": "2026-10-10T22:41:00Z"},
+            ],
+            successes=[
+                {"name": "Genesis Auto-Merge", "headBranch": "main", "createdAt": "2026-10-10T22:48:20Z"},
+                {"name": "CI", "headBranch": "main", "createdAt": "2026-10-10T22:30:00Z"},
+                {"name": "CI", "headBranch": "feat/y", "createdAt": "2026-10-10T23:00:00Z"},
+            ],
+        ),
+    )
+    runs = triggers.failed_runs("o/r", since_iso=None)
+    assert {(r["name"], r["headBranch"]): bool(r.get("superseded")) for r in runs} == {
+        ("Genesis Auto-Merge", "main"): True,
+        ("CI", "main"): False,
+        ("CI", "feat/x"): False,
+    }
+
+
+def test_a_broken_success_query_flags_nothing(monkeypatch) -> None:
+    """Failing open costs one triage session. Failing closed would hide a red check."""
+    failures = [{"name": "CI", "headBranch": "main", "createdAt": "2026-10-10T22:40:00Z"}]
+
+    def run(cmd, **kwargs):
+        if "success" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "HTTP 502")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(failures), "")
+
+    monkeypatch.setattr(triggers.subprocess, "run", run)
+    runs = triggers.failed_runs("o/r", since_iso=None)
+    assert [r.get("superseded") for r in runs] == [None]
+
+
 def test_failed_runs_survives_a_broken_gh(monkeypatch) -> None:
     def boom(*a, **k):
         raise OSError("gh missing")

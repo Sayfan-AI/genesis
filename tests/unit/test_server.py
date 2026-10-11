@@ -966,6 +966,53 @@ def test_a_first_start_does_not_triage_a_failure_from_history(plane, monkeypatch
     assert not any("A required check failed" in p for p in launched)
 
 
+def test_a_failure_already_fixed_by_a_later_green_run_is_not_triaged(plane, monkeypatch) -> None:
+    """Issue #123: run 38092755621 failed, the same workflow on the same branch
+    went green 21 seconds later, and the plane still launched a triage session.
+    The cursor moves past the run, so it can't come back as new later on."""
+    server.triggers.save_state({"ci_failure_seen": "2026-10-10T00:00:00Z", "scheduled": 10**12})
+    monkeypatch.setattr(
+        server.triggers, "failed_runs",
+        lambda *a, **k: [{
+            "name": "Genesis Auto-Merge", "headBranch": "main", "url": "u",
+            "createdAt": "2026-10-10T22:47:59Z", "superseded": True,
+        }],
+    )
+    monkeypatch.setattr(server.triggers, "open_human_gates", lambda *a, **k: [])
+    launched: list[str] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
+    )
+
+    plane.run_due_triggers("tok")
+
+    assert launched == []
+    assert server.triggers.load_state()["ci_failure_seen"] == "2026-10-10T22:47:59Z"
+
+
+def test_a_live_failure_is_triaged_beside_a_superseded_one(plane, monkeypatch) -> None:
+    """The prompt names the failure that's still red, not the newest one."""
+    server.triggers.save_state({"ci_failure_seen": "2026-10-10T00:00:00Z", "scheduled": 10**12})
+    monkeypatch.setattr(
+        server.triggers, "failed_runs",
+        lambda *a, **k: [
+            {"name": "CI", "headBranch": "main", "url": "u1", "createdAt": "2026-10-10T22:40:00Z"},
+            {"name": "Genesis Auto-Merge", "headBranch": "main", "url": "u2",
+             "createdAt": "2026-10-10T22:47:59Z", "superseded": True},
+        ],
+    )
+    monkeypatch.setattr(server.triggers, "open_human_gates", lambda *a, **k: [])
+    launched: list[str] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
+    )
+
+    plane.run_due_triggers("tok")
+
+    assert len(launched) == 1 and "Failing workflow: CI" in launched[0]
+    assert server.triggers.load_state()["ci_failure_seen"] == "2026-10-10T22:47:59Z"
+
+
 def test_priming_the_ci_failure_cursor_keeps_an_existing_one(plane) -> None:
     """A restart must not skip failures that landed while the plane was down."""
     server.triggers.save_state({"ci_failure_seen": "2026-08-02T01:00:00Z", "scheduled": 5})
