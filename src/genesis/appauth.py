@@ -24,6 +24,7 @@ credential after the first one.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import re
@@ -35,6 +36,19 @@ import urllib.request
 from pathlib import Path
 
 API = "https://api.github.com"
+
+# Everything a GitHub API call can die of besides an HTTP status, and all of it
+# transport, which heals: a dropped keep-alive (`RemoteDisconnected`), a
+# truncated body (`IncompleteRead`, or the JSON error it turns into), a read
+# timeout. `urlopen` wraps only send-side failures in URLError; reading the
+# response isn't wrapped, so none of these is one, and each used to reach the
+# plane's top-level handler and stop it. Measured on genesis-dashboard: one
+# "Remote end closed connection without response" at 10:09 ended a plane that
+# had been idling correctly behind a human gate. It lives here, the lowest
+# module that calls GitHub, so every caller shares one tuple: the fix reached
+# the poll loop, then the startup prime (issue #119), then the token mint
+# (issue #121), one caller at a time.
+TRANSIENT_HTTP_ERRORS = (urllib.error.URLError, http.client.HTTPException, OSError, ValueError)
 
 # Env var naming the operator's escape hatch. Anything other than "app" (the
 # default) keeps the agent on whatever credential the shell already has.
@@ -159,7 +173,7 @@ def _api(url: str, token: str, method: str = "GET") -> dict | None:
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             return json.load(response)
-    except (urllib.error.URLError, ValueError, TimeoutError):
+    except TRANSIENT_HTTP_ERRORS:
         return None
 
 

@@ -7,8 +7,12 @@ an approval gate whose premise is "approver is not actor" has nothing to check.
 
 from __future__ import annotations
 
+import http.client
+import json
 import os
+import socket
 import subprocess
+import urllib.request
 from unittest.mock import patch
 
 import pytest
@@ -88,6 +92,23 @@ def test_api_failure_falls_back(signed) -> None:
     """A dev system that refuses to start because a token exchange hiccuped is
     worse than one whose commits are attributed to a human."""
     with patch.object(appauth, "_api", fake_api({"/installation": None})):
+        assert appauth.mint_installation_token("o/r", GOOD_ENV) is None
+
+
+# The real `_api` under each transport failure the poll loop already survives.
+# `urlopen` raises these raw from reading the response, so a mint that let one
+# escape stopped the plane from inside `_session_env()` (issue #121).
+TRANSPORT_FAILURES = [
+    http.client.RemoteDisconnected("Remote end closed connection without response"),
+    http.client.IncompleteRead(b"{\"tok"),
+    socket.timeout("The read operation timed out"),
+    json.JSONDecodeError("Expecting value", "", 0),
+]
+
+
+@pytest.mark.parametrize("failure", TRANSPORT_FAILURES, ids=lambda e: type(e).__name__)
+def test_transport_failure_during_the_exchange_falls_back(signed, failure) -> None:
+    with patch.object(urllib.request, "urlopen", side_effect=failure):
         assert appauth.mint_installation_token("o/r", GOOD_ENV) is None
 
 

@@ -21,7 +21,6 @@ Configuration (environment variables):
 from __future__ import annotations
 
 import hashlib
-import http.client
 import json
 import os
 import shutil
@@ -37,7 +36,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from genesis.appauth import load_app_credentials, local_env_path, mint_installation_token
+from genesis.appauth import (
+    TRANSIENT_HTTP_ERRORS,
+    load_app_credentials,
+    local_env_path,
+    mint_installation_token,
+)
 from genesis.automerge import _gh, is_bot_author, merge_ready
 from genesis import triggers
 from genesis.workflows import (
@@ -240,15 +244,8 @@ class PollResult:
     not_modified: bool
 
 
-# Everything a `fetch_events` call can die of besides an HTTP status, and all of
-# it transport, which heals: a dropped keep-alive (`RemoteDisconnected`), a
-# truncated body (`IncompleteRead`, or the JSON error it turns into), a read
-# timeout. None of those is a URLError, so each used to reach the top-level
-# handler and stop the plane. Measured on genesis-dashboard: one "Remote end
-# closed connection without response" at 10:09 ended a plane that had been
-# idling correctly behind a human gate. Shared by every caller, because the fix
-# for that reached the poll loop and not the startup prime (issue #119).
-TRANSIENT_FETCH_ERRORS = (urllib.error.URLError, http.client.HTTPException, OSError, ValueError)
+# Transport failures a `fetch_events` call heals from; see the constant's home.
+TRANSIENT_FETCH_ERRORS = TRANSIENT_HTTP_ERRORS
 
 
 def fetch_events(repo: str, etag: str | None, token: str) -> PollResult:
