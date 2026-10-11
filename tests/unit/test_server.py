@@ -852,6 +852,40 @@ def test_ci_failure_takes_priority_over_the_cron(plane, monkeypatch, tmp_path) -
     assert "A required check failed" in launched[0]
 
 
+def test_a_first_start_does_not_triage_a_failure_from_history(plane, monkeypatch) -> None:
+    """Issue #107: a fresh clone has no trigger state, so `failed_runs` had no
+    `since` filter and the plane launched a session on a three-week-old failure
+    whose pull request had already merged green."""
+    old_failure = [{
+        "databaseId": 35530477539, "name": "CI", "conclusion": "failure",
+        "createdAt": "2026-09-20T18:52:56Z",
+        "headBranch": "dependabot/pip/playwright-gte-1.63.0", "url": "u",
+    }]
+    monkeypatch.setattr(
+        server.triggers.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=json.dumps(old_failure)),
+    )
+    monkeypatch.setattr(server.triggers, "open_human_gates", lambda *a, **k: [])
+    launched: list[str] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
+    )
+
+    plane._prime_ci_failure_cursor_if_needed()
+    plane.run_due_triggers("tok")
+
+    assert not any("A required check failed" in p for p in launched)
+
+
+def test_priming_the_ci_failure_cursor_keeps_an_existing_one(plane) -> None:
+    """A restart must not skip failures that landed while the plane was down."""
+    server.triggers.save_state({"ci_failure_seen": "2026-08-02T01:00:00Z", "scheduled": 5})
+    plane._prime_ci_failure_cursor_if_needed()
+    assert server.triggers.load_state() == {
+        "ci_failure_seen": "2026-08-02T01:00:00Z", "scheduled": 5,
+    }
+
+
 def test_an_open_human_gate_skips_the_cron(plane, monkeypatch) -> None:
     """Issue #87: local mode disables genesis-orchestrator.yml, and with it the
     gate step, so a scheduled tick behind an open gate spent a session learning
