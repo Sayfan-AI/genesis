@@ -496,7 +496,22 @@ def _brief(tool_input: object, limit: int = 88) -> str:
     return flat[:limit] + ("…" if len(flat) > limit else "")
 
 
-def _build_prompt(event: dict | None, agent: str = DEFAULT_AGENT) -> str:
+def _build_prompt(
+    event: dict | None, agent: str = DEFAULT_AGENT, followup: list[str] | None = None
+) -> str:
+    if event is None and followup:
+        # A follow-up pass used to get the startup prompt, so a session queued
+        # because the merge sweep had just landed its pull request was told it was
+        # an initial run, re-surveyed everything, and spent its last turns
+        # grepping this file to work out why it had been launched (#114).
+        reasons = "\n".join(f"- {reason}" for reason in followup)
+        return (
+            f"Run the agent defined in {agent}.\n\n"
+            "This is a follow-up pass from the local control plane, not a fresh "
+            "start. It was queued because:\n"
+            f"{reasons}\n\n"
+            "Pick up from there - assess project state and advance work."
+        )
     if event is None:
         return (
             f"Run the agent defined in {agent}. "
@@ -546,6 +561,9 @@ class LocalControlPlane:
     session_token: str = ""
     last_claim_sweep: float = 0.0
     pending_followup: bool = False
+    # Why the pending pass was queued, in the order it happened. The pass is a
+    # fresh session, so this is the only way it learns what it's following up on.
+    followup_reasons: list[str] = field(default_factory=list)
     continuation_index: int = 0
     followup_chain: int = 0
     identity_logged: bool = False
@@ -847,7 +865,9 @@ class LocalControlPlane:
                         "treating the chain as unfinished")
                     stop_reason = "the session could not be resumed"
                     finished_cleanly = False
-                    self.pending_followup = True
+                    self._queue_followup(
+                        "the previous session could not be resumed, so its task is unfinished"
+                    )
                     break
         else:
             # Every continuation used and the chain is still unfinished. This is
@@ -867,7 +887,10 @@ class LocalControlPlane:
             and self.followup_chain < MAX_FOLLOWUP_CHAIN
         ):
             self.followup_chain += 1
-            self.pending_followup = True
+            self._queue_followup(
+                "the previous session changed the repo - check what it left and "
+                "whether there's a next unit of work"
+            )
             log(f"  this session changed the repo; queueing a follow-up pass "
                 f"({self.followup_chain}/{MAX_FOLLOWUP_CHAIN})")
 
@@ -875,7 +898,10 @@ class LocalControlPlane:
             # The work is real and uncommitted, and nothing else is scheduled to
             # touch it. Without this flag the plane would sit idle holding a
             # half-finished task until some unrelated repo event happened along.
-            self.pending_followup = True
+            self._queue_followup(
+                f"the previous session ended {self.last_result_subtype} mid-task, "
+                "so its work may be uncommitted in the tree"
+            )
             log(f"  still incomplete (${spent:.2f} spent) - will pick it up on the next tick")
 
         # Anything but a clean finish hands the claims back, which is deliberately
@@ -901,6 +927,12 @@ class LocalControlPlane:
         # backstop it no longer has any business protecting.
         self.session_token = ""
         return rc
+
+    def _queue_followup(self, reason: str) -> None:
+        """Ask for a follow-up pass on the next quiet tick, and say why."""
+        self.pending_followup = True
+        if reason not in self.followup_reasons:
+            self.followup_reasons.append(reason)
 
     def run_due_triggers(self, token: str) -> None:
         """Fire the workflow triggers that have no event to hang off.
@@ -938,6 +970,7 @@ class LocalControlPlane:
         # stand in for a pass and leaves the flag alone.
         if due.name == "scheduled":
             self.pending_followup = False
+            self.followup_reasons = []
         previous_agent = self.agent
         self.agent = due.agent
         try:
@@ -1642,8 +1675,10 @@ class LocalControlPlane:
             # this poller can see, and the agent's own pull requests are bot-
             # authored so they are filtered out too. Without this sweep the local
             # loop can open work it is structurally unable to land.
-            if self.merge_ready_prs():
-                self.pending_followup = True
+            merged = self.merge_ready_prs()
+            if merged:
+                landed = ", ".join(f"PR #{n}" for n in merged)
+                self._queue_followup(f"the merge sweep landed {landed}")
 
             # The claims this plane can't see the end of: a GitHub Actions run
             # cancelled mid-flight, or a sibling process killed. Self-throttled,
@@ -1668,8 +1703,14 @@ class LocalControlPlane:
             # event references. Pick it up on the next tick rather than waiting
             # for unrelated repo activity to happen along.
             if self.pending_followup and not new_events and not self.shutdown:
+                reasons = self.followup_reasons or ["work from the previous run is unfinished"]
                 self.pending_followup = False
-                self.run_orchestrator(None, label="follow-up pass, work from the previous run is unfinished")
+                self.followup_reasons = []
+                self.run_orchestrator(
+                    None,
+                    prompt=_build_prompt(None, self.agent, followup=reasons),
+                    label=f"follow-up pass: {'; '.join(reasons)}",
+                )
                 self.save_state()
 
         return self._shutdown(token_ok=True)
