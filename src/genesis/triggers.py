@@ -29,6 +29,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 STATE_PATH = Path(".genesis/.trigger-state")
+# What a seeded `genesis-*` workflow's `if: failure()` step runs. Genesis's own
+# repo doesn't carry it, so its own workflows don't escalate (issue #112).
+ESCALATE_PATH = Path(".genesis/scripts/escalate.sh")
 
 # Matches the cron in the seeded workflows.
 SCHEDULED_ORCHESTRATOR_SECONDS = 6 * 60 * 60
@@ -139,10 +142,14 @@ def failed_runs(repo: str, since_iso: str | None, token: str | None = None) -> l
     except (OSError, subprocess.SubprocessError, ValueError):
         return []
 
-    # Genesis's own workflows escalate their failures through escalate.sh, and
+    # Seeded genesis workflows escalate their failures through escalate.sh, and
     # re-triaging those here would double-report a failure that already opened an
-    # issue. Only the repo's own gates are this trigger's business.
-    runs = [r for r in runs if not str(r.get("name", "")).startswith("Genesis")]
+    # issue. Only the repo's own gates are this trigger's business. That premise
+    # is checked, not assumed: genesis's own repo has no escalate.sh and its
+    # workflows no failure step, so filtering there left a red Genesis Auto-Merge
+    # on `main` for a human to find (issue #112).
+    if ESCALATE_PATH.is_file():
+        runs = [r for r in runs if not str(r.get("name", "")).startswith("Genesis")]
     if since_iso:
         runs = [r for r in runs if str(r.get("createdAt", "")) > since_iso]
     return sorted(runs, key=lambda r: str(r.get("createdAt", "")))
