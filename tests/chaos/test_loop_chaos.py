@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 
-from genesis import server
+from genesis import server, triggers
 
 
 def test_every_task_in_a_run_gets_its_own_follow_up_budget(
@@ -119,6 +119,82 @@ def test_a_merged_pull_request_wakes_the_loop(plane, script, loop, sessions_run,
         "(the startup run alone)"
     )
     assert "follow-up pass" in capsys.readouterr().out
+
+
+def test_a_scheduled_run_answers_a_merge_wake_without_a_second_session(
+    plane, script, loop, sessions_run, monkeypatch, capsys
+):
+    """The merge wake, when the schedule falls due on the same tick (issue #109).
+
+    The merge sweep queues a follow-up pass, then `run_due_triggers` launches the
+    scheduled session before the pass gets its turn. The two are the same session:
+    the follow-up's prompt is "assess project state and advance work", and so is
+    the cron's, for the same agent. Measured on genesis's own plane: PR #108
+    merged, the scheduled session surveyed the board and found nothing, and the
+    follow-up pass then surveyed the same board a minute later.
+
+    One session answers both. If that session lands work or dies mid-task, it
+    queues a pass of its own on the way out, which is the case the pass is for.
+    """
+    real_scheduled_due = triggers.scheduled_due
+    fired = []
+
+    def due_once(state, now, agent=triggers.ORCHESTRATOR_AGENT):
+        if fired:
+            return real_scheduled_due(state, now, agent)
+        fired.append(True)
+        return real_scheduled_due({}, now, agent)
+
+    monkeypatch.setattr(triggers, "scheduled_due", due_once)
+    monkeypatch.setattr(triggers, "open_human_gates", lambda *a, **k: [])
+    script([{"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2}] * 4)
+
+    run = loop([[], []], merges=[[7], []])
+
+    assert run["polls"] == 2
+    out = capsys.readouterr().out
+    assert "scheduled trigger" in out, "the scheduled trigger never fired"
+    assert sessions_run() == 2, (
+        f"ran {sessions_run()} sessions; expected the startup run and one "
+        "scheduled run, with no follow-up pass repeating the scheduled one"
+    )
+    assert "follow-up pass" not in out
+
+
+def test_a_scheduled_run_that_lands_work_still_queues_its_own_follow_up(
+    plane, script, loop, sessions_run, monkeypatch, capsys
+):
+    """The other half of issue #109's fix.
+
+    Clearing the flag before the scheduled session must not swallow the pass that
+    session earns by landing work itself - that pass is what picks up the next
+    unit, since the session's own bot-authored output wakes nothing.
+    """
+    real_scheduled_due = triggers.scheduled_due
+    fired = []
+
+    def due_once(state, now, agent=triggers.ORCHESTRATOR_AGENT):
+        if fired:
+            return real_scheduled_due(state, now, agent)
+        fired.append(True)
+        return real_scheduled_due({}, now, agent)
+
+    monkeypatch.setattr(triggers, "scheduled_due", due_once)
+    monkeypatch.setattr(triggers, "open_human_gates", lambda *a, **k: [])
+    script([
+        {"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2},
+        {"tools": 3, "subtype": "success", "turns": 4, "cost": 0.5, "commit": "work.py"},
+        {"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2},
+    ])
+
+    run = loop([[], []], merges=[[7], []])
+
+    assert run["polls"] == 2
+    assert sessions_run() == 3, (
+        f"ran {sessions_run()} sessions; a scheduled session that landed work "
+        "should have queued one follow-up pass of its own"
+    )
+    assert "queueing a follow-up pass" in capsys.readouterr().out
 
 
 def test_a_second_control_plane_does_not_start_on_top_of_the_first(
