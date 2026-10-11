@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Iterable
 
 from genesis.appauth import load_app_credentials, local_env_path, mint_installation_token
-from genesis.automerge import merge_ready
+from genesis.automerge import _gh, is_bot_author, merge_ready
 from genesis import triggers
 from genesis.workflows import (
     DISABLED_LIST_PATH,
@@ -147,6 +147,11 @@ RUN_COST_BUDGET_USD = 150.0
 # repo. Bounded so "work begets work" cannot become a spin: after this many, the
 # loop waits for a real trigger again.
 MAX_FOLLOWUP_CHAIN = 3
+
+# Longest a pending follow-up pass waits for a bot pull request's checks before
+# it runs anyway (#116). Genesis's own CI takes about three minutes; the bound is
+# for a check that never reports, which would otherwise hold the loop forever.
+FOLLOWUP_CHECKS_WAIT_SECONDS = 20 * 60
 
 # Budget for the judge itself. It reads evidence handed to it and answers with one
 # word, so it needs no tools and almost no turns.
@@ -424,6 +429,24 @@ def _git(args: list[str]) -> str:
 LOCAL_COMMIT_REFLOG_PREFIXES = ("commit", "rebase", "cherry-pick")
 
 
+def _checks_unfinished(checks: list[dict]) -> bool:
+    """True while a pull request's CI hasn't concluded.
+
+    No checks at all counts as unfinished, because that's what a pull request
+    looks like in the seconds before CI starts - which is exactly when a
+    trigger session's follow-up pass used to launch.
+    """
+    if not checks:
+        return True
+
+    # A check run reports `conclusion`, empty until it completes. A commit
+    # status reports `state`, and PENDING and EXPECTED are the unconcluded ones.
+    def concluded(c: dict) -> bool:
+        return bool(c.get("conclusion")) or c.get("state") not in (None, "", "PENDING", "EXPECTED")
+
+    return not all(concluded(c) for c in checks)
+
+
 def session_work_marker() -> str:
     """A cheap hash of the work *this machine* has done, for before/after comparison.
 
@@ -564,6 +587,9 @@ class LocalControlPlane:
     # Why the pending pass was queued, in the order it happened. The pass is a
     # fresh session, so this is the only way it learns what it's following up on.
     followup_reasons: list[str] = field(default_factory=list)
+    # When the pending pass first found a bot pull request still in CI, so the
+    # hold is bounded by wall clock rather than by however many ticks it lasts.
+    followup_held_since: float | None = None
     continuation_index: int = 0
     followup_chain: int = 0
     identity_logged: bool = False
@@ -928,6 +954,60 @@ class LocalControlPlane:
         self.session_token = ""
         return rc
 
+    def prs_awaiting_checks(self) -> list[int]:
+        """Open bot pull requests whose checks haven't all concluded.
+
+        Fails open: if the list can't be read, nothing is awaited, and the
+        follow-up pass runs as it did before the hold existed.
+        """
+        if os.environ.get("GENESIS_AUTO_MERGE", "on").strip().lower() == "off":
+            # Nothing will land the pull request, so waiting for it buys nothing.
+            return []
+        code, out = _gh(
+            ["pr", "list", "--repo", self.repo, "--state", "open", "--json",
+             "number,isDraft,author,statusCheckRollup"],
+            mint_installation_token(self.repo),
+        )
+        if code != 0:
+            return []
+        try:
+            prs = json.loads(out)
+        except ValueError:
+            return []
+        return [
+            pr["number"] for pr in prs
+            if not pr.get("isDraft") and is_bot_author(pr.get("author"))
+            and _checks_unfinished(pr.get("statusCheckRollup") or [])
+        ]
+
+    def _followup_waits_on_checks(self) -> bool:
+        """Hold the pending pass while a bot pull request is still in CI (#116).
+
+        A session that opens a pull request queues a pass because it changed the
+        repo, and that pass used to launch while the pull request's CI was still
+        running - on a trigger tick, the same second the session ended. It could
+        land nothing and build on nothing, and when the merge sweep landed the
+        pull request minutes later it queued a second pass that did the real
+        work. Holding lets the sweep's reason join the pending pass, so one
+        session answers both.
+        """
+        awaiting = self.prs_awaiting_checks()
+        if not awaiting:
+            self.followup_held_since = None
+            return False
+        now = time.time()
+        if self.followup_held_since is None:
+            self.followup_held_since = now
+            prs = ", ".join(f"PR #{n}" for n in awaiting)
+            log(f"  holding the follow-up pass until CI finishes on {prs}")
+            return True
+        if now - self.followup_held_since >= FOLLOWUP_CHECKS_WAIT_SECONDS:
+            log(f"  checks still unfinished after {FOLLOWUP_CHECKS_WAIT_SECONDS // 60} "
+                "minutes; running the follow-up pass anyway")
+            self.followup_held_since = None
+            return False
+        return True
+
     def _queue_followup(self, reason: str) -> None:
         """Ask for a follow-up pass on the next quiet tick, and say why."""
         self.pending_followup = True
@@ -971,6 +1051,7 @@ class LocalControlPlane:
         if due.name == "scheduled":
             self.pending_followup = False
             self.followup_reasons = []
+            self.followup_held_since = None
         previous_agent = self.agent
         self.agent = due.agent
         try:
@@ -1702,7 +1783,12 @@ class LocalControlPlane:
             # A run that stopped mid-task left work in the tree that no future
             # event references. Pick it up on the next tick rather than waiting
             # for unrelated repo activity to happen along.
-            if self.pending_followup and not new_events and not self.shutdown:
+            if (
+                self.pending_followup
+                and not new_events
+                and not self.shutdown
+                and not self._followup_waits_on_checks()
+            ):
                 reasons = self.followup_reasons or ["work from the previous run is unfinished"]
                 self.pending_followup = False
                 self.followup_reasons = []
