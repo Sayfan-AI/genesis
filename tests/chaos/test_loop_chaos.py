@@ -237,6 +237,66 @@ def test_a_scheduled_run_that_lands_work_still_queues_its_own_follow_up(
     assert "queueing a follow-up pass" in capsys.readouterr().out
 
 
+def test_a_follow_up_pass_waits_for_ci_on_the_pull_request_its_session_opened(
+    plane, script, loop, sessions_run, monkeypatch, capsys
+):
+    """Issue #116, the 09:23 sequence on genesis's own plane.
+
+    A scheduled session opened PR #113 and its follow-up pass launched the same
+    second, while CI was still running. That pass found nothing to do (14 turns,
+    $0.46), and when the sweep landed PR #113 three minutes later it queued a
+    second pass that did the real work. Held until CI finishes, the two reasons
+    land in one pass.
+    """
+    real_scheduled_due = triggers.scheduled_due
+    fired = []
+
+    def due_once(state, now, agent=triggers.ORCHESTRATOR_AGENT):
+        if fired:
+            return real_scheduled_due(state, now, agent)
+        fired.append(True)
+        return real_scheduled_due({}, now, agent)
+
+    monkeypatch.setattr(triggers, "scheduled_due", due_once)
+    monkeypatch.setattr(triggers, "open_human_gates", lambda *a, **k: [])
+    script([
+        {"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2},
+        {"tools": 3, "subtype": "success", "turns": 4, "cost": 0.5, "commit": "work.py"},
+        {"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2},
+        {"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2},
+    ])
+    prompts = _record_prompts(plane, monkeypatch)
+
+    # Poll 1: the scheduled session opens the pull request, CI is running.
+    # Poll 2: still running. Poll 3: green, and the sweep lands it.
+    run = loop([[], [], []], merges=[[], [], [113]], awaiting=[[113], [113], []])
+
+    assert run["polls"] == 3
+    assert sessions_run() == 3, (
+        f"ran {sessions_run()} sessions; expected startup, scheduled, and one "
+        "follow-up pass after the merge - not one pass during CI and another after"
+    )
+    assert "changed the repo" in prompts[-1] and "PR #113" in prompts[-1], prompts[-1]
+    assert "holding the follow-up pass until CI finishes on PR #113" in capsys.readouterr().out
+
+
+def test_a_held_follow_up_pass_runs_anyway_once_the_wait_is_up(
+    plane, script, loop, sessions_run, monkeypatch, capsys
+):
+    """The hold is bounded: a check that never reports must not starve the loop."""
+    monkeypatch.setattr(server, "FOLLOWUP_CHECKS_WAIT_SECONDS", 0)
+    script([
+        {"tools": 3, "subtype": "success", "turns": 4, "cost": 0.5, "commit": "work.py"},
+        {"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2},
+    ])
+
+    run = loop([[], []], awaiting=[[7], [7]])
+
+    assert run["polls"] == 2
+    assert sessions_run() == 2, "the follow-up pass was held past its bound"
+    assert "running the follow-up pass anyway" in capsys.readouterr().out
+
+
 def test_a_second_control_plane_does_not_start_on_top_of_the_first(
     plane, script, loop, sessions_run
 ):

@@ -830,6 +830,61 @@ def test_merge_sweep_failure_never_kills_the_plane(plane, monkeypatch) -> None:
     assert plane.merge_ready_prs() == []
 
 
+@pytest.mark.parametrize(
+    "checks, unfinished",
+    [
+        ([], True),  # CI hasn't started yet
+        ([{"status": "IN_PROGRESS", "conclusion": ""}], True),
+        ([{"state": "PENDING"}], True),
+        ([{"conclusion": "SUCCESS"}, {"status": "QUEUED", "conclusion": None}], True),
+        ([{"conclusion": "SUCCESS"}, {"state": "SUCCESS"}], False),
+        ([{"conclusion": "FAILURE"}], False),  # red is concluded; the pass should see it
+        ([{"state": "ERROR"}], False),
+    ],
+)
+def test_checks_unfinished(checks, unfinished) -> None:
+    assert server._checks_unfinished(checks) is unfinished
+
+
+def test_prs_awaiting_checks_counts_only_bot_pull_requests_still_in_ci(
+    plane, monkeypatch
+) -> None:
+    """Issue #116. A human's or a draft pull request isn't the sweep's to land, so
+    waiting on it would hold the follow-up pass for nothing."""
+    monkeypatch.delenv("GENESIS_AUTO_MERGE", raising=False)
+    monkeypatch.setattr(server, "mint_installation_token", lambda *a, **k: None)
+    bot = {"login": "app/genesis-dev-bot", "is_bot": True}
+    running = [{"status": "IN_PROGRESS", "conclusion": ""}]
+    prs = [
+        {"number": 1, "isDraft": False, "author": bot, "statusCheckRollup": running},
+        {"number": 2, "isDraft": True, "author": bot, "statusCheckRollup": running},
+        {"number": 3, "isDraft": False, "author": {"login": "a-human"}, "statusCheckRollup": running},
+        {"number": 4, "isDraft": False, "author": bot,
+         "statusCheckRollup": [{"conclusion": "SUCCESS"}]},
+    ]
+    monkeypatch.setattr(server, "_gh", lambda *a, **k: (0, json.dumps(prs)))
+    assert plane.prs_awaiting_checks() == [1]
+
+
+def test_prs_awaiting_checks_fails_open(plane, monkeypatch) -> None:
+    """An unreadable list must not hold the pass: that would turn a gh hiccup into
+    a stalled loop, which is worse than the duplicate pass the hold prevents."""
+    monkeypatch.delenv("GENESIS_AUTO_MERGE", raising=False)
+    monkeypatch.setattr(server, "mint_installation_token", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_gh", lambda *a, **k: (1, "HTTP 502"))
+    assert plane.prs_awaiting_checks() == []
+    monkeypatch.setattr(server, "_gh", lambda *a, **k: (0, "not json"))
+    assert plane.prs_awaiting_checks() == []
+
+
+def test_prs_awaiting_checks_waits_for_nothing_when_auto_merge_is_off(
+    plane, monkeypatch
+) -> None:
+    monkeypatch.setenv("GENESIS_AUTO_MERGE", "off")
+    monkeypatch.setattr(server, "_gh", lambda *a, **k: pytest.fail("no sweep, so no wait"))
+    assert plane.prs_awaiting_checks() == []
+
+
 def test_only_one_scheduled_trigger_fires_per_tick(plane, monkeypatch, tmp_path) -> None:
     """A laptop closed overnight leaves several schedules due at once. Firing all
     of them on the first tick would be a surprising way to spend an afternoon."""

@@ -203,8 +203,13 @@ def loop(plane, monkeypatch):
     all run for real.
     """
 
-    def run(ticks: list[list[str]], merges: list[list[int]] | None = None) -> dict:
+    def run(
+        ticks: list[list[str]],
+        merges: list[list[int]] | None = None,
+        awaiting: list[list[int]] | None = None,
+    ) -> dict:
         merges = list(merges or [])
+        awaiting = list(awaiting or [])
         state = {"polls": 0, "disabled": 0, "enabled": 0}
 
         # The plane's own scheduled triggers are a separate mechanism with its own
@@ -229,6 +234,13 @@ def loop(plane, monkeypatch):
         monkeypatch.setattr(
             plane, "merge_ready_prs",
             lambda: merges[state["polls"] - 1] if state["polls"] <= len(merges) else [],
+        )
+        # Bot pull requests still in CI, per poll, read the same way as `merges`.
+        # The default is none, so a scenario that doesn't script CI never holds a
+        # follow-up pass and never reaches the network to ask.
+        monkeypatch.setattr(
+            plane, "prs_awaiting_checks",
+            lambda: awaiting[state["polls"] - 1] if state["polls"] <= len(awaiting) else [],
         )
 
         def events_for(index: int) -> list[dict]:
