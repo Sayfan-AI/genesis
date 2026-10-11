@@ -20,6 +20,17 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .genesis/scripts/pre-session.sh"
+          }
+        ]
+      }
     ]
   }
 }
