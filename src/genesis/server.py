@@ -929,6 +929,15 @@ class LocalControlPlane:
             return
 
         log(f"Trigger due: {due.name}")
+        # A scheduled session *is* the follow-up pass: same agent, same "assess
+        # and advance" instruction, launched fresh. Whatever queued a pass before
+        # it - typically the merge sweep on this very tick - is answered by it,
+        # and leaving the flag up ran the identical session twice (#109). If this
+        # session lands work or dies mid-task, `run_orchestrator` raises the flag
+        # again on the way out. The ci-failure prompt is narrow, so it doesn't
+        # stand in for a pass and leaves the flag alone.
+        if due.name == "scheduled":
+            self.pending_followup = False
         previous_agent = self.agent
         self.agent = due.agent
         try:
