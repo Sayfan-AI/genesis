@@ -383,6 +383,16 @@ hardcode an orchestrator genesis doesn't have. Merged changes reach the plane on
 when someone runs `scripts/update-plane.sh` and restarts. That's the rollback point
 too: check out an older commit in `genesis-plane`, then restart.
 
+Green CI is the evolver's only reviewer, so the rules it runs under can't be
+reviewed by it. `.genesis/protected-paths` lists them: `.claude/`, `.genesis/`,
+`.github/workflows/` and `src/genesis/automerge.py`. The merge sweep, and
+`genesis-merge.yml` when the plane isn't running, hold any bot pull request that
+touches one with `needs:human`. The list is read from the default branch, so a pull
+request can't edit its way past it, and the check lives in the pinned plane, so the
+evolver can't change it without a person merging. Dev systems get the mechanism and
+no list; a repo opts in by adding the file. Dependabot's action bumps touch
+`.github/workflows/` and wait for a person too, which is the intended cost.
+
 Before this, both planes on the machine imported from the editable install in the
 interactive checkout. Any branch switch there changed the code the next restart
 would load, and an agent working in that checkout would have been editing its own

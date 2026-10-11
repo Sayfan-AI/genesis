@@ -1,0 +1,21 @@
+# Paths an autonomous pull request can't land on its own.
+#
+# The merge sweep (genesis serve) and genesis-merge.yml read this file from the
+# default branch, never from the pull request, so a pull request can't loosen the
+# list it's checked against. A bot pull request that touches any of these stays
+# open with `needs:human` and a comment naming the file. Everything else about it
+# can be green; a person merges it or closes it.
+#
+# One prefix per line. A prefix covers itself and everything beneath it.
+
+# The evolver's charter and the hooks it runs under.
+.claude/
+
+# The guard scripts, the pre-session net, and this list.
+.genesis/
+
+# CI, the merge workflow, and every workflow's permissions.
+.github/workflows/
+
+# The merge rule, including this check.
+src/genesis/automerge.py
