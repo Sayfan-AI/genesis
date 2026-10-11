@@ -276,4 +276,19 @@ jobs:
         # `--ref` isn't optional. Without it `gh workflow run` first resolves the
         # default branch over the API, and that lookup is what failed on MaKlaude,
         # taking the dispatch down with it.
-        run: gh workflow run genesis-evolver.yml --ref main
+        #
+        # A disabled target is skipped, not failed. GitHub answers a dispatch to
+        # a disabled workflow with HTTP 422, which turned a run that had already
+        # landed its pull requests red - on genesis, whose evolver workflow is
+        # disabled, every auto-merge after genesis issue #93 was fixed. A red
+        # merge run reads as "the merge failed" to every reader, the evolver's
+        # failed-run collection included. Any other failure still goes red.
+        run: |
+          state=$(gh api "repos/$GH_REPO/actions/workflows/genesis-evolver.yml" --jq .state || true)
+          case "$state" in
+            disabled_*)
+              echo "::notice::genesis-evolver.yml is $state, so nothing to wake. The merge itself landed."
+              exit 0
+              ;;
+          esac
+          gh workflow run genesis-evolver.yml --ref main
