@@ -911,6 +911,49 @@ def test_an_open_gate_does_not_hold_back_ci_failure_triage(plane, monkeypatch) -
     assert "A required check failed" in launched[0]
 
 
+def test_every_trigger_runs_the_planes_agent_when_it_has_no_orchestrator(plane, monkeypatch) -> None:
+    """Genesis serves itself with `--agent .claude/agents/evolver.md`. The cron
+    and CI-failure triggers used to hardcode the orchestrator, a file genesis
+    doesn't have, so both would have launched sessions told to run nothing."""
+    plane.agent = ".claude/agents/evolver.md"
+    monkeypatch.setattr(server.triggers, "save_state", lambda *a, **k: None)
+    monkeypatch.setattr(server.triggers, "open_human_gates", lambda *a, **k: [])
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator",
+        lambda event, prompt=None, label=None: seen.append((plane.agent, prompt or "")),
+    )
+
+    monkeypatch.setattr(server.triggers, "load_state", lambda *a: {})
+    monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
+    plane.run_due_triggers("tok")
+    monkeypatch.setattr(
+        server.triggers, "failed_runs",
+        lambda *a, **k: [{"name": "CI", "headBranch": "main", "url": "u", "createdAt": "2026-08-02T01:00:00Z"}],
+    )
+    plane.run_due_triggers("tok")
+
+    assert [agent for agent, _ in seen] == [".claude/agents/evolver.md"] * 2
+    assert all("orchestrator.md" not in prompt for _, prompt in seen)
+
+
+def test_the_daily_evolver_does_not_double_the_cron_when_it_is_the_planes_agent(
+    plane, monkeypatch
+) -> None:
+    plane.agent = ".claude/agents/evolver.md"
+    monkeypatch.setattr(server.triggers, "load_state", lambda *a: {"scheduled": 10**12})
+    monkeypatch.setattr(server.triggers, "save_state", lambda *a, **k: None)
+    monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
+    monkeypatch.setattr(server.triggers, "open_human_gates", lambda *a, **k: [])
+    monkeypatch.setattr(server.Path, "is_file", lambda self: True)
+    launched: list[str] = []
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda event, prompt=None, label=None: launched.append(prompt or "")
+    )
+    plane.run_due_triggers("tok")
+    assert launched == []
+
+
 def test_trigger_restores_the_planes_default_agent(plane, monkeypatch) -> None:
     """The evolver trigger swaps the agent for one session. If that leaked, every
     later event-driven run would silently run the wrong agent."""

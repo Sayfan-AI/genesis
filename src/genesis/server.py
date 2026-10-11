@@ -915,9 +915,16 @@ class LocalControlPlane:
         now = time.time()
 
         runs = triggers.failed_runs(self.repo, state.get("ci_failure_seen"), token)
-        due = triggers.ci_failure_due(runs) or self._scheduled_unless_gated(state, now, token)
-        if due is None:
-            due = triggers.evolver_due(state, now, Path(".claude/agents/evolver.md").is_file())
+        due = triggers.ci_failure_due(runs, self.agent) or self._scheduled_unless_gated(
+            state, now, token
+        )
+        # The daily evolver cycle is a second agent on a second clock. When the
+        # evolver already *is* the plane's agent - genesis serving itself - the
+        # six-hourly scheduled run covers it, and firing both would be the same
+        # session twice.
+        evolver = Path(".claude/agents/evolver.md")
+        if due is None and Path(self.agent) != evolver:
+            due = triggers.evolver_due(state, now, evolver.is_file())
         if due is None:
             return
 
@@ -944,7 +951,7 @@ class LocalControlPlane:
         skip stamps the schedule, so the next check is a full interval away
         rather than a `gh` query on every tick.
         """
-        due = triggers.scheduled_due(state, now)
+        due = triggers.scheduled_due(state, now, self.agent)
         if due is None:
             return None
         gates = triggers.open_human_gates(self.repo, token)
