@@ -72,14 +72,22 @@ def _elapsed(state: dict, key: str, now: float) -> float:
     return max(0.0, now - float(last))
 
 
-def scheduled_due(state: dict, now: float) -> Due | None:
+# What the scheduled and CI-failure triggers run unless the plane was pointed at
+# something else. They used to hardcode it, so `genesis serve --agent
+# .claude/agents/evolver.md` on genesis - which has no orchestrator - would have
+# launched a session every six hours, and on every red check, told to run a file
+# that doesn't exist.
+ORCHESTRATOR_AGENT = ".claude/agents/orchestrator.md"
+
+
+def scheduled_due(state: dict, now: float, agent: str = ORCHESTRATOR_AGENT) -> Due | None:
     if _elapsed(state, "scheduled", now) < SCHEDULED_ORCHESTRATOR_SECONDS:
         return None
     return Due(
         name="scheduled",
-        agent=".claude/agents/orchestrator.md",
+        agent=agent,
         prompt=(
-            "Run the agent defined in .claude/agents/orchestrator.md.\n\n"
+            f"Run the agent defined in {agent}.\n\n"
             "This is a scheduled run - assess project state and advance work."
         ),
     )
@@ -186,15 +194,15 @@ def open_human_gates(repo: str, token: str | None = None) -> list[dict] | None:
     ]
 
 
-def ci_failure_due(runs: list[dict]) -> Due | None:
+def ci_failure_due(runs: list[dict], agent: str = ORCHESTRATOR_AGENT) -> Due | None:
     if not runs:
         return None
     newest = runs[-1]
     return Due(
         name="ci-failure",
-        agent=".claude/agents/orchestrator.md",
+        agent=agent,
         prompt=(
-            "Run the agent defined in .claude/agents/orchestrator.md.\n\n"
+            f"Run the agent defined in {agent}.\n\n"
             "A required check failed.\n"
             f"- Failing workflow: {newest.get('name', '?')}\n"
             f"- Branch: {newest.get('headBranch', '?')}\n"
