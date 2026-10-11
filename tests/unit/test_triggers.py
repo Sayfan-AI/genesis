@@ -66,9 +66,12 @@ def _gh_returns(payload) -> object:
     return run
 
 
-def test_failed_runs_ignores_genesis_own_workflows(monkeypatch) -> None:
+def test_failed_runs_ignores_genesis_own_workflows(monkeypatch, tmp_path) -> None:
     """Genesis workflows escalate their own failures through escalate.sh.
     Re-triaging them here would double-report a failure that already has an issue."""
+    monkeypatch.chdir(tmp_path)
+    triggers.ESCALATE_PATH.parent.mkdir(parents=True)
+    triggers.ESCALATE_PATH.write_text("#!/bin/bash\n")
     monkeypatch.setattr(
         triggers.subprocess,
         "run",
@@ -79,6 +82,25 @@ def test_failed_runs_ignores_genesis_own_workflows(monkeypatch) -> None:
     )
     runs = triggers.failed_runs("o/r", since_iso=None)
     assert [r["name"] for r in runs] == ["CI"]
+
+
+def test_failed_runs_reports_genesis_workflows_where_nothing_escalates_them(
+    monkeypatch, tmp_path
+) -> None:
+    """Genesis's own repo has no escalate.sh, so its Genesis-named workflows
+    don't escalate. Filtering them there hid a red Genesis Auto-Merge on `main`
+    from the only thing polling for red runs (issue #112)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        triggers.subprocess,
+        "run",
+        _gh_returns([
+            {"name": "Genesis Auto-Merge", "createdAt": "2026-10-10T22:47:59Z"},
+            {"name": "CI", "createdAt": "2026-08-02T01:00:00Z"},
+        ]),
+    )
+    runs = triggers.failed_runs("o/r", since_iso=None)
+    assert [r["name"] for r in runs] == ["CI", "Genesis Auto-Merge"]
 
 
 def test_failed_runs_only_reports_what_is_new(monkeypatch) -> None:
