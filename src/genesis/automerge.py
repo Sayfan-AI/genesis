@@ -108,11 +108,111 @@ def ready_to_merge(repo: str, token: str | None = None) -> list[dict]:
     return ready
 
 
+# Paths an autonomous pull request can't land on its own. One prefix per line,
+# `#` comments. A repo opts in by carrying the file; genesis seeds none, so a dev
+# system without one merges exactly as before.
+PROTECTED_PATHS_FILE = ".genesis/protected-paths"
+HOLD_LABEL = "needs:human"
+
+
+def _is_not_found(out: str) -> bool:
+    return "HTTP 404" in out or '"status":"404"' in out
+
+
+def protected_paths(repo: str, token: str | None = None) -> list[str] | None:
+    """The protected prefixes, read from the default branch. None when unreadable.
+
+    The default branch, never the pull request or a working tree: a list the
+    pull request can edit is a list it can loosen. Genesis's served evolver
+    works in the same clone the plane sweeps from, so the working tree may be
+    sitting on the very branch under review.
+    """
+    code, out = _gh(
+        ["api", f"repos/{repo}/contents/{PROTECTED_PATHS_FILE}",
+         "-H", "Accept: application/vnd.github.raw"],
+        token,
+    )
+    if code != 0:
+        return [] if _is_not_found(out) else None
+    prefixes = []
+    for line in out.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            prefixes.append(line)
+    return prefixes
+
+
+def changed_files(repo: str, number: int, token: str | None = None) -> list[str] | None:
+    """Every path a pull request touches, renamed-from paths included."""
+    code, out = _gh(
+        ["api", f"repos/{repo}/pulls/{number}/files", "--paginate",
+         "--jq", ".[] | .filename, (.previous_filename // empty)"],
+        token,
+    )
+    if code != 0:
+        return None
+    return [line for line in out.splitlines() if line]
+
+
+def protected_hit(files: list[str], prefixes: list[str]) -> str | None:
+    """The first changed path under a protected prefix, or None.
+
+    A prefix matches itself and anything beneath it, whether or not it ends in
+    `/`, so `src/genesis/automerge.py` and `.claude/` both mean what they say.
+    """
+    for f in files:
+        for p in prefixes:
+            base = p.rstrip("/")
+            if f == base or f.startswith(base + "/"):
+                return f
+    return None
+
+
+def _hold(repo: str, number: int, path: str, token: str | None, log) -> None:
+    """Leave the pull request open, labelled for a person, and say why once."""
+    code, out = _gh(["pr", "view", str(number), "--repo", repo, "--json", "labels",
+                     "--jq", "[.labels[].name] | index(\"" + HOLD_LABEL + "\") != null"], token)
+    if code == 0 and out.strip() == "true":
+        return
+    _gh(["label", "create", HOLD_LABEL, "--repo", repo, "--color", "B60205",
+         "--description", "Waiting on a person"], token)
+    _gh(["pr", "comment", str(number), "--repo", repo, "--body",
+         f"Not auto-merged: this pull request changes `{path}`, which "
+         f"`{PROTECTED_PATHS_FILE}` on the default branch reserves for a human. "
+         "Everything else about it is green. A person merges it, or closes it."], token)
+    _gh(["pr", "edit", str(number), "--repo", repo, "--add-label", HOLD_LABEL], token)
+    log(f"  held PR #{number} for a human: it touches {path}")
+
+
 def merge_ready(repo: str, token: str | None = None, log=print) -> list[int]:
-    """Squash-merge everything currently mergeable. Returns the numbers merged."""
+    """Squash-merge everything currently mergeable. Returns the numbers merged.
+
+    Pull requests that touch a protected path are held rather than merged. That
+    check lives here, in the pinned plane, because the rules it protects - the
+    guards, the agent's charter, the merge rule itself - are exactly what an
+    agent with auto-merge could otherwise loosen for itself. It fails closed: if
+    the list or a pull request's files can't be read, nothing is merged, and the
+    next tick tries again.
+    """
     merged: list[int] = []
-    for pr in ready_to_merge(repo, token):
+    ready = ready_to_merge(repo, token)
+    if not ready:
+        return merged
+    prefixes = protected_paths(repo, token)
+    if prefixes is None:
+        log(f"  could not read {PROTECTED_PATHS_FILE}; merging nothing this sweep")
+        return merged
+    for pr in ready:
         number = pr["number"]
+        if prefixes:
+            files = changed_files(repo, number, token)
+            if files is None:
+                log(f"  could not list PR #{number}'s files; leaving it for the next sweep")
+                continue
+            hit = protected_hit(files, prefixes)
+            if hit:
+                _hold(repo, number, hit, token, log)
+                continue
         code, out = _gh(
             ["pr", "merge", str(number), "--repo", repo, "--squash", "--delete-branch"], token
         )

@@ -172,13 +172,63 @@ jobs:
       # reasons to change.
       # -------------------------------------------------------------------------
 
-      - name: Squash-merge them
-        id: merge
+      - name: Hold pull requests that touch protected paths
+        id: protected
         if: steps.candidates.outputs.numbers != ''
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
           NUMBERS: ${{ steps.candidates.outputs.numbers }}
+        # The first gate on the seam. `.genesis/protected-paths`, read from the
+        # default branch so a pull request can't loosen the list it's checked
+        # against, names paths an autonomous pull request can't land alone. A
+        # repo without the file keeps every candidate. Same rule as
+        # `merge_ready` in genesis's automerge.py, which enforces it under
+        # `genesis serve`. Fails closed: an unreadable list or file listing
+        # merges nothing this run, and the next sweep tries again.
+        run: |
+          set -uo pipefail
+          if list=$(gh api "repos/$GH_REPO/contents/.genesis/protected-paths" -H "Accept: application/vnd.github.raw" 2>&1); then
+            prefixes=$(printf '%s\n' "$list" | sed 's/#.*//; s/[[:space:]]*$//; s/^[[:space:]]*//' | sed '/^$/d')
+          elif printf '%s' "$list" | grep -q 'HTTP 404\|"status":"404"'; then
+            prefixes=""
+          else
+            echo "could not read .genesis/protected-paths; merging nothing this run" >&2
+            echo "numbers=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          keep=""
+          for n in ${NUMBERS//,/ }; do
+            if [ -z "$prefixes" ]; then keep="${keep:+$keep,}$n"; continue; fi
+            if ! files=$(gh api "repos/$GH_REPO/pulls/$n/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)'); then
+              echo "could not list PR #$n's files; leaving it for the next sweep" >&2
+              continue
+            fi
+            hit=""
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              while IFS= read -r p; do
+                base="${p%/}"
+                case "$f" in "$base"|"$base"/*) hit="$f"; break 2 ;; esac
+              done <<< "$prefixes"
+            done <<< "$files"
+            if [ -z "$hit" ]; then keep="${keep:+$keep,}$n"; continue; fi
+            echo "held PR #$n for a human: it touches $hit"
+            if [ "$(gh pr view "$n" --json labels --jq '[.labels[].name] | index("needs:human") != null')" != "true" ]; then
+              gh label create needs:human --color B60205 --description "Waiting on a person" >/dev/null 2>&1 || true
+              gh pr comment "$n" --body "Not auto-merged: this pull request changes \`$hit\`, which \`.genesis/protected-paths\` on the default branch reserves for a human. Everything else about it is green. A person merges it, or closes it." >/dev/null || true
+              gh pr edit "$n" --add-label needs:human >/dev/null || true
+            fi
+          done
+          echo "numbers=$keep" >> "$GITHUB_OUTPUT"
+
+      - name: Squash-merge them
+        id: merge
+        if: steps.protected.outputs.numbers != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          NUMBERS: ${{ steps.protected.outputs.numbers }}
         run: |
           set -euo pipefail
           merged=""

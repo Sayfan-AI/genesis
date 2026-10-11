@@ -58,6 +58,7 @@ TRACKED_GENESIS_CONTENT = {
     ".genesis/config.toml",  # read by the control plane, written by the scaffold
     ".genesis/scripts/issues.sh",  # seeded script the control plane shells out to
     ".genesis/scripts/pre-session.sh",  # optional hook the dev repo supplies
+    ".genesis/protected-paths",  # opt-in merge-sweep list, read from the default branch
 }
 
 
