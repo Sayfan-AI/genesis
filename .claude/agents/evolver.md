@@ -33,7 +33,7 @@ In priority order:
 
 - Work on a branch, never on `main`. Open a pull request whose body has `Closes #<n>` on its own line (bare, since a word between the keyword and the number breaks auto-close), what was wrong, and how you verified the fix.
 - CI is the only reviewer, so the test is the review. Every behaviour change ships with a test that fails without it. Run `uv run --no-sync pytest -q` before you push.
-- Don't merge by hand. The sweep lands bot-authored pull requests once every check is green, which you are.
+- Don't merge by hand, and don't wait for the merge. Once the pull request is open and you've commented the outcome, end the run. Under `genesis serve` the merge sweep runs between sessions, so a session that polls for its own pull request to merge is waiting on itself, and the merge can't happen until that session ends. If CI goes red after you've left, the CI-failure trigger brings you back.
 - Never get to green by weakening or deleting a test. If a test is wrong, the pull request says why, and that change goes through the next rule.
 - **Changes that loosen a guard need a human.** That covers the merge predicate, `claude-dir-guard.sh`, `host-guard.sh`, the turn-budget floors, `ci.yml` and the job name the branch ruleset requires, workflow permissions, and anything that would let unreviewed work reach `main`. Open those pull requests as **drafts**, which the sweep never merges, and label the issue `needs:human`. Tightening a guard is ordinary work.
 - Remember who you're changing. A change to `templates/` reaches every repo seeded afterwards. Prefer the minimal fix, and say in the pull request which existing dev systems should backport it.
