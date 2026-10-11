@@ -1501,6 +1501,22 @@ class LocalControlPlane:
             log(f"Primed high-water mark at event id={self.last_event_id}")
         if result.etag:
             self.etag = result.etag
+
+    def _prime_ci_failure_cursor_if_needed(self) -> None:
+        """Start CI-failure triage from now rather than from the repo's history.
+
+        The polled twin of the high-water mark. Without a cursor, `failed_runs`
+        applies no `since` filter, and a first start in a fresh clone launched a
+        full session on a failure three weeks old whose pull request had already
+        merged green (issue #107). Anything red before the plane started is the
+        initial orchestrator run's to notice. No-op once a cursor exists.
+        """
+        state = triggers.load_state()
+        if state.get("ci_failure_seen"):
+            return
+        state["ci_failure_seen"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        triggers.save_state(state)
+        log(f"Primed CI-failure cursor at {state['ci_failure_seen']}")
         self.save_state()
 
     def serve(self) -> int:
@@ -1578,6 +1594,7 @@ class LocalControlPlane:
         # Prime high-water mark on first run so the post-initial poll doesn't
         # replay every relevant historical event on the events page.
         self._prime_high_water_if_needed(token)
+        self._prime_ci_failure_cursor_if_needed()
 
         # Before the first session picks anything, not after. The plane most
         # likely to be holding an unreleasable claim is the one that died without
