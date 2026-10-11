@@ -125,11 +125,12 @@ def _iso(minutes_ago: float = 0, days_ago: float = 0) -> str:
     return when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _comment(num: int, user: dict = HUMAN, **age: float) -> dict:
+def _comment(num: int, user: dict = HUMAN, body: str = "", **age: float) -> dict:
     return {
         "issue_url": f"https://api.github.com/repos/o/r/issues/{num}",
         "created_at": _iso(**age),
         "user": user,
+        "body": body,
         "html_url": f"https://github.com/o/r/issues/{num}#issuecomment-{num}0",
     }
 
@@ -381,7 +382,7 @@ class TestNextSelects:
         assert proc.stdout.strip() == "40"
         assert "issue edit 40 --add-label in-progress" in calls
 
-    @pytest.mark.parametrize("skip", ["blocked", "in-progress", "needs:human"])
+    @pytest.mark.parametrize("skip", ["blocked", "in-progress", "needs:human", "needs:evolver"])
     def test_skips_ineligible_issues(self, run, skip: str) -> None:
         listing = (
             '[{"number":40,"createdAt":"2026-08-01T00:00:00Z",'
@@ -559,6 +560,31 @@ class TestUnansweredComments:
             threads=[_thread(154, title="add the thing", pr=True)],
         )
         assert 'PR "add the thing"' in out
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "Claimed by session `serve-1`. <!-- genesis-claim session=serve-1 -->",
+            "Claim released: done. <!-- genesis-release -->",
+        ],
+    )
+    def test_the_scripts_own_notes_are_not_a_human(self, unanswered, body: str) -> None:
+        """genesis-dashboard issue #16: a session on the operator's gh credential
+        posts claim and release notes as the human. They're marked, so the marker
+        decides, not the author."""
+        out = unanswered(
+            comments=[_comment(7, body=body, minutes_ago=90)],
+            threads=[_thread(7)],
+        )
+        assert out.strip() == ""
+
+    def test_a_human_mentioning_a_marker_in_prose_is_still_reported(self, unanswered) -> None:
+        """Only the marker form counts. A person quoting the word isn't a note."""
+        out = unanswered(
+            comments=[_comment(7, body="why is genesis-claim on this?", minutes_ago=90)],
+            threads=[_thread(7)],
+        )
+        assert "#7" in out
 
     def test_empty_means_all_clear(self, unanswered) -> None:
         assert unanswered(comments=[], threads=[]).strip() == ""
@@ -914,6 +940,15 @@ class TestReleaseHandsClaimsBack:
         )
         comment = next(c for c in calls if c.startswith("issue comment 40"))
         assert "the session deadline was reached" in comment
+
+    def test_the_release_note_is_marked_and_is_not_a_claim(self, run) -> None:
+        """The marker is what lets `unanswered-comments` skip the note, and it must
+        not match the prefix `claim_rows` parses, or a release would read as a hold."""
+        board = _board((40, "serve-dead", 0.5))
+        _, calls = run("release", "--session", "serve-dead", "--reason", "r", GH_LIST_JSON=board)
+        comment = next(c for c in calls if c.startswith("issue comment 40"))
+        assert "<!-- genesis-release -->" in comment
+        assert "<!-- genesis-claim " not in comment
 
     def test_a_session_that_claimed_nothing_releases_nothing(self, run) -> None:
         """The common case by far: most chains end holding no claim at all, and
