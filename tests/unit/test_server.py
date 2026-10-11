@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import signal
@@ -292,6 +293,26 @@ def test_prime_high_water_swallows_http_error(plane) -> None:
     with patch.object(server, "fetch_events", side_effect=err):
         plane._prime_high_water_if_needed("token")  # must not raise
     assert plane.last_event_id is None
+
+
+@pytest.mark.parametrize(
+    "err",
+    [
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+        http.client.IncompleteRead(b"[{"),
+        TimeoutError("The read operation timed out"),
+        json.JSONDecodeError("Unterminated string", "[{", 1),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+def test_prime_high_water_survives_transport_errors(plane, capsys, err) -> None:
+    """Issue #119: PR #118 taught the poll loop to survive these, and the startup
+    prime calls the same `fetch_events`. Raising here reaches the top-level
+    handler and ends a plane that would have been fine one poll later."""
+    with patch.object(server, "fetch_events", side_effect=err):
+        plane._prime_high_water_if_needed("token")  # must not raise
+    assert plane.last_event_id is None
+    assert "proceeding without" in capsys.readouterr().out
 
 
 # ---------- poll_once: page-coverage warning ----------

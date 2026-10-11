@@ -240,6 +240,17 @@ class PollResult:
     not_modified: bool
 
 
+# Everything a `fetch_events` call can die of besides an HTTP status, and all of
+# it transport, which heals: a dropped keep-alive (`RemoteDisconnected`), a
+# truncated body (`IncompleteRead`, or the JSON error it turns into), a read
+# timeout. None of those is a URLError, so each used to reach the top-level
+# handler and stop the plane. Measured on genesis-dashboard: one "Remote end
+# closed connection without response" at 10:09 ended a plane that had been
+# idling correctly behind a human gate. Shared by every caller, because the fix
+# for that reached the poll loop and not the startup prime (issue #119).
+TRANSIENT_FETCH_ERRORS = (urllib.error.URLError, http.client.HTTPException, OSError, ValueError)
+
+
 def fetch_events(repo: str, etag: str | None, token: str) -> PollResult:
     """Fetch repo events. Returns 304 (not_modified=True) when ETag matches.
 
@@ -1617,8 +1628,8 @@ class LocalControlPlane:
             return
         try:
             result = fetch_events(self.repo, etag=None, token=token)
-        except (urllib.error.HTTPError, urllib.error.URLError) as e:
-            log(f"Failed to prime high-water mark ({e}); proceeding without")
+        except (urllib.error.HTTPError, *TRANSIENT_FETCH_ERRORS) as e:
+            log(f"Failed to prime high-water mark ({type(e).__name__}: {e}); proceeding without")
             return
         if result.events:
             self.last_event_id = result.events[0].get("id")
@@ -1749,14 +1760,8 @@ class LocalControlPlane:
                     break
                 log(f"GitHub API error: HTTP {e.code} {e.reason}")
                 continue
-            # Everything else a poll can die of is transport, and transport heals:
-            # a dropped keep-alive (`RemoteDisconnected`), a truncated body
-            # (`IncompleteRead`, or the JSON error it turns into), a read timeout.
-            # None of those is a URLError, so each used to reach the top-level
-            # handler and stop the plane. Measured on genesis-dashboard: one
-            # "Remote end closed connection without response" at 10:09 ended a
-            # plane that had been idling correctly behind a human gate.
-            except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
+            # Everything else a poll can die of is transport; see the constant.
+            except TRANSIENT_FETCH_ERRORS as e:
                 log(f"Network error polling events: {type(e).__name__}: {e}")
                 continue
 
