@@ -332,3 +332,35 @@ def test_a_second_control_plane_does_not_start_on_top_of_the_first(
     assert server.LOCK_PATH.read_text() == str(os.getpid()), (
         "the second plane overwrote the first plane's lock"
     )
+
+
+def test_a_dropped_connection_on_a_poll_does_not_stop_the_plane(plane, script, loop, monkeypatch, capsys):
+    """Measured on genesis-dashboard: `RemoteDisconnected` from the events poll
+    reached the top-level handler and ended the plane. A transient transport
+    error is a skipped tick, not a shutdown."""
+    import http.client
+    import json
+
+    script([{"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2}] * 4)
+    failures = iter([
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+        http.client.IncompleteRead(b"[{"),
+        TimeoutError("The read operation timed out"),
+        json.JSONDecodeError("Unterminated string", "[{", 1),
+    ])
+    real = plane.poll_once
+
+    def flaky(token):
+        failure = next(failures, None)
+        if failure is not None:
+            raise failure
+        return real(token)
+
+    monkeypatch.setattr(plane, "poll_once", flaky)
+
+    run = loop([[], [], [], [], []])
+
+    assert run["polls"] == 5, "the plane stopped on a transient network error"
+    assert run["rc"] == 0
+    out = capsys.readouterr().out
+    assert "RemoteDisconnected" in out and "Unexpected error" not in out
