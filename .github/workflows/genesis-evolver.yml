@@ -86,8 +86,8 @@ jobs:
             4. If an issue is too large to finish in this run, do NOT start it.
                Split it into sub-issues labeled `needs:evolver`, comment saying
                so, and stop. A large issue attempted in one run produces nothing.
-            5. Finish by commenting the outcome and opening a PR. Genesis has no
-               auto-merge, so say in the PR that a human must merge it.
+            5. Finish by commenting the outcome and opening a PR. The merge sweep
+               lands it once CI is green; see "How a Fix Lands" in the charter.
 
             Why the checklist is mandatory: this workflow has died at
             `error_max_turns` twice, and the run that left no comment left no

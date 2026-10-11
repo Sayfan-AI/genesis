@@ -365,6 +365,29 @@ noting: **porting a mechanism means porting everything it depends on, and a labe
 a dependency.** Two of the three halves here were files, which is why the third went
 unnoticed.
 
+## Genesis Serves Itself
+
+Genesis runs its own evolver under `genesis serve`, the same control plane it ships
+to dev systems, and the evolver's green pull requests auto-merge. Three directories
+keep the loop from rewriting the code it's running on:
+
+| Directory | What it is | Who changes it |
+| --- | --- | --- |
+| `~/git/genesis-serve` | clone the served evolver works in | the evolver |
+| `~/git/genesis-plane` | pinned runtime every `genesis serve` on the machine runs from | `scripts/update-plane.sh`, deliberately |
+| `~/git/genesis` | interactive checkout for a human | a human |
+
+Start it with `cd ~/git/genesis-serve && ~/git/genesis-plane/.venv/bin/genesis serve --agent .claude/agents/evolver.md`.
+Every trigger runs that agent. The scheduled and CI-failure triggers used to
+hardcode an orchestrator genesis doesn't have. Merged changes reach the plane only
+when someone runs `scripts/update-plane.sh` and restarts. That's the rollback point
+too: check out an older commit in `genesis-plane`, then restart.
+
+Before this, both planes on the machine imported from the editable install in the
+interactive checkout. Any branch switch there changed the code the next restart
+would load, and an agent working in that checkout would have been editing its own
+runtime.
+
 ## Self-Improvement
 
 This project opts in to self-improvement. Update this CLAUDE.md and project workflows as the design evolves. Keep `docs/` as the living design documents.
