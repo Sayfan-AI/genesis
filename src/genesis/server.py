@@ -1094,15 +1094,25 @@ class LocalControlPlane:
         due = triggers.scheduled_due(state, now, self.agent)
         if due is None:
             return None
-        gates = triggers.open_human_gates(self.repo, token)
-        if not gates:
+        if not self._gated("scheduled run", token):
             return due
-        log(f"Skipping the scheduled run: {len(gates)} open needs:human issue(s) are waiting on a person.")
-        for gate in gates:
-            log(f"  issue #{gate.get('number')} {gate.get('title', '')}")
         state["scheduled"] = now
         triggers.save_state(state)
         return None
+
+    def _gated(self, run: str, token: str) -> bool:
+        """Whether an open `needs:human` gate means `run` should be skipped.
+
+        Shared by the cron and the startup run, the two launches that no event
+        asked for. Fails open: a `None` from the query means launch.
+        """
+        gates = triggers.open_human_gates(self.repo, token)
+        if not gates:
+            return False
+        log(f"Skipping the {run}: {len(gates)} open needs:human issue(s) are waiting on a person.")
+        for gate in gates:
+            log(f"  issue #{gate.get('number')} {gate.get('title', '')}")
+        return True
 
     def merge_ready_prs(self) -> list[int]:
         """Land any bot pull request whose checks are all green.
@@ -1742,13 +1752,19 @@ class LocalControlPlane:
         # the board wants clearing while nothing is running on it.
         self.sweep_stale_claims(force=True)
 
-        # Initial run. If it fails because claude is broken (rc=127), abort
-        # rather than entering the poll loop with workflows off.
-        rc = self.run_orchestrator(None)
-        self.save_state()
-        if rc == 127:
-            log("Initial orchestrator run failed (claude not callable). Aborting.")
-            return self._shutdown(token_ok=True)
+        # Initial run, gated like the cron (issue #125). A restart is a cron tick
+        # for this purpose: behind an open gate the agent's own rules say stop,
+        # so the session could only confirm the gate. Nothing is lost by
+        # skipping it - a person answering the gate while the plane was down is
+        # replayed from the high-water mark, and that event is the real wake.
+        if not self._gated("initial run", token):
+            # If it fails because claude is broken (rc=127), abort rather than
+            # entering the poll loop with workflows off.
+            rc = self.run_orchestrator(None)
+            self.save_state()
+            if rc == 127:
+                log("Initial orchestrator run failed (claude not callable). Aborting.")
+                return self._shutdown(token_ok=True)
         if self.shutdown:
             return self._shutdown(token_ok=True)
 

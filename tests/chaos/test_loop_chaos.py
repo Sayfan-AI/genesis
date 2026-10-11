@@ -364,3 +364,24 @@ def test_a_dropped_connection_on_a_poll_does_not_stop_the_plane(plane, script, l
     assert run["rc"] == 0
     out = capsys.readouterr().out
     assert "RemoteDisconnected" in out and "Unexpected error" not in out
+
+
+def test_a_gated_restart_waits_for_the_person_and_then_wakes(
+    plane, script, loop, sessions_run, capsys
+):
+    """Issue #125, across the loop rather than at the call site.
+
+    A restart behind an open needs:human gate launches no startup session, but
+    the plane still enters the poll loop, and the person answering the gate is
+    what wakes it. Skipping the startup run must not skip the loop.
+    """
+    script([{"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2}] * 2)
+
+    run = loop([[], ["a-human"]], gates=[{"number": 25, "title": "Sign-off"}])
+
+    assert run["polls"] == 2
+    assert sessions_run() == 1, (
+        f"ran {sessions_run()} sessions; expected none at startup and one for "
+        "the human's event"
+    )
+    assert "Skipping the initial run" in capsys.readouterr().out

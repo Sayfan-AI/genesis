@@ -1535,12 +1535,72 @@ def test_serve_sweeps_the_board_before_the_first_session(plane, monkeypatch) -> 
     monkeypatch.setattr(
         plane, "sweep_stale_claims", lambda force=False: order.append("sweep")
     )
+    monkeypatch.setattr(server.triggers, "open_human_gates", lambda *a, **k: [])
     # 127 aborts serve straight after the initial run, before the poll loop.
     monkeypatch.setattr(plane, "run_orchestrator", lambda *a, **k: order.append("run") or 127)
 
     plane.serve()
 
     assert order[:2] == ["sweep", "run"]
+
+
+def _serve_to_initial_run(plane, monkeypatch, gh_issues) -> list[str]:
+    """Drive `serve()` up to the initial run with `gh issue list` answering
+    `gh_issues` (a list, or None for a failed query). Returns what launched."""
+    monkeypatch.setattr(server, "enable_workflows", MagicMock())
+    monkeypatch.setattr(server, "disable_workflows", MagicMock())
+    monkeypatch.setattr(server.shutil, "which", lambda _: "/usr/local/bin/claude")
+    monkeypatch.setattr(server, "_gh_token", lambda: "token")
+    monkeypatch.setattr(plane, "_prime_high_water_if_needed", lambda *a, **k: None)
+    monkeypatch.setattr(plane, "sweep_stale_claims", lambda force=False: None)
+
+    def gh(cmd, **k):
+        if gh_issues is None:
+            return subprocess.CompletedProcess(cmd, 1, "", "HTTP 502")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(gh_issues), "")
+
+    monkeypatch.setattr(server.triggers.subprocess, "run", gh)
+    launched: list[str] = []
+    # 127 aborts serve straight after a launched initial run.
+    monkeypatch.setattr(
+        plane, "run_orchestrator", lambda *a, **k: launched.append("run") or 127
+    )
+    # A skipped initial run goes on to the poll loop; stop it there.
+    monkeypatch.setattr(
+        plane, "_interruptible_sleep", lambda *_: setattr(plane, "shutdown", True)
+    )
+    plane.serve()
+    return launched
+
+
+def test_an_open_human_gate_skips_the_initial_run(plane, monkeypatch, capsys) -> None:
+    """Issue #125: five restarts behind genesis-dashboard issue #25 launched five
+    startup sessions that each confirmed the gate and exited. A restart is a cron
+    tick for this purpose, so it's gated the same way."""
+    launched = _serve_to_initial_run(plane, monkeypatch, [
+        {"number": 25, "title": "Milestone 1 sign-off", "labels": [{"name": "needs:human"}]},
+    ])
+    assert launched == []
+    out = capsys.readouterr().out
+    assert "Skipping the initial run" in out and "issue #25" in out
+
+
+def test_an_automation_failure_does_not_gate_the_initial_run(plane, monkeypatch) -> None:
+    """A dead run's escalation means the next run may succeed, so a restart is
+    exactly when it should get its chance."""
+    launched = _serve_to_initial_run(plane, monkeypatch, [
+        {"number": 2, "title": "Run died", "labels": [
+            {"name": "needs:human"}, {"name": "automation:failure"},
+        ]},
+    ])
+    assert launched == ["run"]
+
+
+def test_a_failed_gate_query_still_runs_the_initial_run(plane, monkeypatch) -> None:
+    """Fails open, like the cron: a gh hiccup at startup costs one idle session
+    rather than a plane that starts and silently does nothing."""
+    assert _serve_to_initial_run(plane, monkeypatch, None) == ["run"]
+    assert _serve_to_initial_run(plane, monkeypatch, []) == ["run"]
 
 
 # ---------- a resume that loaded nothing (#43) ----------

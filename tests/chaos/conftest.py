@@ -207,6 +207,7 @@ def loop(plane, monkeypatch):
         ticks: list[list[str]],
         merges: list[list[int]] | None = None,
         awaiting: list[list[int]] | None = None,
+        gates: list[dict] | None = None,
     ) -> dict:
         merges = list(merges or [])
         awaiting = list(awaiting or [])
@@ -219,6 +220,9 @@ def loop(plane, monkeypatch):
         # `run_due_triggers` still runs and still decides.
         triggers.save_state({"scheduled": time.time(), "evolver": time.time()})
         monkeypatch.setattr(triggers, "failed_runs", lambda *a, **k: [])
+        # Open needs:human issues, which gate the startup run and the cron. None
+        # by default, so the startup run launches and no scenario asks GitHub.
+        monkeypatch.setattr(triggers, "open_human_gates", lambda *a, **k: list(gates or []))
 
         monkeypatch.setattr(
             server, "disable_workflows",
