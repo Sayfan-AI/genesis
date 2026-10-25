@@ -8,7 +8,9 @@
 #      from ~/.config/genesis/.env  (shared across all your genesis projects),
 #   2. verifies the genesis GitHub App is actually installed on this repo,
 #   3. sets the values as THIS repo's GitHub Actions secrets
-#      (ANTHROPIC_API_KEY, GENESIS_APP_ID, GENESIS_APP_PRIVATE_KEY),
+#      (ANTHROPIC_API_KEY, GENESIS_APP_ID, GENESIS_APP_PRIVATE_KEY), and records
+#      the App's bot login (`<slug>[bot]`) as the GENESIS_APP_BOT Actions
+#      variable, which the workflows pass to claude-code-action's allowed_bots,
 #   4. seeds the OPTIONAL Loki secrets when the .env has them
 #      (GENESIS_LOKI_URL, GENESIS_LOKI_USER, GENESIS_LOKI_TOKEN) so the activity
 #      logging hooks reach Grafana from Actions runs, not just local ones,
@@ -151,6 +153,50 @@ for line in os.environ["REQUIRED_APP_PERMISSIONS"].strip().splitlines():
     echo "App permissions look right."
 }
 
+# The App's bot login, `<slug>[bot]`, read from the installation lookup above.
+#
+# claude-code-action refuses a run whose triggering actor is a bot that isn't in
+# its `allowed_bots` input, and an empty input allows no bots at all. The run that
+# matters is genesis-merge.yml re-dispatching the orchestrator with the App token
+# after a merge: its actor is this App, and it's the only thing that wakes the
+# loop after a bot-authored merge. App names are unique across GitHub, so the
+# workflows can't name the App themselves (genesis issue #129) - they read
+# `vars.GENESIS_APP_BOT`, and this is where it comes from.
+#
+# The installation object already carries `app_slug`, so this needs no second
+# request. Prints nothing when the body doesn't have it; the caller warns.
+APP_BOT=""
+app_bot_login() {
+    printf '%s' "$1" | python3 -c '
+import json, re, sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+slug = payload.get("app_slug") if isinstance(payload, dict) else None
+# A slug is lowercase letters, digits and hyphens. Anything else is a shape
+# change, and writing it into allowed_bots would match nothing.
+if isinstance(slug, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
+    print(slug + "[bot]")
+' 2>/dev/null || true
+}
+
+seed_app_bot_variable() {
+    if [ -n "$APP_BOT" ]; then
+        gh variable set GENESIS_APP_BOT --body "$APP_BOT"
+        echo "GENESIS_APP_BOT set to $APP_BOT."
+        return 0
+    fi
+    # Warn, don't fail. The secrets are what every run needs; this variable is
+    # only consulted when the App itself triggers a run. But say exactly what
+    # breaks, because the symptom shows up later and somewhere else.
+    echo "WARNING: couldn't read the App's slug, so GENESIS_APP_BOT isn't set." >&2
+    echo "         Runs the App triggers (the orchestrator re-dispatch after an" >&2
+    echo "         auto-merge) will be refused by claude-code-action until it is:" >&2
+    echo "           gh variable set GENESIS_APP_BOT --body '<your-app-slug>[bot]'" >&2
+}
+
 verify_app_installed() {
     if ! command -v openssl >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
         echo "WARNING: openssl/curl not found; skipping App-install check." >&2
@@ -169,7 +215,8 @@ verify_app_installed() {
     body="$(cat "$tmp")"; rm -f "$tmp"
     case "$code" in
         200) echo "Genesis App is installed on $REPO."
-             check_app_permissions "$body" ;;
+             check_app_permissions "$body"
+             APP_BOT="$(app_bot_login "$body")" ;;
         404) echo "ERROR: the genesis GitHub App is not installed on $REPO." >&2
              echo "Install it on the repo's org/account, then re-run." >&2
              exit 1 ;;
@@ -180,12 +227,13 @@ verify_app_installed() {
 }
 verify_app_installed
 
-# --- 3. seed the repo's Actions secrets -----------------------------------------
+# --- 3. seed the repo's Actions secrets and the App's bot login ----------------
 echo "Seeding secrets onto $REPO ..."
 # Pipe via stdin (printf is a builtin) so values never reach the process arg list.
 printf '%s' "$ANTHROPIC_API_KEY"         | gh secret set ANTHROPIC_API_KEY
 printf '%s' "$GENESIS_GITHUB_APP_ID"     | gh secret set GENESIS_APP_ID
 printf '%s' "$GENESIS_GITHUB_APP_SECRET" | gh secret set GENESIS_APP_PRIVATE_KEY
+seed_app_bot_variable
 
 # --- 4. seed the OPTIONAL Loki secrets ------------------------------------------
 # Activity logging is opt-in: without these, log.sh skips the push and everything

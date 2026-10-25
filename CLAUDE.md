@@ -310,6 +310,30 @@ secret too would have cost every existing dev repo a manual step for nothing.
 
 `tests/e2e/test_workflows.py` fails any template that goes back to `app-id`.
 
+## No Template Names The App
+
+`claude-code-action` refuses a run whose triggering actor is a bot missing from its
+`allowed_bots` input, and an empty input allows no bots. The seeded workflows used
+to pass `genesis-dev-bot[bot]` there, the maintainer's App. App names are unique
+across GitHub, so for every other adopter the list never matched, and the run it
+broke was the one the loop can least afford to lose: `genesis-merge.yml`
+re-dispatching the orchestrator with the App token after a merge (genesis issue
+#129).
+
+So the four Claude workflows read `allowed_bots: ${{ vars.GENESIS_APP_BOT }}`, and
+`activate.sh` sets that variable to `<app_slug>[bot]` from the installation lookup
+it already makes. That keeps the templates copied byte-for-byte and scaffolding
+credential-free. There's deliberately no `|| 'genesis-dev-bot[bot]'` fallback: it
+would be wrong for every adopter but one, which is the original bug, and repos
+seeded before this change keep their old workflow files anyway, because genesis
+never rewrites a seeded repo. A repo that ports the new templates by hand has to
+re-run `activate.sh` (or `gh variable set` it), and until then App-triggered runs
+fail with an error naming `allowed_bots`, which is the loud direction.
+
+`tests/e2e/test_workflows.py` fails any template containing a concrete
+`<name>[bot]` login, and pins the variable name between the workflows and
+`activate.sh`.
+
 ## Genesis Also Has A `.claude/` Directory
 
 Everything under *What a Scaffolded `settings.json` Can and Can't Grant* describes
