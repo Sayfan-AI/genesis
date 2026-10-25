@@ -147,3 +147,85 @@ def test_the_check_is_actually_called_on_a_successful_install_lookup() -> None:
         "the response body is being discarded again, which is what made a missing "
         "grant a mid-run failure instead of a setup one"
     )
+
+
+# --- the App's bot login (genesis issue #129) -----------------------------------
+#
+# claude-code-action refuses a run whose triggering actor is a bot missing from
+# `allowed_bots`. The seeded workflows used to pass the maintainer's App by name,
+# and App names are unique across GitHub, so every other adopter's post-merge
+# re-dispatch was refused and the loop stalled after each auto-merge. The
+# workflows now read `vars.GENESIS_APP_BOT`, and activate.sh is what sets it.
+
+
+def _lift(name: str) -> str:
+    source = ACTIVATE.read_text()
+    match = re.search(rf"^{name}\(\) \{{.*?^\}}$", source, re.S | re.M)
+    assert match, f"activate.sh no longer defines {name}"
+    return match.group(0)
+
+
+def _bot_login(body: str) -> str:
+    script = f'set -uo pipefail\n{_lift("app_bot_login")}\napp_bot_login "$1"\n'
+    result = subprocess.run([BASH, "-c", script, "_", body], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_the_bot_login_is_the_installation_slug_plus_the_bot_suffix() -> None:
+    assert _bot_login('{"app_slug":"sagrin-dev-bot","permissions":{}}') == "sagrin-dev-bot[bot]"
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["", "not json", "[]", '{"permissions":{}}', '{"app_slug":""}', '{"app_slug":"x y"}'],
+)
+def test_no_usable_slug_yields_nothing_rather_than_a_guess(body) -> None:
+    """A wrong login in allowed_bots matches nothing, the same as an empty one,
+    but it hides the fact that the lookup failed."""
+    assert _bot_login(body) == ""
+
+
+def _seed(tmp_path: Path, app_bot: str):
+    calls = tmp_path / "gh-calls"
+    fake_gh = tmp_path / "gh"
+    fake_gh.write_text(f'#!/bin/bash\nprintf "%s\\n" "$*" >> {calls}\n')
+    fake_gh.chmod(0o755)
+    script = f'set -uo pipefail\nAPP_BOT="$1"\n{_lift("seed_app_bot_variable")}\nseed_app_bot_variable\n'
+    result = subprocess.run(
+        [BASH, "-c", script, "_", app_bot],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin"},
+    )
+    return result, calls.read_text() if calls.exists() else ""
+
+
+def test_a_known_login_is_stored_as_the_variable_the_workflows_read(tmp_path) -> None:
+    result, calls = _seed(tmp_path, "sagrin-dev-bot[bot]")
+    assert result.returncode == 0, result.stderr
+    assert calls.strip() == "variable set GENESIS_APP_BOT --body sagrin-dev-bot[bot]"
+
+
+def test_an_unknown_login_warns_with_the_manual_fix_and_does_not_block(tmp_path) -> None:
+    """Warn, not fail: the secrets are what every run needs, and the variable is
+    only consulted when the App itself is the triggering actor. The warning names
+    the command, because the symptom surfaces much later, in another workflow."""
+    result, calls = _seed(tmp_path, "")
+    assert result.returncode == 0
+    assert calls == "", "nothing should be written when the login is unknown"
+    assert "gh variable set GENESIS_APP_BOT" in result.stderr
+
+
+def test_the_bot_login_is_read_on_the_successful_lookup_and_then_seeded() -> None:
+    """Same dead-code concern as the permission check: the lifted functions
+    above would pass while nothing called them."""
+    source = ACTIVATE.read_text()
+    body = _lift("verify_app_installed")
+    ok_arm = re.search(r"200\)(.*?);;", body, re.S)
+    assert ok_arm and 'APP_BOT="$(app_bot_login "$body")"' in ok_arm.group(1)
+
+    seed_call = source.rindex("\nseed_app_bot_variable\n")
+    assert source.rindex("\nverify_app_installed\n") < seed_call, (
+        "the variable is seeded before the lookup that finds the login has run"
+    )

@@ -60,7 +60,7 @@ Genesis uses **one GitHub App per user/org, shared by every project you bootstra
    .genesis/scripts/activate.sh
    ```
 
-   It reads the three values from `~/.config/genesis/.env`, verifies the App is installed on the repo, sets them as the repo's Actions secrets, and enables the workflows. It refuses to run if any value is missing/placeholder or the App isn't installed.
+   It reads the three values from `~/.config/genesis/.env`, verifies the App is installed on the repo, sets them as the repo's Actions secrets, records the App's bot login (`<your-app-slug>[bot]`) as the `GENESIS_APP_BOT` Actions variable, and enables the workflows. The workflows pass that variable to `claude-code-action`'s `allowed_bots`, which is what lets your App's own dispatches (like the orchestrator wake after an auto-merge) run. Nothing in the seeded files names a particular App, so any App name works. It refuses to run if any value is missing/placeholder or the App isn't installed.
 
 The next trigger (an issue/PR/comment event, a push, or the cron) wakes the orchestrator, and onboarding begins on issue #1. Every dev repo ships this same `activate.sh` and a **Setup** section in its own README for whoever operates it.
 

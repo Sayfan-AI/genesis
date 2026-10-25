@@ -621,6 +621,57 @@ def test_no_workflow_uses_the_deprecated_app_id_input() -> None:
                 )
 
 
+APP_BOT_VARIABLE = "GENESIS_APP_BOT"
+# A concrete `<slug>[bot]` login: a slug character right before the suffix. That
+# excludes the suffix checks (`'[bot]'`) and placeholders (`<slug>[bot]`), which
+# are how a template should talk about bots.
+LITERAL_APP_LOGIN_RE = re.compile(r"[A-Za-z0-9-]\[bot\]")
+
+
+def test_every_claude_workflow_allows_the_app_by_variable_not_by_name() -> None:
+    """genesis issue #129: the templates passed `allowed_bots: "genesis-dev-bot[bot]"`.
+
+    claude-code-action refuses a run whose triggering actor is a bot not in
+    `allowed_bots`, and App names are unique across GitHub, so for every adopter
+    but one the list never matched. The run it broke is the orchestrator
+    re-dispatch genesis-merge.yml makes with the App token, the only wake after a
+    bot-authored merge. activate.sh records the App's own login as a repo
+    variable; the templates stay byte-identical across projects and read it.
+    """
+    for workflow in _claude_workflows(TEMPLATES_DIR / "workflows"):
+        lines = [
+            line.strip()
+            for line in workflow.read_text().splitlines()
+            if line.strip().startswith("allowed_bots:")
+        ]
+        assert lines == [f"allowed_bots: ${{{{ vars.{APP_BOT_VARIABLE} }}}}"], (
+            f"{workflow.name} must pass allowed_bots from vars.{APP_BOT_VARIABLE}, "
+            f"found {lines}"
+        )
+
+
+def test_no_template_names_a_specific_app() -> None:
+    """Wider than allowed_bots, so the name can't move somewhere else unnoticed.
+
+    Every template is copied into repos whose App has a different name. Comments
+    count too: a comment naming the maintainer's App is how the next person
+    copies it back into a value.
+    """
+    for path in sorted(TEMPLATES_DIR.rglob("*")):
+        if not path.is_file():
+            continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            assert "genesis-dev-bot" not in line and not LITERAL_APP_LOGIN_RE.search(line), (
+                f"{path.relative_to(REPO_ROOT)}:{number} names a specific App: {line.strip()}"
+            )
+
+
+def test_activate_sets_the_variable_the_workflows_read() -> None:
+    """The two halves of the coupling live in different files, so pin them here."""
+    activate = (TEMPLATES_DIR / "scripts" / "activate.sh").read_text()
+    assert f"gh variable set {APP_BOT_VARIABLE} " in activate
+
+
 # ---------- genesis's own auto-merge (#39) ----------
 
 GENESIS_MERGE = REPO_ROOT / ".github" / "workflows" / "genesis-merge.yml"
