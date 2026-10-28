@@ -679,7 +679,7 @@ GitHub's `POST /app/installations/{id}/access_tokens` endpoint accepts both `rep
 
 **Genesis App registration (broad — the ceiling):**
 - Installed on **all orgs and repos** the adopter wants genesis to manage (can be "all repositories" or "selected repositories" — the adopter's call).
-- Registered with the union of all permissions: `contents:write`, `pull_requests:write`, `issues:write`, `actions:write`, `workflows:write`, `metadata:read`, plus `secrets:write` (needed only by the seeding workflow on the adopter's source repo — see below).
+- Registered with the union of all permissions: `contents:write`, `pull_requests:write`, `issues:write`, `actions:write`, `workflows:write`, `checks:read`, `metadata:read`, plus `secrets:write` (needed only by the seeding workflow on the adopter's source repo — see below).
 - Private key + App ID are seeded onto each genesis-managed dev repo as encrypted **repo secrets** (`GENESIS_APP_ID`, `GENESIS_APP_PRIVATE_KEY`). Per-repo storage rather than org-level because dev repos may span multiple orgs (including the adopter's personal account), and org-level secrets don't propagate across orgs.
 
 **Per-project token (narrow — what each project actually gets):**

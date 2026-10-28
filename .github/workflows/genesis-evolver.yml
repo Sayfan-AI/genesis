@@ -64,6 +64,10 @@ jobs:
           permission-workflows: write
           # The evolver's primary signal is failed runs, so it needs to read them.
           permission-actions: read
+          # Red checks on pull requests are evolver signal too, and without this
+          # `gh pr checks` and every `statusCheckRollup` read fail with 403
+          # Resource not accessible by integration (genesis issue #134). Read-only.
+          permission-checks: read
 
       - uses: anthropics/claude-code-action@v1
         with:
