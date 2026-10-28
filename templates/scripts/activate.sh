@@ -106,6 +106,7 @@ issues:write:the loop coordinates through issues
 pull_requests:write:workers open pull requests and auto-merge lands them
 workflows:write:the evolver edits .github/workflows/ files
 actions:write:auto-merge re-dispatches the orchestrator with gh workflow run
+checks:read:auto-merge and the stalled-PR report read each pull request's check rollup
 "
 
 check_app_permissions() {
@@ -119,7 +120,7 @@ except Exception:
     sys.exit(0)  # unreadable body: this check is a convenience, not a gate on itself
 
 granted = payload.get("permissions") if isinstance(payload, dict) else None
-# An ABSENT permissions object teaches us nothing, and reporting "all five
+# An ABSENT permissions object teaches us nothing, and reporting "all six
 # missing" off it would block activation on a check that learned nothing. Only a
 # populated object is evidence. An installation always carries at least
 # `metadata`, so an empty one means the shape changed, not that the App has no

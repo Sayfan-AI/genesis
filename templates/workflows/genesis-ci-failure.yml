@@ -114,6 +114,11 @@ jobs:
           # 403 Resource not accessible by integration and has to diagnose a
           # failure it can't read. Read-only.
           permission-actions: read
+          # `issues.sh summary` lists stalled pull requests from each one's
+          # `statusCheckRollup`, and `gh pr checks` reads the same thing. Without
+          # this both fail with 403 Resource not accessible by integration and
+          # the stalled-PR section comes up empty (genesis issue #134). Read-only.
+          permission-checks: read
 
       - uses: anthropics/claude-code-action@v1
         with:

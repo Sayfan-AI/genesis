@@ -99,6 +99,10 @@ jobs:
           # dispatching runs, so every re-trigger below 403'd and the loop went
           # quiet after each otherwise-successful merge.
           permission-actions: write
+          # The candidate query below asks `gh pr list` for `statusCheckRollup`,
+          # and without this the whole query fails with Resource not accessible
+          # by integration, so nothing is ever merged (genesis issue #134).
+          permission-checks: read
 
       - name: Find pull requests that satisfy every merge precondition
         id: candidates

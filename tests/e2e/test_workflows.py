@@ -573,6 +573,26 @@ def test_orchestrator_class_tokens_can_read_workflow_runs() -> None:
         )
 
 
+def test_tokens_that_read_check_rollups_can_read_checks() -> None:
+    """Without `permission-checks: read` a `statusCheckRollup` read fails.
+
+    `create-github-app-token` narrows the token to exactly the `permission-*`
+    inputs it's given, so an App that grants Checks still hands these workflows a
+    token that can't read them. Auto-merge's candidate query then fails outright
+    and lands nothing, and `issues.sh summary` loses its stalled-PR section
+    (genesis issue #134, hit on sagrin/sweatless). Read-only.
+    """
+    for name in (
+        *ORCHESTRATOR_CLASS_TEMPLATES,
+        "genesis-ci-failure.yml",
+        "genesis-evolver.yml",
+        "genesis-merge.yml",
+    ):
+        assert "permission-checks: read" in _template(name), (
+            f"{name} mints a token that cannot read check runs"
+        )
+
+
 def test_the_human_gate_skips_the_schedule_and_never_the_events() -> None:
     """The gate saves idle spend; putting it on the events workflow would wedge
     the project.
