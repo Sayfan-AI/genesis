@@ -1,21 +1,27 @@
 """Local orchestrator server (local control plane).
 
 Runs the orchestrator agent locally, polling GitHub repo events and launching
-fresh Claude sessions when relevant activity is detected. Disables GitHub
+fresh agent sessions when relevant activity is detected. Disables GitHub
 Actions workflows on start to prevent duplicate execution; re-enables them on
 graceful shutdown.
 
+The sessions run on a coding agent engine, Claude Code or Codex (see
+genesis.engines). Everything here is policy that applies to both; what differs
+between them lives in the engine.
+
 Authentication uses the user's existing `gh` CLI auth (`gh auth token`) for
-GitHub, and whatever the local `claude` CLI is already logged in with for the
-model — a Claude subscription works, so no ANTHROPIC_API_KEY is required. That
-is the main practical reason to prefer local mode: GitHub Actions needs a
-credential in the repo, this needs none.
+GitHub, and whatever the engine's CLI is already logged in with for the model.
+A Claude or ChatGPT subscription works, so no ANTHROPIC_API_KEY or
+OPENAI_API_KEY is required. That is the main practical reason to prefer local
+mode: GitHub Actions needs a credential in the repo, this needs none.
 
 Configuration (environment variables):
     GENESIS_POLL_INTERVAL    seconds between polls (default: 60)
     GENESIS_SESSION_TIMEOUT  max seconds per orchestrator session (default: 3600)
     GENESIS_REPO             owner/repo (default: detected from git remote)
     GENESIS_AGENT            agent definition to run (default: the orchestrator)
+    GENESIS_ENGINE           claude or codex (default: [engine] name in
+                             .genesis/config.toml if set, else claude)
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.request
 import uuid
@@ -387,35 +394,38 @@ def _died_mid_task(subtype: str | None) -> bool:
     return bool(subtype) and subtype != "success"
 
 
-def _task_cost_ceiling() -> float:
-    """Spend allowed per unit of work before continuations stop, whatever anyone
-    thinks. Env override so an operator can tighten it without editing code.
+def _env_bound(names: tuple[str, ...], default: float) -> float:
+    """The first of `names` set in the environment, as a number, else `default`.
 
-    GENESIS_COST_CEILING is still read, second, because that is the name every
-    existing operator config uses and silently ignoring it would loosen a bound
-    somebody had deliberately tightened.
+    An unparseable value falls back to the default rather than to "unbounded":
+    a typo in a spending bound must never loosen it.
     """
-    for var in ("GENESIS_TASK_COST_CEILING", "GENESIS_COST_CEILING"):
+    for var in names:
         raw = os.environ.get(var, "").strip()
         if raw:
             try:
                 return float(raw)
             except ValueError:
-                return TASK_COST_CEILING_USD
-    return TASK_COST_CEILING_USD
+                return default
+    return default
 
 
-def _run_cost_budget() -> float:
-    """Total spend allowed across every chain this process launches.
-
-    Read fresh on each check rather than captured at startup, matching
-    _task_cost_ceiling, so an operator can tighten a running loop.
+def _task_cost_ceiling(engine: Engine | None = None) -> float:
+    """Spend allowed per unit of work before continuations stop, whatever anyone
+    thinks, in the engine's unit. Env override so an operator can tighten it
+    without editing code (GENESIS_TASK_COST_CEILING for Claude, with the older
+    GENESIS_COST_CEILING still honoured; GENESIS_TASK_TOKEN_CEILING for Codex).
     """
-    raw = os.environ.get("GENESIS_RUN_COST_BUDGET", "").strip()
-    try:
-        return float(raw) if raw else RUN_COST_BUDGET_USD
-    except ValueError:
-        return RUN_COST_BUDGET_USD
+    engine = engine or ClaudeEngine()
+    return _env_bound(engine.task_ceiling_env, engine.task_ceiling_default)
+
+
+def _run_cost_budget(engine: Engine | None = None) -> float:
+    """Spend allowed for the whole `serve` process, across every chain, in the
+    engine's unit. Env-overridable the same way as _task_cost_ceiling, so an
+    operator can tighten a running loop."""
+    engine = engine or ClaudeEngine()
+    return _env_bound(engine.run_budget_env, engine.run_budget_default)
 
 
 def _git(args: list[str]) -> str:
@@ -578,6 +588,10 @@ class LocalControlPlane:
     # because a bound an operator trusts has to say when it is guessing.
     cost_is_lower_bound: bool = False
     recent_tools: list[str] = field(default_factory=list)
+    # Set by the progress reader when it stops a session at the turn budget, for
+    # engines whose CLI has no budget of its own (Engine.enforces_turn_budget).
+    budget_stopped: bool = False
+    stream_turns: int = 0
     # Identity every session in the current chain claims work under, minted per
     # chain rather than per process: chains run one after another, and a token
     # shared between them would let a chain that died release the claims of an
@@ -682,16 +696,62 @@ class LocalControlPlane:
                             self.last_session_id = ev.session_id
                     elif isinstance(ev, ToolCall):
                         turns += 1
+                        self.stream_turns = turns
                         log(f"  {turns:>3}. {ev.summary}")
                         # Kept for the judge: what it actually did, not what it
                         # says it did. Bounded so a long session can't grow this
                         # without limit.
                         self.recent_tools.append(ev.summary)
                         del self.recent_tools[:-12]
+                        self._enforce_turn_budget(turns)
                     elif isinstance(ev, SessionResult):
                         self._record_result(ev, turns)
         except Exception:  # noqa: BLE001 - reporting must never break the run
             return
+
+    def _enforce_turn_budget(self, turns: int) -> None:
+        """Stop the session at SESSION_MAX_TURNS when the engine won't.
+
+        Codex has no `--max-turns`, and the continuation ladder exists because a
+        budget is what makes a long task resumable in batches instead of one
+        ever-larger run. So the plane enforces it: stop the process here, and
+        report the session as `error_max_turns` once the reader is done, which
+        the ladder resumes exactly like a Claude budget death. Measured before
+        relying on it: a Codex session killed mid-task resumed and finished the
+        remaining steps without repeating the done ones (#146).
+        """
+        if self.engine.enforces_turn_budget or self.budget_stopped or turns < SESSION_MAX_TURNS:
+            return
+        self.budget_stopped = True
+        log(f"  turn budget reached ({SESSION_MAX_TURNS} tool calls) - stopping the session")
+        self._kill_orch()
+
+    def _settle_session(self) -> None:
+        """Close the books on a session once its output has been read.
+
+        Two things only the plane can know at this point: that it stopped the
+        session at the budget, which no stream event says, and what the session
+        cost for engines that can't report it in the stream (Engine.settle_cost).
+        """
+        if self.budget_stopped:
+            self._record_result(
+                SessionResult(
+                    "error_max_turns",
+                    is_error=True,
+                    turns=self.stream_turns,
+                    session_id=self.last_session_id,
+                ),
+                self.stream_turns,
+            )
+        settled = self.engine.settle_cost(self.last_session_id)
+        if settled is not None:
+            self.last_cost += settled
+            loki_push(
+                "session-cost",
+                {"cost": round(settled, 4), "unit": self.engine.cost_unit,
+                 "session": self.last_session_id, "continuation": self.continuation_index},
+            )
+            log(f"  session cost: {self.engine.format_cost(settled)}")
 
     def _record_result(self, ev: SessionResult, turns: int) -> None:
         """Fold one result event into the session's outcome.
@@ -764,9 +824,9 @@ class LocalControlPlane:
         # through _shutdown and re-enables the workflows it disabled, the same
         # path SIGTERM takes. A budget stop that left GitHub Actions off would be
         # worse than not stopping.
-        budget = _run_cost_budget()
+        budget = _run_cost_budget(self.engine)
         if self.run_spent >= budget:
-            log(f"Run cost budget reached ({self._spend(self.run_spent)} >= ${budget:.2f}) "
+            log(f"Run cost budget reached ({self._spend(self.run_spent)} >= {self.engine.format_cost(budget)}) "
                 f"- not launching, shutting down")
             loki_push(
                 "run-budget-stop",
@@ -862,7 +922,7 @@ class LocalControlPlane:
                 break
 
             log(f"  hit max turns; resuming {session_id[:8]} "
-                f"(continuation {attempt}, ${spent:.2f} spent) - {why}")
+                f"(continuation {attempt}, {self.engine.format_cost(spent)} spent) - {why}")
             before = session_work_marker()
             self.continuation_index = attempt
             rc = self._run_session(None, deadline, resume=session_id)
@@ -931,7 +991,7 @@ class LocalControlPlane:
                 f"the previous session ended {self.last_result_subtype} mid-task, "
                 "so its work may be uncommitted in the tree"
             )
-            log(f"  still incomplete (${spent:.2f} spent) - will pick it up on the next tick")
+            log(f"  still incomplete ({self.engine.format_cost(spent)} spent) - will pick it up on the next tick")
 
         # Anything but a clean finish hands the claims back, which is deliberately
         # wider than the resume predicate above: a session killed outright — the
@@ -1338,7 +1398,7 @@ class LocalControlPlane:
         that has lost a judge session's cost has to read differently from one that
         hasn't. "$52.11" and "at least $52.11" lead to different decisions.
         """
-        return f"{'at least ' if self.cost_is_lower_bound else ''}${amount:.2f}"
+        return f"{'at least ' if self.cost_is_lower_bound else ''}{self.engine.format_cost(amount)}"
 
     def _read_judge_output(self, stdout: str | None) -> tuple[str, float]:
         """Pull the judge's verdict and its cost out of its output.
@@ -1406,7 +1466,13 @@ class LocalControlPlane:
         child_env = self._session_env()
         try:
             out = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=180, env=child_env, check=False
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=child_env,
+                check=False,
+                stdin=subprocess.DEVNULL if self.engine.close_stdin else None,
             )
         except (OSError, subprocess.SubprocessError) as e:
             return False, f"judge unavailable ({e})"
@@ -1435,12 +1501,12 @@ class LocalControlPlane:
         # The wider bound is checked first, and each message names WHICH bound
         # fired. "cost ceiling reached" said neither which one nor what it was the
         # ceiling of, so a reader could not tell a task tripwire from a run stop.
-        budget = _run_cost_budget()
+        budget = _run_cost_budget(self.engine)
         if self.run_spent >= budget:
-            return False, f"run cost budget reached ({self._spend(self.run_spent)} >= ${budget:.2f})"
-        ceiling = _task_cost_ceiling()
+            return False, f"run cost budget reached ({self._spend(self.run_spent)} >= {self.engine.format_cost(budget)})"
+        ceiling = _task_cost_ceiling(self.engine)
         if spent >= ceiling:
-            return False, f"task cost ceiling reached (${spent:.2f} >= ${ceiling:.2f})"
+            return False, f"task cost ceiling reached ({self.engine.format_cost(spent)} >= {self.engine.format_cost(ceiling)})"
         if self.last_tool_calls == 0:
             return False, "the attempt made no tool calls"
         if session_work_marker() != before:
@@ -1459,6 +1525,8 @@ class LocalControlPlane:
         self.last_result_subtype = None
         self.last_tool_calls = 0
         self.last_cost = 0.0
+        self.budget_stopped = False
+        self.stream_turns = 0
 
         cmd = self.engine.session_command(
             prompt or "", resume=resume, max_turns=SESSION_MAX_TURNS, tools=ALLOWED_TOOLS
@@ -1469,6 +1537,8 @@ class LocalControlPlane:
             self.orch_proc = subprocess.Popen(
                 cmd,
                 start_new_session=True,
+                # Some engines wait for stdin to close before starting at all.
+                stdin=subprocess.DEVNULL if self.engine.close_stdin else None,
                 stdout=subprocess.PIPE,
                 text=True,
                 bufsize=1,
@@ -1506,6 +1576,7 @@ class LocalControlPlane:
             # plane — the progress feed is never allowed to block the run.
             reader.join(timeout=10)
             self.orch_proc = None
+            self._settle_session()
             self._warn_if_the_session_did_nothing()
 
     def _warn_if_the_session_did_nothing(self) -> None:
@@ -1796,15 +1867,15 @@ class LocalControlPlane:
         run that spent nothing because it never started is worth distinguishing
         from a run that spent nothing because it had nothing to do.
         """
-        budget = _run_cost_budget()
+        budget = _run_cost_budget(self.engine)
         headroom = budget - self.run_spent
         note = ""
         # Worth flagging the near miss. A run that stops early because the next one
         # would cross the budget looks identical to a run that finished its work,
         # and the operator only finds out by noticing the absence of progress.
         if 0 < headroom <= budget * 0.1:
-            note = f" - within ${headroom:.2f} of the ${budget:.2f} budget"
-        log(f"Run total: {self._spend(self.run_spent)} of ${budget:.2f}{note}")
+            note = f" - within {self.engine.format_cost(headroom)} of the {self.engine.format_cost(budget)} budget"
+        log(f"Run total: {self._spend(self.run_spent)} of {self.engine.format_cost(budget)}{note}")
 
     def _reenable_workflows_safe(self) -> None:
         try:
@@ -1827,6 +1898,27 @@ def _make_signal_handler(plane: LocalControlPlane):
     return handler
 
 
+def configured_engine() -> str | None:
+    """Which engine this repo runs on: GENESIS_ENGINE (set by `--engine`), then
+    `[engine] name` in .genesis/config.toml, then None for the default.
+
+    The config file is the durable choice, so a dev system that runs on Codex
+    says so in the repo rather than in whoever's shell started the plane. An
+    unreadable file falls through to the default instead of failing, because
+    the engine choice must never be the thing that stops the plane.
+    """
+    name = os.environ.get("GENESIS_ENGINE", "").strip()
+    if name:
+        return name
+    try:
+        with Path(".genesis/config.toml").open("rb") as f:
+            section = tomllib.load(f).get("engine") or {}
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    value = section.get("name") if isinstance(section, dict) else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def serve() -> int:
     """Run the local orchestrator server. Entry point for `genesis serve`."""
     poll_interval = int(os.environ.get("GENESIS_POLL_INTERVAL", "60"))
@@ -1834,8 +1926,15 @@ def serve() -> int:
     agent = os.environ.get("GENESIS_AGENT", DEFAULT_AGENT)
     all_workflows = os.environ.get("GENESIS_ALL_WORKFLOWS") == "1"
 
+    try:
+        engine = get_engine(configured_engine())
+    except ValueError as e:
+        log(f"Error: {e}")
+        log("Pass --engine, set GENESIS_ENGINE, or fix [engine] name in .genesis/config.toml.")
+        return 1
+
     # Fail before disabling any workflows: a missing agent definition means every
-    # session would ask Claude to run a file that isn't there.
+    # session would ask the agent to run a file that isn't there.
     if not Path(agent).is_file():
         log(f"Error: agent definition not found: {agent}")
         log("Pass --agent <path> or set GENESIS_AGENT to an existing definition.")
@@ -1858,7 +1957,9 @@ def serve() -> int:
         session_timeout=session_timeout,
         agent=agent,
         all_workflows=all_workflows,
+        engine=engine,
     )
+    log(f"  engine: {engine.name}")
 
     handler = _make_signal_handler(plane)
     signal.signal(signal.SIGINT, handler)

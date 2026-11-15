@@ -22,6 +22,7 @@ second translation into them, not a second control plane.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -137,6 +138,25 @@ class Engine:
         """What to check when a session reports success having run no tools."""
         raise NotImplementedError
 
+    # Whether the agent's own CLI stops a session at `max_turns`. When it
+    # doesn't, the plane counts tool calls and stops the session itself, then
+    # reports it as an exhausted budget so the continuation ladder treats it
+    # exactly like Claude's `error_max_turns`.
+    enforces_turn_budget: bool = True
+    # Whether the session must be started with stdin closed. Some CLIs wait for
+    # stdin to reach EOF before starting, even with the prompt as an argument.
+    close_stdin: bool = False
+    # Spending bounds in this engine's unit, and the env vars that override them.
+    task_ceiling_default: float = 0.0
+    task_ceiling_env: tuple[str, ...] = ()
+    run_budget_default: float = 0.0
+    run_budget_env: tuple[str, ...] = ()
+
+    def settle_cost(self, session_id: str | None) -> float | None:
+        """Cost of the process that just ended, for engines that can't report it
+        in the stream. None means the stream's `SessionResult`s already carried it."""
+        return None
+
 
 class StreamParser:
     """Turns one session's output lines into `SessionEvent`s. One per session,
@@ -192,6 +212,15 @@ class ClaudeEngine(Engine):
     binary = "claude"
     cost_unit = "$"
     settings_path = Path(".claude/settings.json")
+    # Cost bounds in dollars. The reasoning behind both numbers lives with their
+    # constants in server.py (TASK_COST_CEILING_USD, RUN_COST_BUDGET_USD).
+    task_ceiling_default = 50.0
+    # GENESIS_COST_CEILING is still read, second, because that is the name every
+    # existing operator config uses, and silently ignoring it would loosen a
+    # bound somebody had deliberately tightened.
+    task_ceiling_env = ("GENESIS_TASK_COST_CEILING", "GENESIS_COST_CEILING")
+    run_budget_default = 150.0
+    run_budget_env = ("GENESIS_RUN_COST_BUDGET",)
 
     def session_command(
         self, prompt: str, *, resume: str | None, max_turns: int, tools: str
@@ -278,7 +307,240 @@ class ClaudeEngine(Engine):
         )
 
 
-ENGINES: dict[str, type[Engine]] = {"claude": ClaudeEngine}
+# ---------------------------------------------------------------------------
+# Codex
+# ---------------------------------------------------------------------------
+#
+# Measured on codex-cli 0.166.0 before any of this was written (genesis issue
+# #146), because each of these differs from Claude Code in a way the plane cares
+# about:
+#
+# - `codex exec` waits for stdin to reach EOF before starting, even when the
+#   prompt is an argument. Launched with stdin inherited, it sat for five
+#   minutes printing "Reading additional input from stdin...". So stdin is
+#   closed.
+# - There is no `--max-turns`. The plane counts tool calls and stops the
+#   session itself. A session killed with SIGTERM after two of five steps
+#   resumed with `codex exec resume <id>` and finished steps 3 to 5 without
+#   repeating any, which is exactly what the continuation ladder needs.
+# - Codex's sandbox makes `.git` read-only and turns the network off, so an
+#   unattended session couldn't commit, push or run `gh`. Sessions run with it
+#   off, the same machine reach a Claude session has in local mode, and
+#   host-guard.sh still guards through the hook.
+# - Project hooks in `.codex/hooks.json` only load headless with
+#   `--dangerously-bypass-hook-trust`. Their PreToolUse payload matches Claude
+#   Code's (`tool_name: "Bash"`, `tool_input.command`), so the seeded guards
+#   work unchanged, and exit 2 blocks the command before it runs.
+# - Usage is tokens, never dollars, and `turn.completed.usage` is the running
+#   total for the whole session, not the turn: a resumed turn reported 142,552
+#   input tokens, of which its own share was 33,307. A session the plane kills
+#   reports no usage in the stream at all. So cost is settled from Codex's own
+#   session log after the process ends, as the new total minus the last total
+#   seen for that session.
+# - `error` items in the stream are warnings (user-config notices, the
+#   hook-trust bypass notice), not failures. Only `turn.failed` and a top-level
+#   `error` event end a session abnormally.
+
+# The flags every unattended session runs with. See the notes above.
+CODEX_UNATTENDED_FLAGS = (
+    "--json",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+)
+
+
+def codex_tokens(usage: dict | None) -> float:
+    """The token count the Codex bounds are measured in: fresh input plus output.
+
+    Cached input is left out. Each request re-sends the whole conversation, so
+    counting cached tokens would mostly measure how long the session has been
+    running rather than how much work it did. The first measured session read
+    109,245 input tokens, 76,032 of them cached, for a task of four commands.
+    """
+    if not isinstance(usage, dict):
+        return 0.0
+    fresh = (usage.get("input_tokens") or 0) - (usage.get("cached_input_tokens") or 0)
+    return float(max(fresh, 0) + (usage.get("output_tokens") or 0))
+
+
+def _unwrap_shell(command: str) -> str:
+    """Codex reports `/bin/zsh -lc 'git status'`. The feed wants `git status`."""
+    for prefix in ("/bin/zsh -lc ", "/bin/bash -lc ", "bash -lc ", "zsh -lc ", "/bin/sh -c ", "sh -c "):
+        if command.startswith(prefix):
+            inner = command[len(prefix):].strip()
+            if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in "'\"":
+                inner = inner[1:-1]
+            return inner
+    return command
+
+
+@dataclass
+class CodexStreamParser(StreamParser):
+    """`codex exec --json`, one event per line.
+
+    Tool calls are counted on `item.completed`, not `item.started`, so a call is
+    counted once. A command a hook blocked never appears as an item at all, so it
+    isn't counted against the budget.
+    """
+
+    def feed(self, event: dict) -> list[SessionEvent]:
+        kind = event.get("type")
+        if kind == "thread.started" and event.get("thread_id"):
+            return [SessionStarted(event["thread_id"])]
+        if kind == "item.completed":
+            tool = self._tool(event.get("item") or {})
+            return [ToolCall(tool)] if tool else []
+        if kind == "turn.completed":
+            # Cost is 0 here on purpose: the usage on this event is the session's
+            # running total, and the plane settles the real figure from the
+            # session log once the process ends (Engine.settle_cost).
+            return [SessionResult("success")]
+        if kind == "turn.failed":
+            return [SessionResult("error_during_execution", is_error=True)]
+        if kind == "error":
+            return [SessionResult("error_during_execution", is_error=True)]
+        return []
+
+    @staticmethod
+    def _tool(item: dict) -> str | None:
+        kind = item.get("type")
+        if kind == "command_execution":
+            return f"Bash {brief({'command': _unwrap_shell(str(item.get('command') or ''))})}"
+        if kind == "file_change":
+            paths = [c.get("path", "") for c in item.get("changes") or [] if isinstance(c, dict)]
+            return f"Edit {brief({'path': ', '.join(paths)})}"
+        if kind == "mcp_tool_call":
+            return f"{item.get('server')}.{item.get('tool')}"
+        if kind == "web_search":
+            return f"WebSearch {brief({'query': str(item.get('query') or '')})}"
+        if kind == "collab_tool_call":
+            return f"Agent {item.get('tool') or ''}".strip()
+        return None
+
+
+class CodexEngine(Engine):
+    name = "codex"
+    binary = "codex"
+    cost_unit = "tokens"
+    hooks_path = Path(".codex/hooks.json")
+    enforces_turn_budget = False
+    close_stdin = True
+    # Token bounds, counted as fresh input plus output (codex_tokens). These are
+    # provisional: they're sized from the first measured sessions and will be
+    # revisited once a dev system has run on Codex for real (#146). An operator
+    # tightens them through the env vars.
+    task_ceiling_default = 3_000_000.0
+    task_ceiling_env = ("GENESIS_TASK_TOKEN_CEILING",)
+    run_budget_default = 10_000_000.0
+    run_budget_env = ("GENESIS_RUN_TOKEN_BUDGET",)
+
+    def __init__(self) -> None:
+        # The last running total seen per session, so a resumed session is
+        # charged only for what it added.
+        self._totals: dict[str, float] = {}
+
+    def session_command(
+        self, prompt: str, *, resume: str | None, max_turns: int, tools: str
+    ) -> list[str]:
+        # `max_turns` and `tools` have no Codex flag. The plane enforces the
+        # budget, and the tool grant is the sandbox setting in the flags.
+        if resume:
+            return [self.binary, "exec", "resume", resume, *CODEX_UNATTENDED_FLAGS, self.resume_prompt]
+        return [self.binary, "exec", *CODEX_UNATTENDED_FLAGS, prompt or ""]
+
+    def judge_command(self, prompt: str, *, max_turns: int) -> list[str]:
+        # Read-only: the judge reads the evidence it's handed and changes
+        # nothing. Ephemeral, so a judge leaves no session behind to resume.
+        return [self.binary, "exec", "--json", "--sandbox", "read-only", "--ephemeral", prompt]
+
+    def stream_parser(self) -> StreamParser:
+        return CodexStreamParser()
+
+    def read_judge_output(self, stdout: str | None) -> JudgeReply:
+        text, usage = "", None
+        for line in (stdout or "").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            item = event.get("item") or {}
+            if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+                text = str(item.get("text") or "").strip()
+            elif event.get("type") == "turn.completed":
+                usage = event.get("usage")
+        if usage is None:
+            return JudgeReply(text or (stdout or "").strip(), 0.0, cost_known=False)
+        # An ephemeral session has one turn, so its running total is its own.
+        return JudgeReply(text, codex_tokens(usage))
+
+    def format_cost(self, cost: float) -> str:
+        return f"{cost:,.0f} tokens"
+
+    def settle_cost(self, session_id: str | None) -> float | None:
+        if not session_id:
+            return 0.0
+        total = self._session_log_total(session_id)
+        if total is None:
+            return 0.0
+        added = max(total - self._totals.get(session_id, 0.0), 0.0)
+        self._totals[session_id] = total
+        return added
+
+    @staticmethod
+    def _session_log_total(session_id: str) -> float | None:
+        """The session's running token total, from the last `token_count` event in
+        its log under $CODEX_HOME/sessions. None when the log can't be found or read."""
+        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        try:
+            logs = sorted(home.glob(f"sessions/*/*/*/rollout-*{session_id}.jsonl"))
+        except OSError:
+            return None
+        if not logs:
+            return None
+        total = None
+        try:
+            with logs[-1].open() as f:
+                for line in f:
+                    if '"token_count"' not in line:
+                        continue
+                    try:
+                        info = (json.loads(line).get("payload") or {}).get("info") or {}
+                    except ValueError:
+                        continue
+                    if info.get("total_token_usage"):
+                        total = codex_tokens(info["total_token_usage"])
+        except OSError:
+            return None
+        return total
+
+    def pre_session_hook_declared(self, script_name: str) -> bool:
+        # Same hooks shape as Claude Code's settings.json, and the same reasoning:
+        # anything unreadable answers False, because running a net twice is the
+        # cheaper mistake.
+        try:
+            hooks = json.loads(self.hooks_path.read_text())
+            entries = (hooks.get("hooks") or {}).get("SessionStart") or []
+            return any(
+                script_name in (hook.get("command") or "")
+                for entry in entries
+                for hook in (entry.get("hooks") or [])
+            )
+        except (OSError, ValueError, AttributeError, TypeError):
+            return False
+
+    def missing_binary_message(self) -> str:
+        return "Error: 'codex' command not found. Install the Codex CLI and ensure it's on PATH."
+
+    def did_nothing_hint(self) -> str:
+        return (
+            "`codex exec` either could not authenticate (run `codex login`, or set "
+            "CODEX_API_KEY) or, on a resume, failed to load the session it was given"
+        )
+
+
+ENGINES: dict[str, type[Engine]] = {"claude": ClaudeEngine, "codex": CodexEngine}
 DEFAULT_ENGINE = "claude"
 
 
