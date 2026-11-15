@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from genesis import server
+from genesis import engines, server
 
 
 @pytest.fixture(autouse=True)
@@ -1310,12 +1310,19 @@ def test_no_claude_invocation_bypasses_the_accumulators() -> None:
     `_run_session` altogether, which is exactly how the judge went unaccounted.
     """
     source = Path(server.__file__).read_text()
-    launches = source.count('"claude",\n') + source.count('cmd = ["claude", "-p"]')
+    launches = source.count("self.engine.session_command(") + source.count("self.engine.judge_command(")
     assert launches == 2, (
-        "server.py launches a number of `claude` sessions other than the two that "
-        "are accounted for (_run_session and ask_judge). A new one must add its "
-        "cost to both `spent` and `run_spent`."
+        "server.py builds a number of agent sessions other than the two that are "
+        "accounted for (_run_session and ask_judge). A new one must add its cost to "
+        "both `spent` and `run_spent`."
     )
+    # And none behind the engine's back: an engine binary named directly here
+    # would launch a session this count can't see.
+    for engine in engines.ENGINES.values():
+        assert f'"{engine.binary}"' not in source, (
+            f"server.py names the `{engine.binary}` binary directly; build the "
+            "command through the engine so its cost is accounted for"
+        )
 
 
 # ---------- releasing what a finished session claimed (#48) ----------
@@ -1692,7 +1699,7 @@ def test_the_zero_tool_warning_does_not_send_you_after_a_deleted_mechanism() -> 
     isolation was removed in 4776803. A message pointing at a mechanism that no
     longer exists costs its reader the whole search before they conclude it's stale.
     """
-    source = Path(server.__file__).read_text()
+    source = Path(server.__file__).read_text() + Path(engines.__file__).read_text()
     assert "agent profile is authenticated" not in source
     assert "ANTHROPIC_API_KEY" in source
 

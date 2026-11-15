@@ -44,6 +44,7 @@ from genesis.appauth import (
 )
 from genesis.automerge import _gh, is_bot_author, merge_ready
 from genesis import triggers
+from genesis.engines import ClaudeEngine, Engine, SessionResult, SessionStarted, ToolCall, brief, get_engine
 from genesis.workflows import (
     DISABLED_LIST_PATH,
     disable_workflows,
@@ -80,7 +81,9 @@ PRE_SESSION_SCRIPT = Path(".genesis/scripts/pre-session.sh")
 # Where the harness reads its hook declarations. Consulted only to answer "is the
 # pre-session script already going to run on its own", so the plane doesn't run it
 # a second time.
-CLAUDE_SETTINGS = Path(".claude/settings.json")
+# Where the Claude engine looks for a SessionStart hook. Kept here because tests
+# write to it; the engine owns the read.
+CLAUDE_SETTINGS = ClaudeEngine.settings_path
 
 # Bounded and non-fatal, both deliberate. These run before every session, so a
 # hung net would wedge the loop it was written to protect, and a net that fails
@@ -511,21 +514,7 @@ def _local_commit_reflog() -> str:
     )
 
 
-def _brief(tool_input: object, limit: int = 88) -> str:
-    """Render a tool's input as one short line for the progress feed.
-
-    Prefers the field that says what the call is actually doing — a command, a
-    path, a pattern — and falls back to a truncated repr.
-    """
-    if not isinstance(tool_input, dict):
-        return ""
-    for key in ("command", "file_path", "pattern", "path", "query", "description"):
-        value = tool_input.get(key)
-        if isinstance(value, str) and value.strip():
-            flat = " ".join(value.split())
-            return flat[:limit] + ("…" if len(flat) > limit else "")
-    flat = " ".join(str(tool_input).split())
-    return flat[:limit] + ("…" if len(flat) > limit else "")
+_brief = brief  # moved to genesis.engines; kept for callers of the old name
 
 
 def _build_prompt(
@@ -567,6 +556,9 @@ class LocalControlPlane:
     poll_interval: int = 60
     session_timeout: int = 3600
     agent: str = DEFAULT_AGENT
+    # Which coding agent runs the sessions. Everything engine-specific goes
+    # through this; everything else in this class is policy and stays neutral.
+    engine: Engine = field(default_factory=get_engine)
     # Written by the progress reader, read by the continuation loop after wait().
     last_session_id: str | None = None
     last_result_subtype: str | None = None
@@ -661,15 +653,19 @@ class LocalControlPlane:
                 proc.kill()
 
     def _stream_progress(self, stream) -> None:
-        """Print one compact line per tool call from claude's stream-json output.
+        """Print one compact line per tool call from the session's output.
+
+        The engine's parser turns its agent's output into the three events acted
+        on here, so this loop is the same for every engine.
 
         Best-effort by construction: any parse failure, unexpected shape, or
         non-iterable stream ends the reader quietly. Progress reporting must
         never be able to take down the run it is reporting on.
         """
         try:
+            parser = self.engine.stream_parser()
             turns = 0
-            for raw in stream:  # noqa: PLR1702
+            for raw in stream:
                 line = (raw or "").strip()
                 if not line:
                     continue
@@ -677,71 +673,69 @@ class LocalControlPlane:
                     event = json.loads(line)
                 except ValueError:
                     continue
-                kind = event.get("type")
-                # Every event carries the session id; the init event is simply the
-                # first. Capturing it is what makes --resume possible at all.
-                session_id = event.get("session_id")
-                if session_id and not self.last_session_id:
-                    self.last_session_id = session_id
-                if kind == "assistant":
-                    content = (event.get("message") or {}).get("content") or []
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        if block.get("type") == "tool_use":
-                            turns += 1
-                            summary = f"{block.get('name')} {_brief(block.get('input'))}"
-                            log(f"  {turns:>3}. {summary}")
-                            # Kept for the judge: what it actually did, not what it
-                            # says it did. Bounded so a long session can't grow this
-                            # without limit.
-                            self.recent_tools.append(summary)
-                            del self.recent_tools[:-12]
-                elif kind == "result":
-                    # ONE PROCESS CAN EMIT MORE THAN ONE OF THESE. Measured (#78,
-                    # #79): a leftover task notification from a background job the
-                    # agent had started itself flushed an empty turn and an early
-                    # `result`, the continuation prompt landed 20ms later, and the
-                    # same process carried on and emitted a second `result` 27
-                    # seconds after that. Two result events, one session.
-                    #
-                    # So nothing here may assume it is seeing the last one.
-                    # `last_result_subtype`, `last_tool_calls` and
-                    # `last_session_id` are last-write-wins on purpose, and that is
-                    # correct for all three: the terminal event carries the outcome
-                    # that mattered, and `turns` is cumulative across the stream so
-                    # its final value is the session total. Cost is the one that
-                    # has to accumulate, because each event reports only its own.
-                    self.last_result_subtype = event.get("subtype")
-                    loki_push(
-                        "session-outcome",
-                        {
-                            "level": "error" if event.get("is_error") else "info",
-                            "subtype": event.get("subtype"),
-                            "turns": event.get("num_turns"),
-                            "cost_usd": round(float(event.get("total_cost_usd") or 0), 4),
-                            "duration_s": round((event.get("duration_ms") or 0) / 1000),
-                            "tool_calls": turns,
-                            "session": event.get("session_id"),
-                            "continuation": self.continuation_index,
-                        },
-                    )
-                    self.last_tool_calls = turns
-                    # `+=`, not `=`. `_run_session` zeroes this before launching,
-                    # so accumulating gives the process total. Overwriting charged
-                    # only the final event, which is the same undercount shape as
-                    # the unaccounted judge sessions in issue #50, one layer down.
-                    self.last_cost += float(event.get("total_cost_usd") or 0)
-                    if event.get("session_id"):
-                        self.last_session_id = event["session_id"]
-                    cost = event.get("total_cost_usd") or 0
-                    secs = round((event.get("duration_ms") or 0) / 1000)
-                    log(
-                        f"  session ended: {event.get('subtype')} "
-                        f"turns={event.get('num_turns')} cost=${cost:.2f} {secs}s"
-                    )
+                if not isinstance(event, dict):
+                    continue
+                for ev in parser.feed(event):
+                    if isinstance(ev, SessionStarted):
+                        # Capturing it is what makes a resume possible at all.
+                        if not self.last_session_id:
+                            self.last_session_id = ev.session_id
+                    elif isinstance(ev, ToolCall):
+                        turns += 1
+                        log(f"  {turns:>3}. {ev.summary}")
+                        # Kept for the judge: what it actually did, not what it
+                        # says it did. Bounded so a long session can't grow this
+                        # without limit.
+                        self.recent_tools.append(ev.summary)
+                        del self.recent_tools[:-12]
+                    elif isinstance(ev, SessionResult):
+                        self._record_result(ev, turns)
         except Exception:  # noqa: BLE001 - reporting must never break the run
             return
+
+    def _record_result(self, ev: SessionResult, turns: int) -> None:
+        """Fold one result event into the session's outcome.
+
+        ONE PROCESS CAN EMIT MORE THAN ONE OF THESE. Measured (#78, #79): a
+        leftover task notification from a background job the agent had started
+        itself flushed an empty turn and an early result, the continuation prompt
+        landed 20ms later, and the same process carried on and emitted a second
+        result 27 seconds after that. Two result events, one session.
+
+        So nothing here may assume it is seeing the last one.
+        `last_result_subtype`, `last_tool_calls` and `last_session_id` are
+        last-write-wins on purpose, and that is correct for all three: the
+        terminal event carries the outcome that mattered, and `turns` is
+        cumulative across the stream so its final value is the session total.
+        Cost is the one that has to accumulate, because each event reports only
+        its own.
+        """
+        self.last_result_subtype = ev.subtype
+        loki_push(
+            "session-outcome",
+            {
+                "level": "error" if ev.is_error else "info",
+                "subtype": ev.subtype,
+                "turns": ev.turns,
+                "cost_usd": round(ev.cost, 4),
+                "duration_s": ev.duration_s,
+                "tool_calls": turns,
+                "session": ev.session_id,
+                "continuation": self.continuation_index,
+            },
+        )
+        self.last_tool_calls = turns
+        # `+=`, not `=`. `_run_session` zeroes this before launching, so
+        # accumulating gives the process total. Overwriting charged only the
+        # final event, which is the same undercount shape as the unaccounted
+        # judge sessions in issue #50, one layer down.
+        self.last_cost += ev.cost
+        if ev.session_id:
+            self.last_session_id = ev.session_id
+        log(
+            f"  session ended: {ev.subtype} "
+            f"turns={ev.turns} cost={self.engine.format_cost(ev.cost)} {ev.duration_s}s"
+        )
 
     def run_orchestrator(
         self, event: dict | None, prompt: str | None = None, label: str | None = None
@@ -1224,22 +1218,8 @@ class LocalControlPlane:
         )
 
     def _pre_session_hook_is_declared(self) -> bool:
-        """True when .claude/settings.json already runs the script on SessionStart.
-
-        Reads defensively and answers False on anything it can't parse: the cost of
-        a wrong False is running a net twice, and the cost of a wrong True is not
-        running it at all. Those don't weigh the same.
-        """
-        try:
-            settings = json.loads(CLAUDE_SETTINGS.read_text())
-            entries = (settings.get("hooks") or {}).get("SessionStart") or []
-            return any(
-                PRE_SESSION_SCRIPT.name in (hook.get("command") or "")
-                for entry in entries
-                for hook in (entry.get("hooks") or [])
-            )
-        except (OSError, ValueError, AttributeError, TypeError):
-            return False
+        """True when the engine's own hooks already run the script at session start."""
+        return self.engine.pre_session_hook_declared(PRE_SESSION_SCRIPT.name)
 
     def run_pre_session_steps(self) -> None:
         """Run the dev repo's own pre-agent checks, the way a workflow step would.
@@ -1361,28 +1341,21 @@ class LocalControlPlane:
         return f"{'at least ' if self.cost_is_lower_bound else ''}${amount:.2f}"
 
     def _read_judge_output(self, stdout: str | None) -> tuple[str, float]:
-        """Pull the judge's one-word verdict and its cost out of `--output-format json`.
+        """Pull the judge's verdict and its cost out of its output.
 
-        Falls back to reading the payload as prose. That fallback is not defensive
-        padding: a judge that stops parsing is a judge that always fails closed,
-        which silently converts every ambiguous continuation into a stop and idles
-        the dev system. Losing the cost figure is the smaller harm, so an
-        unreadable envelope costs accuracy, not the verdict - and it sets
-        `cost_is_lower_bound` so the totals stop claiming to be exact (#50).
+        The engine falls back to reading the payload as prose. That fallback is
+        not defensive padding: a judge that stops parsing is a judge that always
+        fails closed, which silently converts every ambiguous continuation into
+        a stop and idles the dev system. Losing the cost figure is the smaller
+        harm, so an unreadable envelope costs accuracy, not the verdict - and it
+        sets `cost_is_lower_bound` so the totals stop claiming to be exact (#50).
         """
-        text = (stdout or "").strip()
-        if not text:
-            return "", 0.0
-        try:
-            payload = json.loads(text)
-        except ValueError:
-            payload = None
-        if not isinstance(payload, dict) or "result" not in payload:
+        reply = self.engine.read_judge_output(stdout)
+        if not reply.cost_known:
             self.cost_is_lower_bound = True
             log("  WARNING: judge output was not the expected JSON envelope - "
                 "its cost is unaccounted, so the totals below are a lower bound")
-            return text, 0.0
-        return str(payload.get("result") or "").strip(), float(payload.get("total_cost_usd") or 0)
+        return reply.text, reply.cost
 
     def ask_judge(self, task: str) -> tuple[bool, str]:
         """Ask a fresh session whether a stalled run deserves another continuation.
@@ -1429,22 +1402,7 @@ class LocalControlPlane:
             "sentence of justification on the same line."
         )
 
-        cmd = [
-            "claude",
-            "-p",
-            prompt,
-            "--max-turns",
-            str(JUDGE_MAX_TURNS),
-            "--allowedTools",
-            "",
-            # Asked for so the judge's own spend can be read back. Without it
-            # `claude -p` prints bare prose, nothing carries `total_cost_usd`, and
-            # both bounds undercount by one judge session per continuation
-            # decision (#50) - precisely on the ambiguous rung a thrashing chain
-            # keeps landing on, so the calls cluster where spend already matters.
-            "--output-format",
-            "json",
-        ]
+        cmd = self.engine.judge_command(prompt, max_turns=JUDGE_MAX_TURNS)
         child_env = self._session_env()
         try:
             out = subprocess.run(
@@ -1492,7 +1450,7 @@ class LocalControlPlane:
     def _run_session(
         self, prompt: str | None, deadline: float, resume: str | None = None
     ) -> int:
-        """Launch one `claude -p` session and wait for it, streaming progress."""
+        """Launch one agent session and wait for it, streaming progress."""
         # Before the agent gets its first turn, which is the whole point of the
         # step this stands in for. A resumed session gets it too: the workflow
         # equivalent runs once per run, and a resume is a run.
@@ -1502,31 +1460,9 @@ class LocalControlPlane:
         self.last_tool_calls = 0
         self.last_cost = 0.0
 
-        cmd = ["claude", "-p"]
-        if resume:
-            cmd += [
-                "--resume",
-                resume,
-                # A resumed session already holds the task, the plan, and what it
-                # has done. Restating the original prompt would invite it to start
-                # the work over rather than finish it.
-                "Continue the work you were doing. You ran out of turns, not out of task.",
-            ]
-        else:
-            cmd.append(prompt or "")
-        cmd += [
-            "--max-turns",
-            str(SESSION_MAX_TURNS),
-            "--allowedTools",
-            ALLOWED_TOOLS,
-            # Without this, `claude -p` buffers everything until the session ends,
-            # so a 25-minute run prints nothing at all — and hook stderr doesn't
-            # help, because Claude Code captures it into its own transcript rather
-            # than passing it through. Streaming turns a silent box into a feed.
-            "--output-format",
-            "stream-json",
-            "--verbose",
-        ]
+        cmd = self.engine.session_command(
+            prompt or "", resume=resume, max_turns=SESSION_MAX_TURNS, tools=ALLOWED_TOOLS
+        )
         child_env = self._session_env()
 
         try:
@@ -1539,7 +1475,7 @@ class LocalControlPlane:
                 env=child_env,
             )
         except FileNotFoundError:
-            log("Error: 'claude' command not found. Install Claude Code and ensure it's on PATH.")
+            log(self.engine.missing_binary_message())
             return 127
 
         # A piped stdout MUST be drained or the child blocks once the pipe fills.
@@ -1593,9 +1529,7 @@ class LocalControlPlane:
         if self.last_tool_calls == 0 and self.last_result_subtype == "success":
             log(
                 "  WARNING: session ran no tools at all and reported success - "
-                "`claude -p` either could not authenticate (check "
-                "ANTHROPIC_API_KEY) or, on a resume, failed to load the session "
-                "it was given"
+                f"{self.engine.did_nothing_hint()}"
             )
 
     # ----- main loop -----
@@ -1679,10 +1613,10 @@ class LocalControlPlane:
             log("Another local control plane instance is running. Exiting.")
             return 1
 
-        # Verify claude is on PATH before disabling workflows. Otherwise we'd
-        # leave GHA off with no working orchestrator running.
-        if shutil.which("claude") is None:
-            log("Error: 'claude' command not found. Install Claude Code and ensure it's on PATH.")
+        # Verify the engine's binary is on PATH before disabling workflows.
+        # Otherwise we'd leave GHA off with no working orchestrator running.
+        if shutil.which(self.engine.binary) is None:
+            log(self.engine.missing_binary_message())
             self.release_lock()
             return 127
 
@@ -1758,12 +1692,12 @@ class LocalControlPlane:
         # skipping it - a person answering the gate while the plane was down is
         # replayed from the high-water mark, and that event is the real wake.
         if not self._gated("initial run", token):
-            # If it fails because claude is broken (rc=127), abort rather than
+            # If it fails because the engine is broken (rc=127), abort rather than
             # entering the poll loop with workflows off.
             rc = self.run_orchestrator(None)
             self.save_state()
             if rc == 127:
-                log("Initial orchestrator run failed (claude not callable). Aborting.")
+                log(f"Initial orchestrator run failed ({self.engine.binary} not callable). Aborting.")
                 return self._shutdown(token_ok=True)
         if self.shutdown:
             return self._shutdown(token_ok=True)
