@@ -40,11 +40,41 @@ def test_existing_repo_appends_to_claude_md(
     scaffold_existing_repo(repo, GOAL, PROJECT)
 
     claude_md = (repo / "CLAUDE.md").read_text()
-    # Original content preserved
+    # The repo's own instructions stay where they were, and gain the import that
+    # brings the genesis rules in from AGENTS.md.
     assert "Existing instructions here." in claude_md
-    # Genesis content appended
-    assert GOAL in claude_md
-    assert "Genesis Dev System" in claude_md
+    assert "@AGENTS.md" in claude_md
+    assert GOAL in (repo / "AGENTS.md").read_text()
+
+
+def test_existing_repo_appends_to_agents_md(
+    init_test_repo: Callable[[str, dict[str, str]], Path],
+) -> None:
+    repo = init_test_repo(PROJECT, {**EXISTING_FILES, "AGENTS.md": "# My App\n\nCodex notes.\n"})
+    scaffold_existing_repo(repo, GOAL, PROJECT)
+
+    agents_md = (repo / "AGENTS.md").read_text()
+    assert "Codex notes." in agents_md
+    assert "Genesis Dev System" in agents_md and GOAL in agents_md
+
+
+def test_existing_repo_import_is_not_added_twice(
+    init_test_repo: Callable[[str, dict[str, str]], Path],
+) -> None:
+    repo = init_test_repo(PROJECT, {**EXISTING_FILES, "CLAUDE.md": "@AGENTS.md\n\nMine.\n"})
+    scaffold_existing_repo(repo, GOAL, PROJECT)
+    assert (repo / "CLAUDE.md").read_text().count("@AGENTS.md") == 1
+
+
+def test_existing_repo_keeps_its_protected_paths_and_adds_codex_ones(
+    init_test_repo: Callable[[str, dict[str, str]], Path],
+) -> None:
+    repo = init_test_repo(PROJECT, {**EXISTING_FILES, ".genesis/protected-paths": "src/billing/\n.claude/\n"})
+    scaffold_existing_repo(repo, GOAL, PROJECT, engine="codex")
+    lines = (repo / ".genesis" / "protected-paths").read_text().splitlines()
+    assert "src/billing/" in lines
+    assert lines.count(".claude/") == 1
+    assert ".codex/" in lines
 
 
 def test_existing_repo_creates_claude_md_if_missing(
@@ -53,9 +83,10 @@ def test_existing_repo_creates_claude_md_if_missing(
     repo = init_test_repo(PROJECT, EXISTING_FILES)
     scaffold_existing_repo(repo, GOAL, PROJECT)
 
-    claude_md = (repo / "CLAUDE.md").read_text()
-    assert GOAL in claude_md
-    assert "Genesis Dev System" not in claude_md  # No separator needed for new file
+    agents_md = (repo / "AGENTS.md").read_text()
+    assert GOAL in agents_md
+    assert "Genesis Dev System" not in agents_md  # No separator needed for new file
+    assert (repo / "CLAUDE.md").read_text().startswith("@AGENTS.md")
 
 
 def test_existing_repo_has_seed_agents(

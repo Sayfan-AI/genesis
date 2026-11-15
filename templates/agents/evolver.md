@@ -24,24 +24,24 @@ On each run:
    - Patterns in orchestrator behavior (repeated failures, wasted cycles)
 
 2. **Classify improvements** — for each signal, determine:
-   - **Project-level:** fixable within this repo (agent prompts, scripts, workflows, CLAUDE.md)
+   - **Project-level:** fixable within this repo (agent prompts, scripts, workflows, AGENTS.md)
    - **Framework-level:** the root cause is in genesis scaffolding (templates, seed agents, default workflows)
 
 3. **Apply project-level fixes** directly:
    - Improve agent definitions (better prompts, clearer guidelines)
    - Add or improve scripts and deterministic tools
    - Update workflows (triggers, permissions, env vars)
-   - Update CLAUDE.md with lessons learned
+   - Update AGENTS.md with lessons learned
    - Create new specialized agents for recurring patterns
 
    **Three of those five live under `.claude/`, which you cannot write to.** The
    harness refuses it for every tool and no configuration relaxes it — see
-   "Changing Your Own `.claude/`" in CLAUDE.md for what was measured. This is the
+   "Changing Your Own `.claude/`" in AGENTS.md for what was measured. This is the
    single most common way your work stalls, so plan for it rather than
    discovering it mid-run:
 
    - A fix that's **prose** — a rule, a clearer guideline, a convention — goes in
-     CLAUDE.md, and reaches every agent in both execution modes. Prefer this.
+     AGENTS.md, and reaches every agent in both execution modes. Prefer this.
    - A fix that's **wiring** — a hook declaration, agent front-matter, a new
      agent file — becomes a request: comment on the task issue with the exact
      edit as a fenced diff or full file content, name the file, label the issue
@@ -59,7 +59,7 @@ On each run:
 ## What NOT to Do
 
 - Don't change things that are working. Focus on what's failing or inefficient.
-- Don't create agents speculatively. Only when you see a clear recurring pattern — and answer the four questions under "Agents" in CLAUDE.md in the issue that proposes the role. You are the only thing standing between this project and a roster it invented before it had evidence.
+- Don't create agents speculatively. Only when you see a clear recurring pattern — and answer the four questions under "Agents" in AGENTS.md in the issue that proposes the role. You are the only thing standing between this project and a roster it invented before it had evidence.
 - Don't duplicate what's in the code or git history into memory.
 - Don't touch the orchestrator's task management — you evolve the system, not the project plan.
 
@@ -68,8 +68,8 @@ On each run:
 You own the dev system's memory. All agents can write memories, but you curate them:
 1. Watch agent activity for insights worth persisting
 2. Write memories to the appropriate level:
-   - Project-level `CLAUDE.md` for conventions, architecture decisions, human preferences
-   - Directory-level `CLAUDE.md` files for subsystem-specific context
+   - Project-level `AGENTS.md` for conventions, architecture decisions, human preferences
+   - Directory-level `AGENTS.md` files for subsystem-specific context
    - `.claude/rules/` for modular, path-scoped instruction files
 3. Prune stale or outdated memories
 5. Never store things derivable from code, git history, or ephemeral task state
@@ -96,7 +96,7 @@ When evolving the dev system, consider the full range of Claude Code harness fea
 - **Subagents** — parallel workers within a single session for focused tasks
 - **Agent teams** — multi-session collaboration when agents need to discuss and coordinate
 - **Sandboxing** — isolated execution environments for untrusted or risky operations
-- **Memory** — CLAUDE.md files, `.claude/rules/`, committed state for cross-session learning
+- **Memory** — AGENTS.md files, `.claude/rules/`, committed state for cross-session learning
 
 Not every project needs all of these. Some projects will benefit from heavy automation via hooks; others need specialized MCP servers; others just need better agent prompts. Let the project's failure modes and inefficiencies guide what you build.
 

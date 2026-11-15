@@ -74,6 +74,37 @@ The correct hooks format in `.claude/settings.json` requires a `matcher` + `hook
 
 NOT the flat format `{"type": "command", "command": "..."}` — that is invalid and causes Claude Code settings errors. The template at `templates/settings.json` must always use the correct format.
 
+## Engines: Claude Code and Codex
+
+Local mode runs a dev system's sessions on either engine (genesis issue #146).
+`src/genesis/engines.py` holds everything that depends on which coding agent
+runs: command lines, output parsing, the judge's output, hook-file detection,
+cost units. `server.py` holds the policy (the continuation ladder, ceilings, the
+judge's evidence) and talks only to the `Engine` interface. A difference between
+the engines belongs in the engine, never as an `if engine == ...` in the plane.
+GitHub Actions stays Claude-only.
+
+Codex differs in ways the plane depends on. Each was measured on codex-cli
+0.166.0, and each has a test:
+
+- **No turn cap.** The plane counts tool calls and stops the session at
+  `SESSION_MAX_TURNS`, then reports `error_max_turns` so the ladder resumes it.
+- **Cost is tokens, cumulative per session**, and a killed session reports none
+  in the stream. `CodexEngine.settle_cost` reads the running total from the
+  session log under `$CODEX_HOME/sessions` and charges the difference.
+- **`codex exec` waits for stdin to close.** The plane launches it with stdin
+  closed.
+- **The sandbox blocks commits, pushes and the network**, so sessions run with
+  it off, the same reach a Claude session has. `host-guard.sh` still guards
+  through `.codex/hooks.json`, whose payload matches Claude Code's.
+
+New dev systems keep their rules in `AGENTS.md`, which both engines read, and
+`CLAUDE.md` only imports it, so switching engines is one line in
+`.genesis/config.toml`. A Codex system seeds `.genesis/protected-paths` with
+`.claude/` and `.codex/`: Codex can write its own agent definitions and hooks,
+which the Claude harness refuses. `AGENTS.md` is deliberately not protected,
+because it's where a dev system's evolver puts prose rules.
+
 ## Workflow Turn Budgets
 
 Every workflow that invokes Claude — genesis's own and every template — must pass an

@@ -6,6 +6,12 @@ goal = "{{ goal }}"
 # (GENESIS_LOKI_URL / GENESIS_LOKI_USER / GENESIS_LOKI_TOKEN), not from this
 # file — the token is a secret and this file is committed.
 
+[engine]
+# The coding agent that runs this dev system's sessions under `genesis serve`:
+# "claude" (Claude Code) or "codex" (OpenAI Codex). `genesis serve --engine`
+# overrides it for one run. GitHub Actions mode runs Claude Code either way.
+name = "{{ engine | default('claude') }}"
+
 [issues]
 # Backend: "github" or "linear"
 backend = "github"

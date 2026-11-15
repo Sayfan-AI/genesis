@@ -210,6 +210,99 @@ def _write_gitignore(base: Path) -> None:
     path.write_text(existing + separator + section)
 
 
+ENGINES = ("claude", "codex")
+
+# A new dev system's rules live in AGENTS.md, which both engines read: Codex
+# natively, Claude Code through this import (supported since 2.1.277, measured on
+# 2.1.325). One file means switching a system's engine is a config change, not an
+# instruction migration (genesis issue #146).
+CLAUDE_MD_IMPORT = """@AGENTS.md
+
+<!-- This dev system's rules live in AGENTS.md, which Claude Code and Codex both
+read. This file only imports it. Anything that applies to Claude Code alone goes
+below this comment. -->
+"""
+
+# Under Codex nothing refuses an agent's writes to its own agent definitions and
+# hook wiring the way the Claude Code harness refuses writes under `.claude/`, so
+# a Codex dev system holds pull requests that touch them for a person instead.
+# AGENTS.md is deliberately not here: it's where the evolver puts prose rules,
+# the job CLAUDE.md does for a Claude system, and holding it would stall that.
+CODEX_PROTECTED_PATHS = """# Paths an autonomous pull request can't land on its own.
+#
+# The merge sweep (genesis serve) and genesis-merge.yml read this file from the
+# default branch, never from the pull request. A bot pull request that touches
+# any of these stays open with `needs:human` and a comment naming the file.
+#
+# One prefix per line. A prefix covers itself and everything beneath it.
+
+# Agent definitions and Claude Code settings. Codex can write here; Claude Code
+# can't, which is why a Claude dev system doesn't need this line.
+.claude/
+
+# The hooks Codex sessions run under, including host-guard.sh's wiring.
+.codex/
+
+# This list.
+.genesis/protected-paths
+"""
+
+
+def _check_engine(engine: str) -> str:
+    if engine not in ENGINES:
+        raise ValueError(f"unknown engine {engine!r}; choose one of: {', '.join(ENGINES)}")
+    return engine
+
+
+def _write_instructions(base: Path, rules: str, *, existing: bool) -> None:
+    """Write the rules to AGENTS.md and make CLAUDE.md import it.
+
+    In an existing repo both files may already exist. AGENTS.md gets the genesis
+    section appended, the way CLAUDE.md used to, and an existing CLAUDE.md keeps
+    its content and gains the import line. Codex reads only AGENTS.md, so rules a
+    repo keeps in its own CLAUDE.md don't reach Codex sessions until someone
+    moves them across.
+    """
+    agents_md = base / "AGENTS.md"
+    if existing and agents_md.exists():
+        agents_md.write_text(agents_md.read_text() + "\n\n---\n\n# Genesis Dev System\n\n" + rules)
+    else:
+        _write_file(agents_md, rules)
+
+    claude_md = base / "CLAUDE.md"
+    if existing and claude_md.exists():
+        current = claude_md.read_text()
+        if "@AGENTS.md" not in current:
+            claude_md.write_text(current.rstrip("\n") + "\n\n" + CLAUDE_MD_IMPORT)
+    else:
+        _write_file(claude_md, CLAUDE_MD_IMPORT)
+
+
+def _write_codex_hooks(base: Path) -> None:
+    """Seed `.codex/hooks.json` in every new dev system, whichever engine it
+    starts on, so a switch to Codex keeps the logging and host-guard layer."""
+    hooks_path = base / ".codex" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True, exist_ok=True)
+    hooks_path.write_text((TEMPLATES_DIR / "codex_hooks.json").read_text())
+
+
+def _write_engine_extras(base: Path, engine: str) -> None:
+    if engine != "codex":
+        return
+    path = base / ".genesis" / "protected-paths"
+    if not path.exists():
+        _write_file(path, CODEX_PROTECTED_PATHS)
+        return
+    # An existing repo may already keep a list. Add what's missing rather than
+    # replacing it, so nothing it protects today stops being protected.
+    current = path.read_text()
+    have = {line.strip() for line in current.splitlines() if line.strip() and not line.startswith("#")}
+    wanted = [line for line in CODEX_PROTECTED_PATHS.splitlines() if line and not line.startswith("#")]
+    missing = [line for line in wanted if line not in have]
+    if missing:
+        path.write_text(current.rstrip("\n") + "\n\n# Added by genesis for the Codex engine.\n" + "\n".join(missing) + "\n")
+
+
 def _write_settings(base: Path) -> None:
     settings_path = base / ".claude" / "settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -222,12 +315,14 @@ def _write_genesis_config(
     project_name: str,
     goal: str,
     target_repos: list[str] | None = None,
+    engine: str = "claude",
 ) -> None:
     content = _render_template(
         "config.toml.j2",
         project_name=project_name,
         goal=goal,
         target_repos=target_repos or [],
+        engine=engine,
     )
     _write_file(base / ".genesis" / "config.toml", content)
 
@@ -251,8 +346,10 @@ def scaffold_new_repo(
     path: Path,
     goal: str,
     project_name: str,
+    engine: str = "claude",
 ) -> None:
     """Create a new repo with full dev system scaffolding (embedded)."""
+    _check_engine(engine)
     ensure_local_env()
     path.mkdir(parents=True, exist_ok=True)
 
@@ -262,20 +359,21 @@ def scaffold_new_repo(
         capture_output=True,
     )
 
-    # CLAUDE.md
-    claude_md = _render_template(
-        "claude_md.md.j2",
+    # AGENTS.md, imported by CLAUDE.md
+    rules = _render_template(
+        "agents_md.md.j2",
         project_name=project_name,
         goal=goal,
         target_repos=[],
     )
-    _write_file(path / "CLAUDE.md", claude_md)
+    _write_instructions(path, rules, existing=False)
 
     # README.md
     readme = _render_template(
         "readme.md.j2",
         project_name=project_name,
         goal=goal,
+        engine=engine,
     )
     _write_file(path / "README.md", readme)
 
@@ -283,7 +381,9 @@ def scaffold_new_repo(
     _write_seed_agents(path)
     _write_seed_workflows(path)
     _write_settings(path)
-    _write_genesis_config(path, project_name, goal)
+    _write_codex_hooks(path)
+    _write_genesis_config(path, project_name, goal, engine=engine)
+    _write_engine_extras(path, engine)
     _write_seed_scripts(path)
     _write_gitignore(path)
 
@@ -299,35 +399,30 @@ def scaffold_existing_repo(
     path: Path,
     goal: str,
     project_name: str,
+    engine: str = "claude",
 ) -> None:
     """Add dev system scaffolding to an existing repo (embedded)."""
+    _check_engine(engine)
     if not (path / ".git").is_dir():
         raise ValueError(f"{path} is not a git repository")
 
     ensure_local_env()
 
-    # Check for existing CLAUDE.md
-    claude_md_path = path / "CLAUDE.md"
-    claude_md_content = _render_template(
-        "claude_md.md.j2",
+    rules = _render_template(
+        "agents_md.md.j2",
         project_name=project_name,
         goal=goal,
         target_repos=[],
     )
-
-    if claude_md_path.exists():
-        # Append genesis section to existing CLAUDE.md
-        existing = claude_md_path.read_text()
-        separator = "\n\n---\n\n# Genesis Dev System\n\n"
-        claude_md_path.write_text(existing + separator + claude_md_content)
-    else:
-        _write_file(claude_md_path, claude_md_content)
+    _write_instructions(path, rules, existing=True)
 
     # Seed agents, workflows, settings, config
     _write_seed_agents(path)
     _write_seed_workflows(path)
     _write_settings(path)
-    _write_genesis_config(path, project_name, goal)
+    _write_codex_hooks(path)
+    _write_genesis_config(path, project_name, goal, engine=engine)
+    _write_engine_extras(path, engine)
     _write_seed_scripts(path)
     _write_gitignore(path)
 
@@ -344,8 +439,10 @@ def scaffold_external_dev_repo(
     target_repos: list[str],
     goal: str,
     project_name: str,
+    engine: str = "claude",
 ) -> None:
     """Create a separate dev repo that manages work across target repos."""
+    _check_engine(engine)
     ensure_local_env()
     dev_path.mkdir(parents=True, exist_ok=True)
 
@@ -355,20 +452,21 @@ def scaffold_external_dev_repo(
         capture_output=True,
     )
 
-    # CLAUDE.md with target repo references
-    claude_md = _render_template(
-        "claude_md.md.j2",
+    # AGENTS.md with target repo references, imported by CLAUDE.md
+    rules = _render_template(
+        "agents_md.md.j2",
         project_name=project_name,
         goal=goal,
         target_repos=target_repos,
     )
-    _write_file(dev_path / "CLAUDE.md", claude_md)
+    _write_instructions(dev_path, rules, existing=False)
 
     # README.md
     readme = _render_template(
         "readme.md.j2",
         project_name=project_name,
         goal=goal,
+        engine=engine,
     )
     _write_file(dev_path / "README.md", readme)
 
@@ -376,7 +474,9 @@ def scaffold_external_dev_repo(
     _write_seed_agents(dev_path)
     _write_seed_workflows(dev_path)
     _write_settings(dev_path)
-    _write_genesis_config(dev_path, project_name, goal, target_repos)
+    _write_codex_hooks(dev_path)
+    _write_genesis_config(dev_path, project_name, goal, target_repos, engine=engine)
+    _write_engine_extras(dev_path, engine)
     _write_seed_scripts(dev_path)
     _write_gitignore(dev_path)
 

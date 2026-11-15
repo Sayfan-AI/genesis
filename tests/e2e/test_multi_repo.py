@@ -41,7 +41,7 @@ def test_multi_repo_claude_md_references_targets(
     dev_repo = tmp_dir / "dev-repo"
     scaffold_external_dev_repo(dev_repo, [str(repo_a), str(repo_b)], GOAL, PROJECT)
 
-    claude_md = (dev_repo / "CLAUDE.md").read_text()
+    claude_md = (dev_repo / "AGENTS.md").read_text()
     assert "Target Repositories" in claude_md
     assert str(repo_a) in claude_md
     assert str(repo_b) in claude_md
