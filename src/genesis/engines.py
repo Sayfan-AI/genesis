@@ -418,6 +418,25 @@ class CodexStreamParser(StreamParser):
         return None
 
 
+def _parent_of(meta: dict) -> str | None:
+    """The parent session id in a session log's `session_meta`, or None.
+
+    Every level is type-checked because the shapes vary by how a session was
+    started. Measured: a spawned subagent records `{"subagent": {"thread_spawn":
+    {"parent_thread_id": ...}}}`, a review subagent records `{"subagent":
+    "review"}`, and a top-level run records `"exec"`. Assuming the first shape
+    crashed the trial's plane (#146).
+    """
+    parent = meta.get("parent_thread_id")
+    if isinstance(parent, str) and parent:
+        return parent
+    source = meta.get("source")
+    subagent = source.get("subagent") if isinstance(source, dict) else None
+    spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+    parent = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+    return parent if isinstance(parent, str) and parent else None
+
+
 class CodexEngine(Engine):
     name = "codex"
     binary = "codex"
@@ -540,16 +559,16 @@ class CodexEngine(Engine):
                 if path.stat().st_mtime < cutoff:
                     continue
                 with path.open() as f:
-                    meta = (json.loads(f.readline() or "{}").get("payload") or {})
+                    first = json.loads(f.readline() or "{}")
             except (OSError, ValueError):
+                continue
+            meta = first.get("payload") if isinstance(first, dict) else None
+            if not isinstance(meta, dict):
                 continue
             sid = meta.get("id") or meta.get("session_id")
             if not isinstance(sid, str):
                 continue
-            spawn = ((meta.get("source") or {}).get("subagent") or {}).get("thread_spawn") or {} \
-                if isinstance(meta.get("source"), dict) else {}
-            parent = meta.get("parent_thread_id") or spawn.get("parent_thread_id")
-            out[sid] = (path, parent if isinstance(parent, str) else None)
+            out[sid] = (path, _parent_of(meta))
         return out
 
     @staticmethod
@@ -562,11 +581,14 @@ class CodexEngine(Engine):
                     if '"token_count"' not in line:
                         continue
                     try:
-                        info = (json.loads(line).get("payload") or {}).get("info") or {}
+                        event = json.loads(line)
                     except ValueError:
                         continue
-                    if info.get("total_token_usage"):
-                        total = codex_tokens(info["total_token_usage"])
+                    payload = event.get("payload") if isinstance(event, dict) else None
+                    info = payload.get("info") if isinstance(payload, dict) else None
+                    usage = info.get("total_token_usage") if isinstance(info, dict) else None
+                    if isinstance(usage, dict):
+                        total = codex_tokens(usage)
         except OSError:
             return None
         return total

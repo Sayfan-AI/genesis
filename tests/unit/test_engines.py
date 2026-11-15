@@ -325,3 +325,43 @@ def test_a_session_without_a_reported_turn_count_logs_the_counted_tool_calls(tmp
     plane._stream_progress(iter(stream))
     ended = [line for line in lines if "session ended" in line]
     assert ended and "turns=2" in ended[0]
+
+
+def test_codex_settling_survives_every_session_meta_shape(tmp_path, monkeypatch) -> None:
+    """Review subagents record `{"subagent": "review"}`. Assuming a dict there
+    crashed the trial's plane (#146). Odd first lines are skipped, not fatal."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write_session_log(tmp_path, "parent", [1000])
+    _write_session_log(tmp_path, "spawned", [200], parent="parent")
+    day = tmp_path / "sessions" / "2026" / "11" / "15"
+    shapes = {
+        "review": {"type": "session_meta", "payload": {"id": "review", "source": {"subagent": "review"}}},
+        "exec": {"type": "session_meta", "payload": {"id": "exec", "source": "exec"}},
+        "nested-str": {"type": "session_meta", "payload": {"id": "nested-str", "source": {"subagent": {"thread_spawn": "x"}}}},
+        "payload-str": {"type": "session_meta", "payload": "not a dict"},
+        "list": ["not", "a", "dict"],
+    }
+    for name, first in shapes.items():
+        (day / f"rollout-2026-11-15T00-00-00-{name}.jsonl").write_text(json.dumps(first) + "\n")
+    (day / "rollout-2026-11-15T00-00-00-broken.jsonl").write_text("{not json\n")
+    assert CodexEngine().settle_cost("parent") == 1200
+
+
+def test_a_failing_settle_warns_instead_of_stopping_the_plane(tmp_path, monkeypatch) -> None:
+    from genesis import server
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(server, "loki_push", lambda *a, **k: True)
+    lines = []
+    monkeypatch.setattr(server, "log", lines.append)
+    eng = CodexEngine()
+
+    def boom(_sid):
+        raise AttributeError("'str' object has no attribute 'get'")
+
+    monkeypatch.setattr(eng, "settle_cost", boom)
+    plane = server.LocalControlPlane(repo="o/r", engine=eng)
+    plane.last_session_id = "t"
+    plane._settle_session()
+    assert plane.cost_is_lower_bound is True
+    assert any("could not settle" in line for line in lines)
