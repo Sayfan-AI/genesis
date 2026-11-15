@@ -19,7 +19,7 @@ from genesis import server
 from genesis.engines import CodexEngine
 
 FAKE = Path(__file__).parent / "fake_codex.py"
-THREAD = "019a0000-0000-7000-8000-000000000000"
+THREAD = "019a0000-0000-7000-8000-000000000000"  # the first fresh session's id
 
 
 @pytest.fixture
@@ -108,3 +108,25 @@ def test_a_crashed_codex_session_is_not_resumed(codex, codex_plane) -> None:
     codex.write([{"tools": 2, "end": "crash"}])
     codex_plane.run_orchestrator(None)
     assert len(codex.calls()) == 1
+
+
+def test_each_fresh_codex_session_is_charged_and_resumed_as_itself(codex, codex_plane) -> None:
+    """Measured on the trial (#146): Codex result events carry no session id, so
+    the plane kept the first session's id. The next two sessions settled against
+    the first one's log at 0 tokens, and a continuation would have resumed it."""
+    codex.write([
+        {"tools": 2, "tokens_per_tool": 1000, "commit": "one.txt"},
+        {"tools": 60, "tokens_per_tool": 500, "delay": 0.05},
+        {"tools": 1, "tokens_per_tool": 500, "commit": "two.txt"},
+    ], judge="CONTINUE")
+    codex_plane.run_orchestrator(None)
+    assert codex_plane.run_spent == 2_000
+    codex_plane.run_orchestrator(None)
+
+    sessions = [c for c in codex.calls() if "read-only" not in c]
+    assert sessions[2][:3] == ["exec", "resume", "019a0000-0000-7000-8000-000000000001"], (
+        "the continuation must resume the second session, not the first"
+    )
+    # 2,000 for the first chain; 40 or 41 commands at 500 plus 500 for the
+    # resume and 510 for the judge for the second.
+    assert 2_000 + 20_000 + 500 + 510 <= codex_plane.run_spent <= 2_000 + 20_500 + 500 + 510

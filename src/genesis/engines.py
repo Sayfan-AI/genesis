@@ -481,7 +481,7 @@ class CodexEngine(Engine):
     def settle_cost(self, session_id: str | None) -> float | None:
         if not session_id:
             return 0.0
-        total = self._session_log_total(session_id)
+        total = self._family_total(session_id)
         if total is None:
             return 0.0
         added = max(total - self._totals.get(session_id, 0.0), 0.0)
@@ -489,19 +489,75 @@ class CodexEngine(Engine):
         return added
 
     @staticmethod
-    def _session_log_total(session_id: str) -> float | None:
-        """The session's running token total, from the last `token_count` event in
-        its log under $CODEX_HOME/sessions. None when the log can't be found or read."""
-        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    def _sessions_dir() -> Path:
+        return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
+
+    @classmethod
+    def _family_total(cls, session_id: str) -> float | None:
+        """The session's running total plus every subagent it spawned, at any depth.
+
+        A subagent writes its own session log, linked to its parent only by
+        `parent_thread_id` in that log's first line, and its tokens aren't in the
+        parent's total. Measured on the first trial session (#146): the parent's
+        log said 68,301 tokens and its human-interaction subagent's said 15,721
+        more. Counting only the parent would undercount every session that
+        delegates.
+        """
+        logs = cls._recent_logs()
+        own = next((path for sid, (path, _parent) in logs.items() if sid == session_id), None)
+        if own is None:
+            return None
+        children: dict[str, list[str]] = {}
+        for sid, (_path, parent) in logs.items():
+            if parent:
+                children.setdefault(parent, []).append(sid)
+        total, queue, seen = 0.0, [session_id], set()
+        while queue:
+            sid = queue.pop()
+            if sid in seen:
+                continue
+            seen.add(sid)
+            total += cls._log_total(logs[sid][0]) or 0.0
+            queue += children.get(sid, [])
+        return total
+
+    @classmethod
+    def _recent_logs(cls) -> dict[str, tuple[Path, str | None]]:
+        """Session id -> (log path, parent id) for logs touched in the last three
+        days. The window keeps this from reading months of history on every
+        settle, and clears any session the plane could still be accounting for:
+        the plane's own deadline is an hour."""
+        import time
+
+        cutoff = time.time() - 3 * 86400
+        out: dict[str, tuple[Path, str | None]] = {}
         try:
-            logs = sorted(home.glob(f"sessions/*/*/*/rollout-*{session_id}.jsonl"))
+            paths = list(cls._sessions_dir().glob("*/*/*/rollout-*.jsonl"))
         except OSError:
-            return None
-        if not logs:
-            return None
+            return out
+        for path in paths:
+            try:
+                if path.stat().st_mtime < cutoff:
+                    continue
+                with path.open() as f:
+                    meta = (json.loads(f.readline() or "{}").get("payload") or {})
+            except (OSError, ValueError):
+                continue
+            sid = meta.get("id") or meta.get("session_id")
+            if not isinstance(sid, str):
+                continue
+            spawn = ((meta.get("source") or {}).get("subagent") or {}).get("thread_spawn") or {} \
+                if isinstance(meta.get("source"), dict) else {}
+            parent = meta.get("parent_thread_id") or spawn.get("parent_thread_id")
+            out[sid] = (path, parent if isinstance(parent, str) else None)
+        return out
+
+    @staticmethod
+    def _log_total(path: Path) -> float | None:
+        """The running total from the last `token_count` event in one session log."""
         total = None
         try:
-            with logs[-1].open() as f:
+            with path.open() as f:
                 for line in f:
                     if '"token_count"' not in line:
                         continue

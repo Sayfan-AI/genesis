@@ -38,22 +38,28 @@ import sys
 import time
 from pathlib import Path
 
-THREAD_ID = "019a0000-0000-7000-8000-000000000000"
+def thread_id_for(n: int) -> str:
+    """A distinct id per fresh session, so a plane that keeps an earlier
+    session's id charges and resumes the wrong one, visibly."""
+    return f"019a0000-0000-7000-8000-{n:012d}"
 
 
 def emit(obj: dict) -> None:
     print(json.dumps(obj), flush=True)
 
 
-def log_path() -> Path:
+def log_path(thread: str) -> Path:
     home = Path(os.environ["CODEX_HOME"])
-    path = home / "sessions" / "2026" / "11" / "15" / f"rollout-2026-11-15T00-00-00-{THREAD_ID}.jsonl"
+    path = home / "sessions" / "2026" / "11" / "15" / f"rollout-2026-11-15T00-00-00-{thread}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        # The real log's first line, which is where the plane learns the id.
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"id": thread}}) + "\n")
     return path
 
 
-def running_total() -> int:
-    path = log_path()
+def running_total(thread: str) -> int:
+    path = log_path(thread)
     if not path.exists():
         return 0
     total = 0
@@ -64,10 +70,10 @@ def running_total() -> int:
     return total
 
 
-def record(total: int) -> None:
+def record(thread: str, total: int) -> None:
     """Append a token_count event the way the real session log does."""
     usage = {"input_tokens": total, "cached_input_tokens": 0, "output_tokens": 0}
-    with log_path().open("a") as f:
+    with log_path(thread).open("a") as f:
         f.write(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
             "total_token_usage": usage, "last_token_usage": usage}}}) + "\n")
 
@@ -96,19 +102,21 @@ def main() -> int:
     step = sessions[min(n, len(sessions) - 1)]
     counter.write_text(str(n + 1))
 
-    emit({"type": "thread.started", "thread_id": THREAD_ID})
+    # A resume continues the session it was given; a fresh run gets its own id.
+    thread = argv[2] if argv[1:2] == ["resume"] else thread_id_for(n)
+    emit({"type": "thread.started", "thread_id": thread})
     emit({"type": "item.completed", "item": {"id": "w0", "type": "error",
                                              "message": "`--dangerously-bypass-hook-trust` is enabled."}})
     emit({"type": "turn.started"})
 
-    total = running_total()
+    total = running_total(thread)
     per_tool = int(step.get("tokens_per_tool", 1000))
     for i in range(int(step.get("tools", 0))):
         cmd = f"/bin/zsh -lc 'echo step-{n}-{i}'"
         emit({"type": "item.started", "item": {"id": f"c{i}", "type": "command_execution", "command": cmd,
                                                "status": "in_progress"}})
         total += per_tool
-        record(total)
+        record(thread, total)
         emit({"type": "item.completed", "item": {"id": f"c{i}", "type": "command_execution", "command": cmd,
                                                  "exit_code": 0, "status": "completed"}})
         time.sleep(float(step.get("delay", 0)))

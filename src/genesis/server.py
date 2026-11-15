@@ -692,8 +692,10 @@ class LocalControlPlane:
                 for ev in parser.feed(event):
                     if isinstance(ev, SessionStarted):
                         # Capturing it is what makes a resume possible at all.
-                        if not self.last_session_id:
-                            self.last_session_id = ev.session_id
+                        # Always this process's own id: the parser reports a
+                        # start once per process, and keeping an earlier one
+                        # resumed and charged the wrong session (#146).
+                        self.last_session_id = ev.session_id
                     elif isinstance(ev, ToolCall):
                         turns += 1
                         self.stream_turns = turns
@@ -771,12 +773,15 @@ class LocalControlPlane:
         its own.
         """
         self.last_result_subtype = ev.subtype
+        # Codex reports no turn count, so fall back to the tool calls the plane
+        # counted itself rather than logging `turns=None`.
+        reported_turns = ev.turns if ev.turns is not None else turns
         loki_push(
             "session-outcome",
             {
                 "level": "error" if ev.is_error else "info",
                 "subtype": ev.subtype,
-                "turns": ev.turns,
+                "turns": reported_turns,
                 "cost_usd": round(ev.cost, 4),
                 "duration_s": ev.duration_s,
                 "tool_calls": turns,
@@ -794,7 +799,7 @@ class LocalControlPlane:
             self.last_session_id = ev.session_id
         log(
             f"  session ended: {ev.subtype} "
-            f"turns={ev.turns} cost={self.engine.format_cost(ev.cost)} {ev.duration_s}s"
+            f"turns={reported_turns} cost={self.engine.format_cost(ev.cost)} {ev.duration_s}s"
         )
 
     def run_orchestrator(
@@ -1527,6 +1532,13 @@ class LocalControlPlane:
         self.last_cost = 0.0
         self.budget_stopped = False
         self.stream_turns = 0
+        # A fresh session must not inherit the previous one's id. Measured on the
+        # Codex trial: Claude's result events carry the id and overwrite a stale
+        # one, Codex's don't, so the second and third sessions settled against
+        # the first session's log (0 tokens each), and a continuation would have
+        # resumed the wrong session.
+        if not resume:
+            self.last_session_id = None
 
         cmd = self.engine.session_command(
             prompt or "", resume=resume, max_turns=SESSION_MAX_TURNS, tools=ALLOWED_TOOLS
