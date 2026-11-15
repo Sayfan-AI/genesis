@@ -30,7 +30,10 @@ def test_new_repo_has_claude_md(tmp_dir: Path) -> None:
     repo = tmp_dir / PROJECT
     scaffold_new_repo(repo, GOAL, PROJECT)
 
-    claude_md = (repo / "CLAUDE.md").read_text()
+    # The rules live in AGENTS.md, which Codex reads natively, and CLAUDE.md
+    # imports it for Claude Code (#146).
+    assert (repo / "CLAUDE.md").read_text().startswith("@AGENTS.md")
+    claude_md = (repo / "AGENTS.md").read_text()
     assert PROJECT in claude_md
     assert GOAL in claude_md
     # Meta-concepts
@@ -82,10 +85,10 @@ def test_new_repo_claude_md_names_only_agents_it_actually_ships(tmp_dir: Path) -
 
     section = re.search(
         r"^## Agents[ ]*$(.*?)(?=^## |\Z)",
-        (repo / "CLAUDE.md").read_text(),
+        (repo / "AGENTS.md").read_text(),
         re.M | re.S,
     )
-    assert section, "the scaffolded CLAUDE.md has no Agents section"
+    assert section, "the scaffolded AGENTS.md has no Agents section"
 
     # The roster is the first contiguous run of bullets; the bullets further down
     # are the questions a proposed role has to answer.
@@ -283,3 +286,62 @@ def test_a_scaffolded_repo_cites_only_tests_it_actually_has(tmp_dir: Path) -> No
             if not (repo / ref).exists():
                 missing.append(f"{path.relative_to(repo)} -> {ref}")
     assert not missing, "the seed cites files it doesn't ship:\n" + "\n".join(missing)
+
+
+# ---------- engines (#146) ----------
+
+
+def test_new_repo_records_its_engine(tmp_dir: Path) -> None:
+    import tomllib
+
+    for engine in ("claude", "codex"):
+        repo = tmp_dir / f"{PROJECT}-{engine}"
+        scaffold_new_repo(repo, GOAL, PROJECT, engine=engine)
+        config = tomllib.loads((repo / ".genesis" / "config.toml").read_text())
+        assert config["engine"]["name"] == engine
+
+
+def test_new_repo_refuses_an_unknown_engine(tmp_dir: Path) -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="codex"):
+        scaffold_new_repo(tmp_dir / "x", GOAL, PROJECT, engine="hal9000")
+
+
+def test_every_new_repo_gets_codex_hooks_with_the_host_guard(tmp_dir: Path) -> None:
+    """Seeded whichever engine a system starts on, so switching to Codex keeps the
+    logging and host-guard layer. The guard wiring must come before logging,
+    same as in settings.json."""
+    repo = tmp_dir / PROJECT
+    scaffold_new_repo(repo, GOAL, PROJECT)
+    hooks = json.loads((repo / ".codex" / "hooks.json").read_text())["hooks"]
+    pre = [h["command"] for g in hooks["PreToolUse"] for h in g["hooks"]]
+    assert pre[0].endswith("host-guard.sh")
+    assert any("log.sh pre-tool-use" in c for c in pre)
+    assert any("pre-session.sh" in h["command"] for g in hooks["SessionStart"] for h in g["hooks"])
+    assert not any("claude-dir-guard" in h["command"] for ev in hooks.values() for g in ev for h in g["hooks"]), (
+        "claude-dir-guard explains a Claude Code harness refusal Codex doesn't have"
+    )
+
+
+def test_only_a_codex_repo_gets_protected_paths(tmp_dir: Path) -> None:
+    claude = tmp_dir / "c"
+    scaffold_new_repo(claude, GOAL, PROJECT)
+    assert not (claude / ".genesis" / "protected-paths").exists()
+
+    codex = tmp_dir / "x"
+    scaffold_new_repo(codex, GOAL, PROJECT, engine="codex")
+    lines = [ln for ln in (codex / ".genesis" / "protected-paths").read_text().splitlines()
+             if ln and not ln.startswith("#")]
+    assert lines == [".claude/", ".codex/", ".genesis/protected-paths"]
+    assert "AGENTS.md" not in lines, "the evolver edits AGENTS.md by design; holding it would stall that"
+
+
+def test_a_codex_repo_readme_says_it_runs_in_local_mode(tmp_dir: Path) -> None:
+    claude = tmp_dir / "c"
+    scaffold_new_repo(claude, GOAL, PROJECT)
+    assert "OpenAI Codex" not in (claude / "README.md").read_text()
+    codex = tmp_dir / "x"
+    scaffold_new_repo(codex, GOAL, PROJECT, engine="codex")
+    readme = (codex / "README.md").read_text()
+    assert "OpenAI Codex" in readme and "genesis serve" in readme

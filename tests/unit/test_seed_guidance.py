@@ -240,7 +240,7 @@ class TestOnboardingDoesNotPreCommitAnArchitecture:
         What replaces it is the set of questions a role has to answer before it
         exists — scaffolding that doesn't decide anything in advance.
         """
-        section = _section((TEMPLATES / "claude_md.md.j2").read_text(), "Agents")
+        section = _section((TEMPLATES / "agents_md.md.j2").read_text(), "Agents")
         questions = [ln for ln in section.splitlines() if ln.startswith("- ") and "?" in ln]
         assert len(questions) >= 3, (
             f"the Agents section offers {len(questions)} questions to justify a new "
@@ -255,7 +255,7 @@ class TestOnboardingDoesNotPreCommitAnArchitecture:
         evolver = (TEMPLATES / "agents" / "evolver.md").read_text()
         claimed = re.search(r"the (\w+) questions under \"Agents\"", evolver)
         assert claimed, "evolver.md no longer routes new-role proposals to CLAUDE.md"
-        section = _section((TEMPLATES / "claude_md.md.j2").read_text(), "Agents")
+        section = _section((TEMPLATES / "agents_md.md.j2").read_text(), "Agents")
         actual = len([ln for ln in section.splitlines() if ln.startswith("- ") and "?" in ln])
         assert NUMBER_WORDS[claimed.group(1)] == actual, (
             f"evolver.md says {claimed.group(1)} questions, CLAUDE.md asks {actual}"

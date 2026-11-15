@@ -834,7 +834,7 @@ class TestRecheckBeforeMergeIsSeeded:
         [
             "agents/orchestrator.md",
             "agents/evolver.md",
-            "claude_md.md.j2",
+            "agents_md.md.j2",
         ],
     )
     def test_the_carrier_tells_the_session_to_re_check(self, template: str) -> None:
@@ -845,7 +845,7 @@ class TestRecheckBeforeMergeIsSeeded:
     def test_claude_md_exempts_the_narrow_class_by_classification(self) -> None:
         """Not by a second list: a narrow runner is exempt by being classified,
         never by someone remembering to add it somewhere."""
-        text = (TEMPLATES / "claude_md.md.j2").read_text()
+        text = (TEMPLATES / "agents_md.md.j2").read_text()
         assert "narrow-class runner is exempt" in text
         assert "by\nits classification" in text or "by its classification" in text
 
