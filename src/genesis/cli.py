@@ -41,6 +41,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Max seconds per orchestrator session (default: 3600, env: GENESIS_SESSION_TIMEOUT)",
     )
     serve_parser.add_argument(
+        "--engine",
+        choices=["claude", "codex"],
+        help=(
+            "Coding agent that runs the sessions. Defaults to the [engine] name "
+            "in .genesis/config.toml if the repo sets one, and to claude otherwise."
+        ),
+    )
+    serve_parser.add_argument(
         "--agent",
         help=(
             "Agent definition to run (default: .claude/agents/orchestrator.md, "
@@ -90,6 +98,8 @@ def main(argv: list[str] | None = None) -> int:
             os.environ["GENESIS_SESSION_TIMEOUT"] = str(args.session_timeout)
         if args.agent:
             os.environ["GENESIS_AGENT"] = args.agent
+        if args.engine:
+            os.environ["GENESIS_ENGINE"] = args.engine
         if args.all_workflows:
             os.environ["GENESIS_ALL_WORKFLOWS"] = "1"
         return serve()

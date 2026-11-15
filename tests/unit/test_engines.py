@@ -3,6 +3,7 @@ control plane acts on. The plane's policy is tested in test_server.py; this pins
 the translation, so a second engine can be checked against the same contract."""
 
 import json
+import os
 
 import pytest
 
@@ -98,3 +99,193 @@ def test_the_claude_engine_finds_a_declared_session_start_hook(tmp_path, monkeyp
     assert eng.pre_session_hook_declared("pre-session.sh") is True
     eng.settings_path.write_text("{not json")
     assert eng.pre_session_hook_declared("pre-session.sh") is False
+
+
+# ---------- Codex ----------
+#
+# The event shapes below are the ones codex-cli 0.166.0 was measured emitting
+# (genesis issue #146), including the warning `error` items it prints first.
+
+from genesis.engines import CodexEngine, codex_tokens  # noqa: E402
+
+
+def test_codex_runs_unattended_with_stdin_closed_and_no_turn_flag() -> None:
+    eng = CodexEngine()
+    cmd = eng.session_command("do it", resume=None, max_turns=40, tools="Read")
+    assert cmd[:2] == ["codex", "exec"] and cmd[-1] == "do it"
+    for flag in ("--json", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"):
+        assert flag in cmd
+    assert "--max-turns" not in cmd, "codex has no such flag; the plane enforces the budget"
+    assert eng.close_stdin is True and eng.enforces_turn_budget is False
+    assert ClaudeEngine().close_stdin is False and ClaudeEngine().enforces_turn_budget is True
+
+
+def test_codex_resume_continues_the_session_with_the_continuation_prompt() -> None:
+    eng = CodexEngine()
+    cmd = eng.session_command("do it", resume="t-1", max_turns=40, tools="Read")
+    assert cmd[:4] == ["codex", "exec", "resume", "t-1"]
+    assert cmd[-1] == eng.resume_prompt and "do it" not in cmd
+
+
+def test_the_codex_judge_is_read_only_and_leaves_no_session() -> None:
+    cmd = CodexEngine().judge_command("judge", max_turns=2)
+    assert cmd[cmd.index("--sandbox") + 1] == "read-only"
+    assert "--ephemeral" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+
+def test_the_codex_parser_maps_measured_events() -> None:
+    events = [
+        {"type": "thread.started", "thread_id": "t-9"},
+        {"type": "item.completed", "item": {"type": "error", "message": "ignoring features.rmcp_client"}},
+        {"type": "turn.started"},
+        {"type": "item.started", "item": {"type": "command_execution", "command": "/bin/zsh -lc 'git status'"}},
+        {"type": "item.completed", "item": {"type": "command_execution", "command": "/bin/zsh -lc 'git status'",
+                                            "exit_code": 0, "status": "completed"}},
+        {"type": "item.completed", "item": {"type": "file_change", "changes": [{"path": "a.py", "kind": "update"}]}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 9000, "cached_input_tokens": 4000, "output_tokens": 50}},
+    ]
+    out = feed_all(CodexEngine().stream_parser(), events)
+    assert out == [
+        SessionStarted("t-9"),
+        ToolCall("Bash git status"),
+        ToolCall("Edit a.py"),
+        # Cost is settled from the session log, not this running total.
+        SessionResult("success"),
+    ], "warning items and item.started must not count; the shell wrapper is unwrapped"
+
+
+def test_a_failed_codex_turn_is_an_abnormal_ending() -> None:
+    out = CodexEngine().stream_parser().feed({"type": "turn.failed", "error": {"message": "x"}})
+    assert out == [SessionResult("error_during_execution", is_error=True)]
+
+
+def test_codex_tokens_count_fresh_input_and_output() -> None:
+    assert codex_tokens({"input_tokens": 109245, "cached_input_tokens": 76032, "output_tokens": 530}) == 33743
+    assert codex_tokens(None) == 0
+
+
+def test_the_codex_judge_reply_reads_the_last_message_and_its_usage() -> None:
+    stdout = "\n".join(json.dumps(e) for e in [
+        {"type": "thread.started", "thread_id": "j"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "STOP it is thrashing"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 800, "cached_input_tokens": 0, "output_tokens": 20}},
+    ])
+    reply = CodexEngine().read_judge_output(stdout)
+    assert (reply.text, reply.cost, reply.cost_known) == ("STOP it is thrashing", 820, True)
+    assert CodexEngine().read_judge_output("not json at all").cost_known is False
+
+
+def _write_session_log(home, thread, totals):
+    path = home / "sessions" / "2026" / "11" / "15" / f"rollout-2026-11-15T00-00-00-{thread}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
+        "total_token_usage": {"input_tokens": t, "cached_input_tokens": 0, "output_tokens": 0}}}}) for t in totals]
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_codex_cost_is_settled_per_process_from_the_session_log(tmp_path, monkeypatch) -> None:
+    """The log holds the session's running total. A resume must be charged only
+    what it added: measured, a resumed turn reported 142,552 cumulative input
+    tokens of which 33,307 were its own (#146)."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    eng = CodexEngine()
+    _write_session_log(tmp_path, "t-1", [17273, 109245])
+    assert eng.settle_cost("t-1") == 109245
+    _write_session_log(tmp_path, "t-1", [17273, 109245, 142552])
+    assert eng.settle_cost("t-1") == 142552 - 109245
+    assert eng.settle_cost("no-such-session") == 0
+    assert eng.settle_cost(None) == 0
+
+
+def test_codex_hooks_are_found_in_codex_hooks_json(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    eng = CodexEngine()
+    assert eng.pre_session_hook_declared("pre-session.sh") is False
+    eng.hooks_path.parent.mkdir(parents=True)
+    eng.hooks_path.write_text(json.dumps({"hooks": {"SessionStart": [
+        {"matcher": "", "hooks": [{"type": "command", "command": ".genesis/scripts/pre-session.sh"}]}]}}))
+    assert eng.pre_session_hook_declared("pre-session.sh") is True
+
+
+def test_codex_costs_read_in_tokens() -> None:
+    assert CodexEngine().format_cost(3_000_000) == "3,000,000 tokens"
+    assert ClaudeEngine().format_cost(1.5) == "$1.50"
+
+
+# ---------- choosing the engine ----------
+
+
+def test_the_engine_comes_from_env_then_config_then_default(tmp_path, monkeypatch) -> None:
+    from genesis import server
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GENESIS_ENGINE", raising=False)
+    assert server.configured_engine() is None
+    (tmp_path / ".genesis").mkdir()
+    (tmp_path / ".genesis" / "config.toml").write_text('[project]\nname = "x"\n\n[engine]\nname = "codex"\n')
+    assert server.configured_engine() == "codex"
+    monkeypatch.setenv("GENESIS_ENGINE", "claude")
+    assert server.configured_engine() == "claude"
+
+
+def test_a_broken_config_file_falls_back_to_the_default_engine(tmp_path, monkeypatch) -> None:
+    from genesis import server
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GENESIS_ENGINE", raising=False)
+    (tmp_path / ".genesis").mkdir()
+    (tmp_path / ".genesis" / "config.toml").write_text("[engine\nname = ")
+    assert server.configured_engine() is None
+
+
+def test_the_cli_engine_flag_sets_the_env_var(monkeypatch) -> None:
+    from genesis import cli
+
+    # setenv, not delenv: pytest then restores the original state after the CLI
+    # writes the variable itself, so `codex` can't leak into later tests.
+    monkeypatch.setenv("GENESIS_ENGINE", "placeholder")
+    monkeypatch.setattr(cli, "serve", lambda: 0)
+    assert cli.main(["serve", "--engine", "codex"]) == 0
+    assert os.environ["GENESIS_ENGINE"] == "codex"
+
+
+def test_the_token_bounds_are_read_from_codex_env_vars(monkeypatch) -> None:
+    from genesis import server
+
+    monkeypatch.setenv("GENESIS_TASK_TOKEN_CEILING", "1234")
+    monkeypatch.setenv("GENESIS_TASK_COST_CEILING", "7")
+    assert server._task_cost_ceiling(CodexEngine()) == 1234
+    assert server._task_cost_ceiling(ClaudeEngine()) == 7
+    monkeypatch.setenv("GENESIS_RUN_TOKEN_BUDGET", "not a number")
+    assert server._run_cost_budget(CodexEngine()) == CodexEngine.run_budget_default
+
+
+@pytest.mark.parametrize(("engine", "stdin"), [("codex", "devnull"), ("claude", None)])
+def test_the_plane_closes_stdin_only_for_engines_that_need_it(engine, stdin, tmp_path, monkeypatch) -> None:
+    """Measured: `codex exec` with stdin inherited sat for five minutes waiting for
+    EOF. Claude's launch must stay exactly as it was."""
+    import subprocess
+    from unittest.mock import MagicMock
+
+    from genesis import server
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(server, "loki_push", lambda *a, **k: True)
+    seen = {}
+
+    def fake_popen(cmd, **kwargs):
+        seen.update(kwargs)
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.wait.return_value = 0
+        proc.stdout = iter([])
+        return proc
+
+    plane = server.LocalControlPlane(repo="o/r", engine=engines.get_engine(engine))
+    monkeypatch.setattr(plane, "run_pre_session_steps", lambda: None)
+    monkeypatch.setattr(plane, "_session_env", lambda: {})
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    plane._run_session("hi", deadline=10**12)
+    assert seen["stdin"] == (subprocess.DEVNULL if stdin == "devnull" else None)
