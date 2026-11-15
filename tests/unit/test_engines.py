@@ -177,10 +177,13 @@ def test_the_codex_judge_reply_reads_the_last_message_and_its_usage() -> None:
     assert CodexEngine().read_judge_output("not json at all").cost_known is False
 
 
-def _write_session_log(home, thread, totals):
+def _write_session_log(home, thread, totals, parent=None):
+    """A session log shaped like the real ones: `session_meta` first, carrying the
+    id and, for a subagent, its parent's id."""
     path = home / "sessions" / "2026" / "11" / "15" / f"rollout-2026-11-15T00-00-00-{thread}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
+    meta = {"type": "session_meta", "payload": {"id": thread, "parent_thread_id": parent}}
+    lines = [json.dumps(meta)] + [json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
         "total_token_usage": {"input_tokens": t, "cached_input_tokens": 0, "output_tokens": 0}}}}) for t in totals]
     path.write_text("\n".join(lines) + "\n")
 
@@ -197,6 +200,19 @@ def test_codex_cost_is_settled_per_process_from_the_session_log(tmp_path, monkey
     assert eng.settle_cost("t-1") == 142552 - 109245
     assert eng.settle_cost("no-such-session") == 0
     assert eng.settle_cost(None) == 0
+
+
+def test_codex_cost_includes_the_subagents_a_session_spawned(tmp_path, monkeypatch) -> None:
+    """A subagent writes its own log, linked only by parent_thread_id, and its
+    tokens aren't in the parent's total. Measured on the trial: parent 68,301,
+    its human-interaction subagent 15,721 more (#146)."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    eng = CodexEngine()
+    _write_session_log(tmp_path, "parent", [68301])
+    _write_session_log(tmp_path, "child", [15721], parent="parent")
+    _write_session_log(tmp_path, "grandchild", [1000], parent="child")
+    _write_session_log(tmp_path, "unrelated", [99999])
+    assert eng.settle_cost("parent") == 68301 + 15721 + 1000
 
 
 def test_codex_hooks_are_found_in_codex_hooks_json(tmp_path, monkeypatch) -> None:
@@ -289,3 +305,23 @@ def test_the_plane_closes_stdin_only_for_engines_that_need_it(engine, stdin, tmp
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     plane._run_session("hi", deadline=10**12)
     assert seen["stdin"] == (subprocess.DEVNULL if stdin == "devnull" else None)
+
+
+def test_a_session_without_a_reported_turn_count_logs_the_counted_tool_calls(tmp_path, monkeypatch) -> None:
+    """Codex reports no turn count. The trial run logged `turns=None`."""
+    from genesis import server
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(server, "loki_push", lambda *a, **k: True)
+    lines = []
+    monkeypatch.setattr(server, "log", lines.append)
+    plane = server.LocalControlPlane(repo="o/r", engine=CodexEngine())
+    stream = [json.dumps(e) for e in [
+        {"type": "thread.started", "thread_id": "t"},
+        {"type": "item.completed", "item": {"type": "command_execution", "command": "ls"}},
+        {"type": "item.completed", "item": {"type": "command_execution", "command": "pwd"}},
+        {"type": "turn.completed", "usage": {}},
+    ]]
+    plane._stream_progress(iter(stream))
+    ended = [line for line in lines if "session ended" in line]
+    assert ended and "turns=2" in ended[0]
