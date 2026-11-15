@@ -745,7 +745,17 @@ class LocalControlPlane:
                 ),
                 self.stream_turns,
             )
-        settled = self.engine.settle_cost(self.last_session_id)
+        try:
+            settled = self.engine.settle_cost(self.last_session_id)
+        except Exception as e:  # noqa: BLE001 - accounting must never stop the plane
+            # Measured on the Codex trial (#146): a session-log shape the parser
+            # didn't expect raised here, the error escaped `serve`, and the plane
+            # stopped with a dev system mid-milestone. A cost that can't be read
+            # makes the totals a lower bound, the same as an unreadable judge.
+            self.cost_is_lower_bound = True
+            log(f"  WARNING: could not settle the session's cost ({e!r}) - "
+                "the totals below are a lower bound")
+            settled = None
         if settled is not None:
             self.last_cost += settled
             loki_push(
