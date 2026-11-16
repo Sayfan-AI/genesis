@@ -444,13 +444,21 @@ class CodexEngine(Engine):
     hooks_path = Path(".codex/hooks.json")
     enforces_turn_budget = False
     close_stdin = True
-    # Token bounds, counted as fresh input plus output (codex_tokens). These are
-    # provisional: they're sized from the first measured sessions and will be
-    # revisited once a dev system has run on Codex for real (#146). An operator
-    # tightens them through the env vars.
-    task_ceiling_default = 3_000_000.0
+    # Token bounds, counted as fresh input plus output (codex_tokens), sized from
+    # the first dev system run on Codex (Sayfan-AI/genesis-codex-trial, #146). Its
+    # whole first milestone (onboarding, planning, three task PRs, a Pages
+    # deploy, live verification and the completion report) took 640,486 tokens
+    # over 8 sessions, 52,860 to 112,440 each, subagents included, and no session
+    # reached the turn budget.
+    #
+    # The task ceiling binds near the continuation cap (MAX_CONTINUATIONS + 1
+    # sessions), as Claude's $50 does: about nine sessions at the trial's heaviest.
+    # The provisional 3,000,000 would never have bound, because the cap stops a
+    # chain first. The run budget is about four and a half milestones that size.
+    # An operator changes either through the env vars.
+    task_ceiling_default = 1_000_000.0
     task_ceiling_env = ("GENESIS_TASK_TOKEN_CEILING",)
-    run_budget_default = 10_000_000.0
+    run_budget_default = 3_000_000.0
     run_budget_env = ("GENESIS_RUN_TOKEN_BUDGET",)
 
     def __init__(self) -> None:

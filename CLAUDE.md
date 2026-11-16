@@ -91,7 +91,10 @@ Codex differs in ways the plane depends on. Each was measured on codex-cli
   `SESSION_MAX_TURNS`, then reports `error_max_turns` so the ladder resumes it.
 - **Cost is tokens, cumulative per session**, and a killed session reports none
   in the stream. `CodexEngine.settle_cost` reads the running total from the
-  session log under `$CODEX_HOME/sessions` and charges the difference.
+  session log under `$CODEX_HOME/sessions` and charges the difference, including
+  every subagent the session spawned, which writes its own log. The ceilings
+  (1,000,000 tokens per task, 3,000,000 per run) are sized from the first Codex
+  dev system's milestone: 640,486 tokens over 8 sessions.
 - **`codex exec` waits for stdin to close.** The plane launches it with stdin
   closed.
 - **The sandbox blocks commits, pushes and the network**, so sessions run with
