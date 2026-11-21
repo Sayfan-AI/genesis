@@ -52,7 +52,7 @@ Genesis uses **one GitHub App per user/org, shared by every project you bootstra
 
 ### Bootstrap a project
 
-1. **Scaffold + publish.** In a Claude Code or Codex session in this repo, run the `genesis-new` skill with your goal. Genesis picks a topology, scaffolds the dev system, creates the GitHub repo, opens issue #1, and **publishes the workflows disabled** so they don't fail before credentials exist.
+1. **Scaffold + publish.** In a Claude Code or Codex session in this repo, run the `genesis-new` skill with your goal. Genesis picks a topology, scaffolds the dev system, creates the GitHub repo, turns GitHub Actions on for it if it came up off, opens issue #1, and **publishes the workflows disabled** so they don't fail before credentials exist.
 
 2. **Activate.** From a clone of the new dev repo, run one command:
 

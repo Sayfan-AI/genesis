@@ -14,6 +14,7 @@ from genesis.github import (
     GitHubError,
     create_github_repo,
     disable_seed_workflows,
+    ensure_actions_enabled,
     open_onboarding_issue,
     publish_to_github,
     push_to_github,
@@ -239,6 +240,8 @@ def test_publish_to_github_full_flow(mock_run: MagicMock, tmp_path: Path) -> Non
             result.stdout = ""
         elif "api" in args_list and "user" in args_list:
             result.stdout = "testuser"
+        elif "api" in args_list and "repos/testuser/test/actions/permissions" in args_list:
+            result.stdout = json.dumps({"enabled": True, "allowed_actions": "all"})
         elif "remote" in args_list and "get-url" in args_list:
             result.returncode = 1
             result.stderr = "no remote"
@@ -322,3 +325,95 @@ def test_disable_seed_workflows_disables_only_active(
     ]
     assert disable_ids == [str(wf["id"]) for wf in seeded[:-1]]
     mock_sleep.assert_not_called()  # listing was complete on first poll
+
+
+def _actions_gh(states: list[bool], put_fails: bool = False):
+    """A fake `gh` for ensure_actions_enabled: each GET of the permissions answers
+    the next value in `states`, and a PUT succeeds unless `put_fails`."""
+    gets = iter(states)
+    calls: list[list[str]] = []
+
+    def side_effect(args: list[str], **kwargs: object) -> MagicMock:
+        args_list = list(args)
+        calls.append(args_list)
+        result = MagicMock(returncode=0, stderr="", stdout="")
+        if "PUT" in args_list:
+            if put_fails:
+                result.returncode = 1
+                result.stderr = "HTTP 409: Actions disabled by organization policy"
+        else:
+            result.stdout = json.dumps({"enabled": next(gets)})
+        return result
+
+    return side_effect, calls
+
+
+@patch("genesis.github.subprocess.run")
+def test_ensure_actions_enabled_leaves_an_enabled_repo_alone(mock_run: MagicMock) -> None:
+    mock_run.side_effect, calls = _actions_gh([True])
+    ensure_actions_enabled("https://github.com/acme/widget")
+    assert calls == [["gh", "api", "repos/acme/widget/actions/permissions"]]
+
+
+@patch("genesis.github.subprocess.run")
+def test_ensure_actions_enabled_turns_actions_on(mock_run: MagicMock) -> None:
+    mock_run.side_effect, calls = _actions_gh([False, True])
+    ensure_actions_enabled("https://github.com/acme/widget")
+    put = [c for c in calls if "PUT" in c]
+    assert put == [
+        ["gh", "api", "-X", "PUT", "repos/acme/widget/actions/permissions",
+         "-F", "enabled=true", "-f", "allowed_actions=all"]
+    ]
+    assert len(calls) == 3  # check, enable, check again
+
+
+@patch("genesis.github.subprocess.run")
+def test_ensure_actions_enabled_names_the_org_policy_when_the_put_is_refused(
+    mock_run: MagicMock,
+) -> None:
+    mock_run.side_effect, _ = _actions_gh([False], put_fails=True)
+    with pytest.raises(GitHubError, match="organization policy"):
+        ensure_actions_enabled("https://github.com/acme/widget")
+
+
+@patch("genesis.github.subprocess.run")
+def test_ensure_actions_enabled_fails_when_actions_stays_off(mock_run: MagicMock) -> None:
+    mock_run.side_effect, _ = _actions_gh([False, False])
+    with pytest.raises(GitHubError, match="still off"):
+        ensure_actions_enabled("https://github.com/acme/widget")
+
+
+@patch("genesis.github.subprocess.run")
+def test_publish_enables_actions_before_the_first_push(mock_run: MagicMock, tmp_path: Path) -> None:
+    (tmp_path / ".genesis").mkdir()
+    (tmp_path / ".genesis" / "onboarding.md").write_text("# Onboarding: test\n\nGoal\n")
+    order: list[str] = []
+    actions_on = [False]
+
+    def side_effect(args: list[str], **kwargs: object) -> MagicMock:
+        a = list(args)
+        result = MagicMock(returncode=0, stderr="", stdout="")
+        if "api" in a and "user" in a:
+            result.stdout = "testuser"
+        elif "api" in a and "repos/testuser/test/actions/permissions" in a:
+            if "PUT" in a:
+                actions_on[0] = True
+                order.append("enable-actions")
+            else:
+                result.stdout = json.dumps({"enabled": actions_on[0]})
+        elif "remote" in a and "get-url" in a:
+            result.returncode = 1
+        elif "push" in a:
+            order.append("push")
+        elif "workflow" in a and "list" in a:
+            result.stdout = json.dumps(
+                [{"id": i, "name": wf, "state": "active"} for i, wf in enumerate(SEED_WORKFLOWS)]
+            )
+        elif "issue" in a and "create" in a:
+            result.stdout = "https://github.com/testuser/test/issues/1"
+        return result
+
+    mock_run.side_effect = side_effect
+    publish_to_github(tmp_path, "test", "Build something", private=True)
+    assert order == ["enable-actions", "push"]
+
