@@ -8,8 +8,9 @@
 #
 # One prefix per line. A prefix covers itself and everything beneath it.
 
-# The evolver's charter and the hooks it runs under.
+# The evolver's charter, skills, and the hooks it runs under.
 .claude/
+.agents/
 
 # The guard scripts, the pre-session net, and this list.
 .genesis/

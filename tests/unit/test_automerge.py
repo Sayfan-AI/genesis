@@ -353,6 +353,7 @@ def test_genesis_protects_the_rules_its_own_loop_runs_under() -> None:
     for must in (
         ".claude/agents/evolver.md",
         ".claude/settings.json",
+        ".agents/skills/genesis-new/SKILL.md",
         ".genesis/scripts/claude-dir-guard.sh",
         ".genesis/scripts/host-guard.sh",
         ".genesis/protected-paths",

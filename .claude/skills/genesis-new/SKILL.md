@@ -10,7 +10,7 @@ You are helping the user bootstrap a new autonomous, self-improving AI dev syste
 
 ## Step 1: Understand the Goal
 
-If `$ARGUMENTS` is provided, use it as the goal. Otherwise, ask:
+If a goal was passed with the invocation (`$ARGUMENTS` or the user's message), use it as the goal. Otherwise, ask:
 
 > What is the goal for this dev system? Describe what you want accomplished.
 
@@ -54,11 +54,11 @@ Whichever they pick, the system gets `AGENTS.md` (which both engines read), `CLA
 
 ## Step 4: Scaffold
 
-Run the appropriate scaffold command:
+Run the appropriate scaffold command from this genesis checkout (`<genesis_repo>`, the repository containing this skill):
 
 **New repo:**
 ```bash
-cd /Users/gigi/git/genesis && uv run python -c "
+cd <genesis_repo> && uv run python -c "
 from pathlib import Path
 from genesis.scaffold import scaffold_new_repo
 scaffold_new_repo(Path('<repo_path>'), '<goal>', '<project_name>', engine='<claude|codex>')
@@ -67,7 +67,7 @@ scaffold_new_repo(Path('<repo_path>'), '<goal>', '<project_name>', engine='<clau
 
 **Existing repo:**
 ```bash
-cd /Users/gigi/git/genesis && uv run python -c "
+cd <genesis_repo> && uv run python -c "
 from pathlib import Path
 from genesis.scaffold import scaffold_existing_repo
 scaffold_existing_repo(Path('<repo_path>'), '<goal>', '<project_name>', engine='<claude|codex>')
@@ -76,7 +76,7 @@ scaffold_existing_repo(Path('<repo_path>'), '<goal>', '<project_name>', engine='
 
 **Multi-repo:**
 ```bash
-cd /Users/gigi/git/genesis && uv run python -c "
+cd <genesis_repo> && uv run python -c "
 from pathlib import Path
 from genesis.scaffold import scaffold_external_dev_repo
 scaffold_external_dev_repo(Path('<dev_repo_path>'), [<target_repos>], '<goal>', '<project_name>', engine='<claude|codex>')
@@ -97,7 +97,7 @@ Ask the user:
 If yes, run:
 
 ```bash
-cd /Users/gigi/git/genesis && uv run python -c "
+cd <genesis_repo> && uv run python -c "
 from pathlib import Path
 from genesis.github import publish_to_github
 url = publish_to_github(Path('<repo_path>'), '<project_name>', '<goal>', org='<org_or_none>', private=True)
@@ -108,7 +108,7 @@ print(url)
 For existing repos that are already on GitHub, skip repo creation and just open the issue:
 
 ```bash
-cd /Users/gigi/git/genesis && uv run python -c "
+cd <genesis_repo> && uv run python -c "
 from pathlib import Path
 from genesis.github import open_onboarding_issue
 open_onboarding_issue(Path('<repo_path>'))

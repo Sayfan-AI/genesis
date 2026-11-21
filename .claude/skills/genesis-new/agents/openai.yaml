@@ -1,0 +1,4 @@
+interface:
+  display_name: "Genesis: New Dev System"
+  short_description: "Bootstrap a new autonomous dev system from a goal"
+  default_prompt: "Use $genesis-new to bootstrap a new autonomous dev system from a goal."
