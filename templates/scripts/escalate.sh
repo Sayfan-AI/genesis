@@ -27,6 +27,8 @@
 # Optional env:
 #   GENESIS_RUN_STARTED            ISO8601 UTC — when the failed run began
 #   GENESIS_ARTIFACT_LOOKBACK_MIN  fallback window in minutes (default 120)
+#   GENESIS_ESCALATION_REOPEN_HOURS  reopen a same-workflow escalation closed
+#                                    within this many hours (default 24)
 set -euo pipefail
 
 : "${GH_TOKEN:?GH_TOKEN required}"
@@ -34,6 +36,7 @@ set -euo pipefail
 WF_NAME="${WF_NAME:-unknown workflow}"
 RUN_URL="${RUN_URL:-(run url unavailable)}"
 LOOKBACK_MIN="${GENESIS_ARTIFACT_LOOKBACK_MIN:-120}"
+REOPEN_HOURS="${GENESIS_ESCALATION_REOPEN_HOURS:-24}"
 
 GATE_LABEL="needs:human"
 # The second label is what keeps this script from wedging the loop it protects.
@@ -103,18 +106,45 @@ fi
 # key never renders but stays greppable in the body.
 marker="<!-- genesis-failure-wf: ${WF_NAME} -->"
 
-body="$(printf 'A workflow run failed and the loop couldn'"'"'t advance on its own.\n\n- Workflow: **%s**\n- Failed run: %s\n\n### What this run may already have landed\n\n%s\n\n### Why this issue isn'"'"'t a gate\n\nIt carries `%s` so a person can find it, and `%s` so it doesn'"'"'t silence the scheduled orchestrator. A run that died isn'"'"'t the same claim as a decision only a person can make, and the next scheduled run may well succeed. If it fails again this issue gains a comment rather than a twin, so the comment count is the failure cadence.\n\n%s' \
-    "$WF_NAME" "$RUN_URL" "$landed" "$GATE_LABEL" "$CLASS_LABEL" "$marker")"
+body="$(printf 'A workflow run failed and the loop couldn'"'"'t advance on its own.\n\n- Workflow: **%s**\n- Failed run: %s\n\n### What this run may already have landed\n\n%s\n\n### Why this issue isn'"'"'t a gate\n\nIt carries `%s` so a person can find it, and `%s` so it doesn'"'"'t silence the scheduled orchestrator. A run that died isn'"'"'t the same claim as a decision only a person can make, and the next scheduled run may well succeed. If it fails again this issue gains a comment rather than a twin, so the comment count is the failure cadence. Close it once a run of this workflow passes, not when the cause is handed to another issue: a failure within %s hours of closing reopens it.\n\n%s' \
+    "$WF_NAME" "$RUN_URL" "$landed" "$GATE_LABEL" "$CLASS_LABEL" "$REOPEN_HOURS" "$marker")"
 
 # `|| true` on the lookup, and it isn't laziness: if the query fails we would
 # rather file a duplicate escalation than none. This script only ever runs when
 # something has already gone wrong, so its own error handling has to fail toward
 # telling a human, never toward silence.
-existing="$(gh issue list --state open --label "$CLASS_LABEL" --json number,body \
-    | jq -r --arg m "$marker" '[.[] | select((.body // "") | contains($m)) | .number] | first // empty' \
+#
+# Closed issues count too, if they closed recently. Dedup against open issues
+# alone holds only while the issue stays open, and the orchestrator closes them:
+# on sagrin/sweatless it closed one as "tracked in issue #31" while the cause
+# (DNS a person had to fix) was still live, and the next Deploy failure 17
+# seconds later filed a twin that got the same diagnosis written a second time
+# (genesis issue #138). An open match wins; otherwise the most recently closed
+# match inside the window is reopened. Outside the window a new failure is a new
+# incident and gets a fresh issue. `fromdateiso8601` and `now` are both UTC
+# epoch seconds, so there's no `date` flag to get wrong between GNU and BSD.
+match="$(gh issue list --state all --limit 100 --label "$CLASS_LABEL" \
+        --json number,body,state,closedAt \
+    | jq -r --arg m "$marker" --argjson h "$REOPEN_HOURS" '
+        [.[] | select((.body // "") | contains($m))] as $mine
+        | ([$mine[] | select(.state == "OPEN")] | first | if . then "open \(.number)" else empty end)
+          // ([$mine[] | select(.state == "CLOSED" and .closedAt != null
+                and (.closedAt | fromdateiso8601) >= (now - $h * 3600))]
+              | sort_by(.closedAt) | last | if . then "closed \(.number)" else empty end)
+          // empty' \
     || true)"
+match_state="${match%% *}"
+existing="${match#* }"
 
-if [ -n "$existing" ]; then
+# A reopen that fails (a token without the right to reopen, an issue a person
+# locked) falls through to filing a new issue, for the same reason the lookup
+# above fails open: a twin is noise, a comment on a closed issue nobody watches
+# is silence.
+if [ "$match_state" = "closed" ] && ! gh issue reopen "$existing" >/dev/null 2>&1; then
+    match_state=""
+fi
+
+if [ "$match_state" = "open" ] || [ "$match_state" = "closed" ]; then
     gh issue comment "$existing" --body "$body"
 else
     gh issue create \

@@ -424,3 +424,21 @@ class TestFailuresAreTriagedNotHeroicallyFixed:
             "the orchestrator is pointed at a summary that doesn't report red "
             "pull requests, which is the only report local mode gets"
         )
+
+
+def test_an_escalation_closes_on_a_passing_run_not_on_a_hand_off(orchestrator: str) -> None:
+    """Genesis issue #138. The seeded rule said to close an `automation:failure`
+    issue once its work was "re-filed as a task", and on sagrin/sweatless the
+    orchestrator did exactly that while the cause was live, so the next failure
+    filed a twin. The mechanism is the passing run: that's the only evidence the
+    cause is gone, and `escalate.sh` dedups by keeping the issue findable."""
+    bullet = _bullet(orchestrator, "automation:failure` was filed")
+    assert "re-filed as a task" not in bullet, (
+        "the rule still lets an escalation close while its cause is live"
+    )
+    assert re.search(r"run of that workflow passes", bullet), (
+        "nothing ties closing an escalation to a passing run"
+    )
+    assert re.search(r"leave this one open", bullet), (
+        "nothing tells the agent to keep an escalation open when its cause moves"
+    )
