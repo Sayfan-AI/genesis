@@ -83,8 +83,17 @@ fi
 
 case "$1 $2" in
   "issue view")
-    # `claim` reads the label back through this path.
-    emit "${GH_VIEW_JSON-'{"labels":[{"name":"in-progress"}]}'}" ;;
+    # `claim` reads the issue's state, then the label back, through this path.
+    # The state read is keyed by issue number out of GH_STATES_JSON, so a test can
+    # close one candidate and leave the rest open; an issue it doesn't name is
+    # OPEN, which is what every claim test before the state check assumed.
+    case " $* " in
+      *" --json state "*)
+        states="${GH_STATES_JSON:-null}"
+        st="$(printf '%s' "$states" | jq -r --arg n "$3" '.[$n] // "OPEN"')"
+        emit "{\\"state\\":\\"$st\\"}" ;;
+      *) emit "${GH_VIEW_JSON-'{"labels":[{"name":"in-progress"}]}'}" ;;
+    esac ;;
   "issue list")
     # `unselectable-work` is the one caller that reads BOTH states in a single
     # run - open issues to judge, closed ones for the completion gates - so the
@@ -364,6 +373,22 @@ class TestClaimVerifies:
         assert proc.returncode == 1
         assert calls == []
 
+    @pytest.mark.parametrize("state", ["CLOSED", ""])
+    def test_refuses_an_issue_that_is_not_open(self, run, state: str) -> None:
+        """sweatless issue #92: an issue closed seconds earlier got `in-progress`.
+
+        Exit 4, not 1, so `next` can tell "closed under me" from a failure, and no
+        label write at all, so the closed issue isn't left looking worked.
+        """
+        proc, calls = run(
+            "claim", "--id", "42", GH_STATES_JSON=json.dumps({"42": state}),
+            GH_VIEW_JSON=LABEL_STUCK,
+        )
+        assert proc.returncode == 4, proc.stderr
+        assert "not open" in proc.stderr
+        assert not any("--add-label" in c for c in calls)
+        assert not any(c.startswith("issue comment") for c in calls)
+
 
 class TestNextSelects:
     """Selection is a query, not a judgment, and picking is the same call as marking."""
@@ -415,6 +440,51 @@ class TestNextSelects:
         """1 and 3 must stay distinct, or a typo looks like an empty milestone."""
         proc, _ = run("next")
         assert proc.returncode == 1
+
+    def test_skips_a_candidate_closed_since_the_index_last_saw_it(self, run) -> None:
+        """The listing lags a close; the claim reads the issue and sees it.
+
+        40 is the oldest and the listing still calls it open, which is exactly
+        what the search index returned on sweatless issue #92. `next` must walk
+        past it to 50, and must never label 40.
+        """
+        listing = (
+            '[{"number":50,"createdAt":"2026-08-02T00:00:00Z","labels":[]},'
+            '{"number":40,"createdAt":"2026-08-01T00:00:00Z","labels":[]}]'
+        )
+        proc, calls = run(
+            "next", "--milestone", "6", GH_LIST_JSON=listing,
+            GH_STATES_JSON='{"40":"CLOSED"}', GH_VIEW_JSON=LABEL_STUCK,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == "50"
+        assert "issue edit 40 --add-label in-progress" not in calls
+        assert "issue edit 50 --add-label in-progress" in calls
+
+    def test_exits_3_when_every_listed_candidate_has_closed(self, run) -> None:
+        """Nothing left to work is exit 3, whether the list was empty or stale."""
+        listing = '[{"number":40,"createdAt":"2026-08-01T00:00:00Z","labels":[]}]'
+        proc, calls = run(
+            "next", "--milestone", "6", GH_LIST_JSON=listing,
+            GH_STATES_JSON='{"40":"CLOSED"}',
+        )
+        assert proc.returncode == 3
+        assert proc.stdout.strip() == ""
+        assert not any("--add-label" in c for c in calls)
+
+    def test_a_real_claim_failure_stops_the_walk(self, run) -> None:
+        """Only "not open" moves on. Any other failure is an error, and trying the
+        next candidate after a failed write would spray partial claims."""
+        listing = (
+            '[{"number":40,"createdAt":"2026-08-01T00:00:00Z","labels":[]},'
+            '{"number":50,"createdAt":"2026-08-02T00:00:00Z","labels":[]}]'
+        )
+        proc, calls = run(
+            "next", "--milestone", "6", GH_LIST_JSON=listing, GH_EDIT_FAILS="1"
+        )
+        assert proc.returncode == 1
+        assert proc.stdout.strip() == ""
+        assert not any(c.startswith("issue edit 50") for c in calls)
 
     def test_claim_failure_does_not_report_a_pick(self, run) -> None:
         """If the claim can't be verified, `next` must not hand back a number that
