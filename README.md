@@ -177,6 +177,32 @@ Auth uses the user's existing `gh` CLI (`gh auth token`) and `ANTHROPIC_API_KEY`
 
 If `genesis serve` exits non-gracefully, GHA workflows stay disabled. Recover with `genesis workflows enable` or by re-running `genesis serve`.
 
+### Fleet Supervision and Stall Watchdog (macOS `launchd`)
+
+When running several dev systems locally, pin a dedicated detached-HEAD runtime clone with `scripts/update-plane.sh` (`~/git/genesis-plane`, checked out at `--detach origin/main` so active agent checkouts never mutate the running control-plane code), list your repos in `~/.config/genesis/fleet.toml`, and let `launchd` supervise them:
+
+```toml
+[runtime]
+plane_dir = "~/git/genesis-plane"
+watch_interval = 180
+
+[[repos]]
+name = "my-project"
+path = "~/git/my-project"
+enabled = true
+```
+
+```bash
+genesis fleet sync             # Install/update LaunchAgents for enabled repos + genesis watch
+genesis fleet status           # Show PID, state, engine, spend, and last activity across repos
+genesis fleet resume my-project # Clear .genesis/.stopped (e.g. after a run-budget stop) and start
+genesis fleet restart all      # Restart all enabled planes (e.g. after scripts/update-plane.sh)
+genesis fleet stop my-project  # Gracefully stop a plane and keep launchd from respawning it
+genesis watch                  # Run one board-vs-execution stall check across the fleet
+```
+
+`genesis serve` writes `.genesis/.plane-state.json` on lifecycle transitions and `.genesis/.stopped` only on non-restartable stops (`run_budget`, `gh_auth_401`, `missing_binary`, or `genesis fleet stop`), so `launchd` automatically restarts crashed or rebooted planes without respawning budget-stopped ones. `genesis watch` cross-checks `.plane-state.json` against each repo's GitHub issues, pull requests, and Actions runs to auto-release stranded `in-progress` claims, nudge idle planes via `.genesis/.nudge`, and send one consolidated alert when any repo needs attention.
+
 ## Project Structure
 
 ```
