@@ -22,6 +22,7 @@ Three properties are worth the execution cost:
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 import subprocess
 from pathlib import Path
 
@@ -42,11 +43,13 @@ FAKE_GH = """#!/bin/sh
 echo "$1 $2 $3" >> "$GH_CALLS"
 
 JQ_EXPR=""
+STATE_ARG="open"
 prev=""
 for a in "$@"; do
   [ "$prev" = "--jq" ] && JQ_EXPR="$a"
   [ "$prev" = "--body" ] && printf '%s' "$a" > "$GH_BODY"
   [ "$prev" = "--label" ] && echo "$a" >> "$GH_LABELS"
+  [ "$prev" = "--state" ] && STATE_ARG="$a"
   prev="$a"
 done
 
@@ -73,11 +76,21 @@ case "$1 $2" in
     exit 0 ;;
   "issue list")
     [ -n "${GH_LIST_FAILS-}" ] && exit 1
-    emit "${GH_LIST_JSON-[]}" ;;
+    # Real gh filters on --state server-side, so a lookup that asks only for
+    # open issues never sees a closed fixture.
+    listing="${GH_LIST_JSON-[]}"
+    if [ "$STATE_ARG" != "all" ]; then
+      listing="$(printf '%s' "$listing" | jq -c --arg s "$STATE_ARG" \
+        '[.[] | select((.state // "OPEN") == ($s | ascii_upcase))]')"
+    fi
+    emit "$listing" ;;
   "issue create")
     echo "https://github.com/o/r/issues/9" ;;
   "issue comment")
     echo "https://github.com/o/r/issues/9#issuecomment-1" ;;
+  "issue reopen")
+    [ -n "${GH_REOPEN_FAILS-}" ] && exit 1
+    exit 0 ;;
 esac
 exit 0
 """
@@ -207,7 +220,7 @@ class TestDedupIsPerWorkflow:
     human has to untangle and can only close for one of them."""
 
     def test_a_repeat_failure_comments_instead_of_filing_a_twin(self, run) -> None:
-        existing = json.dumps([{"number": 42, "body": f"earlier failure\n{MARKER}"}])
+        existing = json.dumps([{"number": 42, "state": "OPEN", "body": f"earlier failure\n{MARKER}"}])
         proc, calls, body, _ = run(GH_LIST_JSON=existing)
         assert proc.returncode == 0, proc.stderr
         assert "issue comment 42" in calls
@@ -218,7 +231,7 @@ class TestDedupIsPerWorkflow:
         """The marker is what makes this per-workflow. Matching on the label
         alone reads as working right up until two workflows fail together."""
         other = json.dumps(
-            [{"number": 7, "body": "<!-- genesis-failure-wf: Genesis Evolver -->"}]
+            [{"number": 7, "state": "OPEN", "body": "<!-- genesis-failure-wf: Genesis Evolver -->"}]
         )
         proc, calls, _, _ = run(GH_LIST_JSON=other)
         assert proc.returncode == 0, proc.stderr
@@ -231,8 +244,74 @@ class TestDedupIsPerWorkflow:
         _, _, first_body, _ = run()
         marker_line = [ln for ln in first_body.splitlines() if ln.startswith("<!--")]
         assert marker_line, f"no dedup marker in the body: {first_body}"
-        _, calls, _, _ = run(GH_LIST_JSON=json.dumps([{"number": 5, "body": marker_line[0]}]))
+        _, calls, _, _ = run(GH_LIST_JSON=json.dumps([{"number": 5, "state": "OPEN", "body": marker_line[0]}]))
         assert "issue comment 5" in calls
+
+
+def _ago(hours: float) -> str:
+    when = datetime.now(timezone.utc) - timedelta(hours=hours)
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _closed(number: int, hours_ago: float, marker: str = MARKER) -> dict:
+    return {"number": number, "state": "CLOSED", "closedAt": _ago(hours_ago), "body": marker}
+
+
+class TestAnEarlyCloseDoesNotFileATwin:
+    """Dedup against open issues holds only while the issue stays open, and the
+    orchestrator closes them. On sagrin/sweatless one was closed as "tracked in
+    issue #31" while its cause was live, and the next Deploy failure 17 seconds
+    later filed a twin (genesis issue #138)."""
+
+    def test_a_recently_closed_escalation_is_reopened_and_commented(self, run) -> None:
+        proc, calls, body, _ = run(GH_LIST_JSON=json.dumps([_closed(34, 0.01)]))
+        assert proc.returncode == 0, proc.stderr
+        assert "issue reopen 34" in calls
+        assert "issue comment 34" in calls
+        assert calls.index("issue reopen 34") < calls.index("issue comment 34")
+        assert not any(c.startswith("issue create") for c in calls)
+
+    def test_an_escalation_closed_outside_the_window_is_a_new_incident(self, run) -> None:
+        proc, calls, _, _ = run(GH_LIST_JSON=json.dumps([_closed(34, 25)]))
+        assert proc.returncode == 0, proc.stderr
+        assert "issue create --title" in calls
+        assert not any(c.startswith("issue reopen") for c in calls)
+
+    def test_the_window_is_configurable(self, run) -> None:
+        _, calls, _, _ = run(
+            GH_LIST_JSON=json.dumps([_closed(34, 25)]),
+            GENESIS_ESCALATION_REOPEN_HOURS="48",
+        )
+        assert "issue reopen 34" in calls
+
+    def test_an_open_match_beats_a_closed_one(self, run) -> None:
+        listing = [_closed(34, 0.01), {"number": 35, "state": "OPEN", "body": MARKER}]
+        _, calls, _, _ = run(GH_LIST_JSON=json.dumps(listing))
+        assert "issue comment 35" in calls
+        assert not any(c.startswith("issue reopen") for c in calls)
+
+    def test_the_most_recently_closed_match_is_the_one_reopened(self, run) -> None:
+        listing = [_closed(30, 5), _closed(34, 0.5), _closed(32, 2)]
+        _, calls, _, _ = run(GH_LIST_JSON=json.dumps(listing))
+        assert "issue reopen 34" in calls
+
+    def test_another_workflows_closed_escalation_is_not_reopened(self, run) -> None:
+        other = _closed(7, 0.01, "<!-- genesis-failure-wf: Genesis Evolver -->")
+        _, calls, _, _ = run(GH_LIST_JSON=json.dumps([other]))
+        assert "issue create --title" in calls
+        assert not any(c.startswith("issue reopen") for c in calls)
+
+    def test_a_failed_reopen_files_a_new_issue_rather_than_commenting_on_a_closed_one(
+        self, run
+    ) -> None:
+        """A comment on a closed issue nobody watches is silence, and this
+        script fails toward telling someone."""
+        proc, calls, _, _ = run(
+            GH_LIST_JSON=json.dumps([_closed(34, 0.01)]), GH_REOPEN_FAILS="1"
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "issue create --title" in calls
+        assert not any(c.startswith("issue comment") for c in calls)
 
 
 class TestItSaysWhatMayAlreadyHaveLanded:
