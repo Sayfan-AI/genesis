@@ -85,10 +85,17 @@ for i in issues:
 # authored by the human and read as unanswered until something replies. The
 # closed branch is unaffected — it requires a bot closer.
 #
-# The script's own claim and release notes are the one part of that it can fix,
-# because it wrote them and marked them: a comment carrying a `genesis-claim` or
-# `genesis-release` marker is never a person's, whoever's token posted it.
-# genesis-dashboard issue #16 was a claim note reported as an unanswered human.
+# Script-authored comments are the one part of that it can fix, because the
+# scripts mark them: a comment carrying a `<!-- genesis-<name>` marker is never a
+# person's, whoever's token posted it. genesis-dashboard issue #16 was a claim
+# note reported as an unanswered human.
+#
+# The convention is the prefix, not a list of names. A script that posts comments
+# marks them `<!-- genesis-<name> ... -->` and is covered with no change here.
+# The list this replaced (claim, release) missed escalate.sh's own
+# `genesis-failure-wf` marker, and sweatless issue #88 was a project's gate-nudge
+# script whose reminder, posted on the operator's credential, read as a human
+# answering and woke a session (genesis issue #144).
 #
 # Prints nothing when nothing is waiting. If the API can't be read it says so
 # instead of printing nothing, because silence here would read as all-clear.
@@ -126,9 +133,10 @@ def is_bot(actor):
     return actor.get('type') == 'Bot' or str(actor.get('login', '')).endswith('[bot]')
 
 
-# Bodies this script writes itself. Matched on the marker, not the prose around
-# it, so rewording a claim note can't reopen the false positive.
-SCRIPT_NOTE = re.compile(r'<!-- genesis-(claim|release)[ -]')
+# Bodies a script wrote. Matched on the marker, not the prose around it, so
+# rewording a note can't reopen the false positive, and on the `genesis-` prefix
+# rather than a list of names, so a new comment-posting script can't be forgotten.
+SCRIPT_NOTE = re.compile(r'<!-- genesis-[a-z][a-z0-9-]*[ :-]')
 
 
 def is_script_note(comment):

@@ -636,6 +636,10 @@ class TestUnansweredComments:
         [
             "Claimed by session `serve-1`. <!-- genesis-claim session=serve-1 -->",
             "Claim released: done. <!-- genesis-release -->",
+            # escalate.sh's marker, which the old claim|release list missed.
+            "Run failed. <!-- genesis-failure-wf: genesis-orchestrator -->",
+            # A project's own script, unknown to issues.sh (genesis issue #144).
+            "Reminder: this gate is still open. <!-- genesis-gate-nudge issue=73 -->",
         ],
     )
     def test_the_scripts_own_notes_are_not_a_human(self, unanswered, body: str) -> None:
@@ -652,6 +656,23 @@ class TestUnansweredComments:
         """Only the marker form counts. A person quoting the word isn't a note."""
         out = unanswered(
             comments=[_comment(7, body="why is genesis-claim on this?", minutes_ago=90)],
+            threads=[_thread(7)],
+        )
+        assert "#7" in out
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "<!-- genesis -->",
+            "<!-- genesis- -->",
+            "see <!-- not-genesis-claim -->",
+            "<!--genesis-claim -->",
+        ],
+    )
+    def test_a_near_miss_marker_is_still_a_human(self, unanswered, body: str) -> None:
+        """The prefix widens to any named marker, not to anything mentioning genesis."""
+        out = unanswered(
+            comments=[_comment(7, body=body, minutes_ago=90)],
             threads=[_thread(7)],
         )
         assert "#7" in out
