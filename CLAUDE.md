@@ -212,7 +212,13 @@ gh api repos/Sayfan-AI/genesis/rules/branches/main \
 
 The suite must stay hermetic: no network, no ambient config. `tests/conftest.py` sets
 `GIT_AUTHOR_*`/`GIT_COMMITTER_*` because the scaffolding tests end in a real `git
-commit`, which aborts on a runner with no global identity. If a new test needs
+commit`, which aborts on a runner with no global identity. It also clears every
+engine's `session_env` variable, because the evolver runs the suite from inside a
+`genesis serve` session that exports them, and a test reading `os.environ` was
+red there while green on CI (issue #166). Ambient state cuts both ways: a runner
+lacks what a developer has, and a served session has what a runner lacks.
+`tests/unit/test_hermetic_env.py` re-runs a test with those variables set, so
+CI sees the served case too. If a new test needs
 credentials or a live service, it does not belong in this suite.
 
 ## What a Scaffolded `settings.json` Can and Can't Grant
