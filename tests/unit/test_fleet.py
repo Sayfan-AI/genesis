@@ -114,6 +114,77 @@ def test_supervised_mode_honors_stopped_sentinel_without_touching_workflows(
     assert plane_state.read_stopped(tmp_path) is not None
 
 
+def _hold_lock_as_another_plane() -> str:
+    """Write a lock owned by a live pid. This process is alive by construction,
+    and `acquire_lock` only probes the pid with signal 0."""
+    server.LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    holder = str(os.getpid())
+    server.LOCK_PATH.write_text(holder)
+    return holder
+
+
+def test_supervised_plane_waits_on_a_held_lock_and_takes_over_when_it_frees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #188: exiting on a held lock under launchd's KeepAlive was a respawn
+    every 30 seconds. A supervised plane waits instead, and takes over."""
+    _hold_lock_as_another_plane()
+    plane = LocalControlPlane(repo="sagrin/sweatless", supervised=True)
+    sleeps: list[float] = []
+
+    def holder_exits_on_second_check(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            server.LOCK_PATH.unlink()
+
+    monkeypatch.setattr(plane, "_interruptible_sleep", holder_exits_on_second_check)
+    assert plane._wait_for_lock() is None
+    assert plane.lock_acquired is True
+    assert sleeps == [server.LOCK_WAIT_INTERVAL] * 2
+    out = capsys.readouterr().out
+    assert out.count("holds the lock") == 1, "the wait should log once, not every check"
+    assert "taking over" in out
+
+
+def test_supervised_plane_on_a_held_lock_exits_cleanly_when_marked_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    holder = _hold_lock_as_another_plane()
+    disabled_called = False
+
+    def boom(**kwargs):
+        nonlocal disabled_called
+        disabled_called = True
+
+    monkeypatch.setattr(server, "disable_workflows", boom)
+    plane = LocalControlPlane(repo="sagrin/sweatless", supervised=True)
+    monkeypatch.setattr(
+        plane, "_interruptible_sleep", lambda _s: plane_state.write_stopped("manual_stop", base_dir=tmp_path)
+    )
+
+    # Exit 0, not 1: under KeepAlive the exit code doesn't stop a respawn, the
+    # sentinel does, and launchd now holds off on it.
+    assert plane.serve() == 0
+    assert disabled_called is False
+    assert plane.lock_acquired is False
+    assert server.LOCK_PATH.read_text() == holder, "the waiter touched the other plane's lock"
+
+
+def test_supervised_plane_waiting_on_a_lock_stops_on_a_signal_without_releasing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    holder = _hold_lock_as_another_plane()
+    plane = LocalControlPlane(repo="sagrin/sweatless", supervised=True)
+
+    def signalled(_seconds: float) -> None:
+        plane.shutdown = True
+
+    monkeypatch.setattr(plane, "_interruptible_sleep", signalled)
+    assert plane._wait_for_lock() == 0
+    assert plane.lock_acquired is False
+    assert server.LOCK_PATH.read_text() == holder
+
+
 def test_interactive_start_clears_previous_stopped_sentinel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
