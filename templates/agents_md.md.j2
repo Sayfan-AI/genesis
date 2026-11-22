@@ -208,6 +208,13 @@ on `SessionStart` in `.claude/settings.json`, which the harness fires under GitH
 Actions and under `serve` alike, and `serve` additionally invokes it directly when
 that declaration is missing. Nothing to remember; just fill the file in.
 
+It's seeded with one check, `stranded-work.sh`. A session can end on any turn,
+including the one between its commit and its push, and the commit then sits on a
+local branch nothing else can see. When a session starts with a `STRANDED WORK`
+line, push that branch and open its pull request, or say on an issue that the
+work is abandoned. The prevention half is yours: push and open the pull request
+in the same step as the commit, never as a later one.
+
 Keep it idempotent, fast, and non-fatal — it's on the critical path of every
 session start, and a net that can stop the loop it protects is worse than the gap
 it fills. Compose several checks inside this one script rather than asking for

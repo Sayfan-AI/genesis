@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Deterministic checks that must run BEFORE the agent gets its first turn.
 #
-# Seeded empty on purpose. What belongs here is specific to what this dev system
-# has learned about itself, and genesis can't guess it. What genesis can do is
-# make sure there's a seam that fires in every execution mode, because that turned
-# out to be the hard part.
+# Seeded with one check, stranded-work.sh, which every local-mode dev system
+# needs (genesis issue #156). The rest of what belongs here is specific to what
+# this dev system has learned about itself, and genesis can't guess it. What
+# genesis can do is make sure there's a seam that fires in every execution mode,
+# because that turned out to be the hard part.
 #
 # WHY THIS FILE EXISTS. A dev system is taught to turn a check that needs no
 # judgement into a script and wire it ahead of the agent step in workflow YAML.
@@ -34,7 +35,11 @@
 # is the shape that produced this issue in the first place.
 set -uo pipefail
 
-# Nothing yet. Add checks below, e.g.:
+# Local branches with commits that never reached a pull request. A session can
+# end between its commit and its push, and nothing else would ever notice.
+bash .genesis/scripts/stranded-work.sh || true
+
+# Add this dev system's own checks below, e.g.:
 #
 #   bash .genesis/scripts/nudge-gates.sh || true
 #   bash .genesis/scripts/issues.sh unselectable-work
