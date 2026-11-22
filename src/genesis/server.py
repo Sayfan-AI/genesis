@@ -70,6 +70,11 @@ from genesis.workflows import (
 )
 
 LOCK_PATH = Path(".genesis/.orchestrator.lock")
+# How often a supervised plane re-checks a lock another plane holds (issue #188).
+# Short enough that takeover after the holder exits is prompt, and far cheaper
+# than the launchd respawn it replaces: a sleep, not a login shell and a Python
+# startup.
+LOCK_WAIT_INTERVAL = 15.0
 ETAG_PATH = Path(".genesis/.poll-etag")
 HIGHWATER_PATH = Path(".genesis/.poll-highwater")
 
@@ -694,6 +699,40 @@ class LocalControlPlane:
         if self.started_at is None:
             self.started_at = time.time()
         return True
+
+    def _wait_for_lock(self) -> int | None:
+        """Wait for another plane to release the lock; None once it's ours.
+
+        Only a supervised plane waits (issue #188). Its plist keeps it alive
+        whatever the exit code, so exiting on a held lock - the unsupervised
+        behaviour - became a launchd respawn every `ThrottleInterval` for as long
+        as a hand-started plane lived: 780 attempts in seven hours on genesis's
+        own repo, and most of its log. One long-lived waiter is what launchd
+        expects, and it takes over as soon as the holder goes.
+
+        Returns an exit code when the wait ends without the lock: 0 on a
+        `.genesis/.stopped` sentinel (launchd then holds off, as it would for a
+        stopped plane) or on a signal. Neither path may call `release_lock`,
+        which unlinks the lock file the *other* plane still holds.
+        """
+        holder = (_read_text(LOCK_PATH) or "").strip()
+        log(
+            f"Another local control plane instance (pid {holder or '?'}) holds the lock; "
+            "supervised, so waiting for it to exit instead of letting launchd respawn."
+        )
+        while True:
+            self._interruptible_sleep(LOCK_WAIT_INTERVAL)
+            if self.shutdown:
+                log("Stopped waiting for the lock on a signal.")
+                return 0
+            stopped = read_stopped()
+            if stopped is not None:
+                reason = stopped.get("reason") or "manual_stop"
+                log(f"Plane is marked stopped ({reason}) while waiting for the lock; exiting.")
+                return 0
+            if self.acquire_lock():
+                log(f"Lock released by pid {holder or '?'}; taking over.")
+                return None
 
     def release_lock(self) -> None:
         if self.lock_acquired:
@@ -1983,8 +2022,12 @@ class LocalControlPlane:
         )
 
         if not self.acquire_lock():
-            log("Another local control plane instance is running. Exiting.")
-            return 1
+            if not self.supervised:
+                log("Another local control plane instance is running. Exiting.")
+                return 1
+            waited = self._wait_for_lock()
+            if waited is not None:
+                return waited
 
         if not self.supervised:
             clear_stopped()
