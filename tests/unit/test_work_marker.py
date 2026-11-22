@@ -118,3 +118,38 @@ def test_a_checkout_alone_is_not_progress(repo) -> None:
     _run("git", "checkout", "-q", "-b", "feature", cwd=repo)
 
     assert server.session_work_marker() == before
+
+
+def test_work_inside_a_nested_subagent_worktree_is_progress(repo) -> None:
+    """Subagents launched with `isolation: worktree` edit and commit inside
+    `.claude/worktrees/agent-*`, leaving the outer repo's HEAD and tracked diff
+    untouched (sweatless issue #103)."""
+    wt = repo / ".claude" / "worktrees" / "agent-1234"
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    _run("git", "worktree", "add", "-q", "-b", "worktree-agent-1234", str(wt), cwd=repo)
+
+    # Merely creating a clean worktree on a branch is setup, not progress.
+    before = server.session_work_marker()
+    (wt / "seed.txt").write_text("edited inside nested worktree\n")
+    after_dirty = server.session_work_marker()
+    assert after_dirty != before
+
+    _run("git", "add", "-A", cwd=wt)
+    _run("git", "commit", "-qm", "subagent commit", cwd=wt)
+    assert server.session_work_marker() != before
+
+
+def test_a_sibling_worktree_outside_repo_root_is_ignored(repo, tmp_path) -> None:
+    """`git worktree list` returns sibling checkouts too (such as `../repo-evolver`).
+    Treating a sibling worktree as session output would make another checkout's
+    dirty state look like progress here."""
+    sibling = tmp_path / "work-evolver"
+    _run("git", "worktree", "add", "-q", "-b", "evolver-branch", str(sibling), cwd=repo)
+    before = server.session_work_marker()
+
+    (sibling / "seed.txt").write_text("edited in sibling worktree\n")
+    _run("git", "add", "-A", cwd=sibling)
+    _run("git", "commit", "-qm", "sibling commit", cwd=sibling)
+
+    assert server.session_work_marker() == before
+

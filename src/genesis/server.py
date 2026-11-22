@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -50,6 +51,7 @@ from genesis.appauth import (
     mint_installation_token,
 )
 from genesis.automerge import _gh, is_bot_author, merge_ready
+from genesis.claims import unbacked_claimed_issues
 from genesis import triggers
 from genesis.engines import ClaudeEngine, Engine, SessionResult, SessionStarted, ToolCall, brief, get_engine
 from genesis.workflows import (
@@ -70,6 +72,7 @@ HIGHWATER_PATH = Path(".genesis/.poll-highwater")
 # Absent in a repo that doesn't use it, which every claim path treats as "there
 # is nothing here to release" rather than as an error.
 ISSUES_SCRIPT = Path(".genesis/scripts/issues.sh")
+ISSUES_CLAIM_CALL_RE = re.compile(r"issues\.sh\s+(?:claim|next)\b")
 
 # The dev repo's own pre-agent steps. A dev system is taught to turn a check that
 # needs no judgement into a script and wire it into workflow YAML *before* the
@@ -390,8 +393,13 @@ def _died_mid_task(subtype: str | None) -> bool:
     function's business - that is what the evidence ladder in _should_continue is
     for, and its zero-tool-calls rung already stops a session that fails instantly
     and repeatedly.
+
+    Exception: `error_background_tasks_stopped`. There the parent session already
+    ended its own turn and holds none of the killed detached worker's transcript,
+    so `--resume` would resume an empty parent while a fresh follow-up pass after
+    releasing the claim picks up the actual state on disk.
     """
-    return bool(subtype) and subtype != "success"
+    return bool(subtype) and subtype not in ("success", "error_background_tasks_stopped")
 
 
 def _env_bound(names: tuple[str, ...], default: float) -> float:
@@ -493,30 +501,66 @@ def session_work_marker() -> str:
     - Commits reachable from HEAD but from no remote-tracking ref, so an unpushed
       commit still counts if the reflog is off (`core.logAllRefUpdates=false`) and
       a pulled commit still doesn't, since it arrives already reachable from one.
-    - Tracked-file modifications, **excluding untracked files**. A stray temporary
-      file left by a tool is indistinguishable from a new source file by path alone,
-      so untracked-only churn is treated as ambiguous rather than as progress, and
-      the judge — which is handed `git status --porcelain` as evidence — decides.
+    - Tracked-file modifications, **excluding untracked files** in the primary
+      working tree. A stray temporary file left by a tool is indistinguishable
+      from a new source file by path alone, so untracked-only churn is treated as
+      ambiguous rather than as progress, and the judge — which is handed
+      `git status --porcelain` as evidence — decides.
+    - The same local commits and working-tree edits inside nested git worktrees
+      under this checkout (`.claude/worktrees/*`). Subagents dispatched with
+      worktree isolation write there without touching the primary tree, which
+      left worktree-only progress invisible to both the continuation ladder and
+      the post-session follow-up check (sweatless issue #103). Sibling checkouts
+      outside this repo root are excluded so another writer's worktree never
+      scores as this session's work.
 
     The residual gap is a session that commits *and* pushes within one attempt while
     the reflog is disabled: nothing local remains to point at. That reads as
     ambiguous and costs one judge call, which is the safe direction. Scoring it as
     progress is the direction that bills.
     """
-    return hashlib.sha256(
-        "\n".join(
-            [
-                _local_commit_reflog(),
-                _git(["rev-list", "HEAD", "--not", "--remotes"]),
-                _git(["status", "--porcelain", "--untracked-files=no"]),
-            ]
-        ).encode()
-    ).hexdigest()[:16]
+    parts = [
+        _local_commit_reflog(),
+        _git(["rev-list", "HEAD", "--not", "--remotes"]),
+        _git(["status", "--porcelain", "--untracked-files=no"]),
+    ]
+    primary_head = _git(["rev-parse", "HEAD"])
+    not_args = [primary_head, "--remotes"] if primary_head else ["--remotes"]
+    for wt in _nested_worktrees():
+        wt_reflog = _local_commit_reflog(wt)
+        wt_ahead = _git(["-C", str(wt), "rev-list", "HEAD", "--not", *not_args])
+        wt_status = _git(["-C", str(wt), "status", "--porcelain"])
+        if wt_reflog or wt_ahead or wt_status:
+            parts.extend([wt.name, wt_reflog, wt_ahead, wt_status])
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
-def _local_commit_reflog() -> str:
+def _nested_worktrees() -> list[Path]:
+    """Linked git worktrees located inside the current checkout's root."""
+    top = _git(["rev-parse", "--show-toplevel"])
+    if not top:
+        return []
+    try:
+        root = Path(top).resolve()
+    except OSError:
+        return []
+    nested: list[Path] = []
+    for line in _git(["worktree", "list", "--porcelain"]).splitlines():
+        if not line.startswith("worktree "):
+            continue
+        try:
+            candidate = Path(line.split(" ", 1)[1]).resolve()
+        except OSError:
+            continue
+        if candidate != root and candidate.is_relative_to(root):
+            nested.append(candidate)
+    return sorted(nested)
+
+
+def _local_commit_reflog(cwd: Path | None = None) -> str:
     """Reflog entries for commits created on this machine, newest first."""
-    entries = _git(["reflog", "show", "HEAD", "--format=%H %gs"])
+    prefix = ["-C", str(cwd)] if cwd is not None else []
+    entries = _git([*prefix, "reflog", "show", "HEAD", "--format=%H %gs"])
     return "\n".join(
         line
         for line in entries.splitlines()
@@ -591,12 +635,14 @@ class LocalControlPlane:
     # Set by the progress reader when it stops a session at the turn budget, for
     # engines whose CLI has no budget of its own (Engine.enforces_turn_budget).
     budget_stopped: bool = False
+    stderr_failure_subtype: str | None = None
     stream_turns: int = 0
     # Identity every session in the current chain claims work under, minted per
     # chain rather than per process: chains run one after another, and a token
     # shared between them would let a chain that died release the claims of an
     # earlier chain that finished cleanly and is legitimately still holding one.
     session_token: str = ""
+    chain_claimed_work: bool = False
     last_claim_sweep: float = 0.0
     pending_followup: bool = False
     # Why the pending pass was queued, in the order it happened. The pass is a
@@ -699,6 +745,8 @@ class LocalControlPlane:
                     elif isinstance(ev, ToolCall):
                         turns += 1
                         self.stream_turns = turns
+                        if ISSUES_CLAIM_CALL_RE.search(ev.summary):
+                            self.chain_claimed_work = True
                         log(f"  {turns:>3}. {ev.summary}")
                         # Kept for the judge: what it actually did, not what it
                         # says it did. Bounded so a long session can't grow this
@@ -709,6 +757,22 @@ class LocalControlPlane:
                     elif isinstance(ev, SessionResult):
                         self._record_result(ev, turns)
         except Exception:  # noqa: BLE001 - reporting must never break the run
+            return
+
+    def _stream_stderr(self, stream) -> None:
+        """Echo child stderr while watching for engine-specific fatal notices."""
+        if stream is None:
+            return
+        try:
+            for raw in stream:
+                if not isinstance(raw, str) or not raw:
+                    continue
+                sys.stderr.write(raw)
+                sys.stderr.flush()
+                failure = self.engine.stderr_failure(raw)
+                if failure and self.stderr_failure_subtype is None:
+                    self.stderr_failure_subtype = failure
+        except Exception:  # noqa: BLE001 - stderr forwarding must never break the run
             return
 
     def _enforce_turn_budget(self, turns: int) -> None:
@@ -741,6 +805,21 @@ class LocalControlPlane:
                     "error_max_turns",
                     is_error=True,
                     turns=self.stream_turns,
+                    session_id=self.last_session_id,
+                ),
+                self.stream_turns,
+            )
+        elif self.stderr_failure_subtype:
+            # Cost is 0.0 here on purpose: when a CLI flushes `success` on stdout
+            # and kills detached work later on stderr, the stdout event already
+            # charged its spend into `last_cost`.
+            log(f"  engine reported fatal stderr condition ({self.stderr_failure_subtype}) - overriding session outcome")
+            self._record_result(
+                SessionResult(
+                    self.stderr_failure_subtype,
+                    is_error=True,
+                    turns=self.stream_turns,
+                    cost=0.0,
                     session_id=self.last_session_id,
                 ),
                 self.stream_turns,
@@ -875,6 +954,8 @@ class LocalControlPlane:
         # than derived from the pid: two chains a second apart in one process
         # would otherwise collide, and the collision releases someone else's claim.
         self.session_token = f"serve-{uuid.uuid4().hex[:12]}"
+        chain_started_at = time.time()
+        self.chain_claimed_work = False
 
         task = prompt.splitlines()[0] if prompt else "the current unit of work"
         self.continuation_index = 0
@@ -1007,6 +1088,13 @@ class LocalControlPlane:
                 "so its work may be uncommitted in the tree"
             )
             log(f"  still incomplete ({self.engine.format_cost(spent)} spent) - will pick it up on the next tick")
+        elif self.last_result_subtype == "error_background_tasks_stopped":
+            stop_reason = "the session exited while background work was still running"
+            self._queue_followup(
+                "the previous session exited while background work was still running, "
+                "so its task is unfinished"
+            )
+            log(f"  background work was stopped unfinished ({self.engine.format_cost(spent)} spent) - will pick it up on the next tick")
 
         # Anything but a clean finish hands the claims back, which is deliberately
         # wider than the resume predicate above: a session killed outright — the
@@ -1023,6 +1111,20 @@ class LocalControlPlane:
         # measured.
         if finished_cleanly is None:
             finished_cleanly = self.last_result_subtype == "success"
+        if (
+            finished_cleanly
+            and not self.shutdown
+            and self.chain_claimed_work
+            and ISSUES_SCRIPT.is_file()
+            and self._chain_left_unbacked_claims(chain_started_at)
+        ):
+            finished_cleanly = False
+            stop_reason = "the session ended without opening a pull request or closing this issue"
+            self._queue_followup(
+                "the previous session claimed an issue and ended without opening a "
+                "pull request or closing it"
+            )
+            log("  claimed work left with no pull request - releasing claim and queueing a follow-up pass")
         if not finished_cleanly:
             self.release_claims(stop_reason)
 
@@ -1237,11 +1339,26 @@ class LocalControlPlane:
         # be matched back to the chain that made it - the `in-progress` label
         # carries no identity at all.
         env["GENESIS_SESSION"] = self.session_token
+        env.update(self.engine.session_env)
         return env
 
     # ----- claims -----
 
-    def _run_issues_script(self, args: list[str]) -> None:
+    def _chain_left_unbacked_claims(self, chain_started_at: float) -> list[int]:
+        """Open `in-progress` issues this chain claimed without leaving an open PR."""
+        try:
+            token = mint_installation_token(self.repo)
+            return unbacked_claimed_issues(
+                self.repo,
+                self.session_token,
+                chain_started_at,
+                token,
+            )
+        except Exception as e:  # noqa: BLE001 - claim checks must never kill the plane
+            log(f"  unbacked-claim check failed: {e}")
+            return []
+
+    def _run_issues_script(self, args: list[str]) -> list[str]:
         """Run one deterministic `issues.sh` subcommand, echoing what it did.
 
         As the App, through `_session_env`, because the App is who wrote the label
@@ -1253,7 +1370,7 @@ class LocalControlPlane:
         would trade a stuck label for a stopped dev system.
         """
         if not ISSUES_SCRIPT.is_file():
-            return
+            return []
         try:
             out = subprocess.run(
                 ["bash", str(ISSUES_SCRIPT), *args],
@@ -1265,12 +1382,13 @@ class LocalControlPlane:
             )
         except (OSError, subprocess.SubprocessError) as e:
             log(f"  {args[0]} failed to run: {e}")
-            return
-        for line in (out.stdout or "").splitlines():
-            if line.strip():
-                log(f"  {line.strip()}")
+            return []
+        lines = [line.strip() for line in (out.stdout or "").splitlines() if line.strip()]
+        for line in lines:
+            log(f"  {line}")
         if out.returncode != 0:
             log(f"  {args[0]} exited {out.returncode}: {(out.stderr or '').strip()[:200]}")
+        return lines
 
     def _resume_loaded_nothing(self) -> bool:
         """True when a resume came back as an instant, empty, "successful" session.
@@ -1402,9 +1520,17 @@ class LocalControlPlane:
         if not force and now - self.last_claim_sweep < CLAIM_SWEEP_INTERVAL_S:
             return
         self.last_claim_sweep = now
-        self._run_issues_script(
+        lines = self._run_issues_script(
             ["sweep-claims", "--older-than", f"{self._claim_sweep_hours():g}"]
         )
+        # Releasing a claim makes the issue selectable again, which emits only a
+        # bot event the poller drops. Queue a pass when the poll-loop sweep rescues
+        # one so it gets picked up on the next tick instead of waiting up to six
+        # hours for the scheduled trigger (sweatless issue #103). Startup (`force`)
+        # runs immediately ahead of the initial session anyway.
+        released = [line for line in lines if line.startswith("released #")]
+        if released and not force:
+            self._queue_followup(f"the stale-claim sweep {', '.join(released)}")
 
     def _spend(self, amount: float) -> str:
         """Format a running total, saying so when it is known to be incomplete.
@@ -1445,15 +1571,26 @@ class LocalControlPlane:
         not an open-ended spend.
         """
         self.last_judge_cost = 0.0
+        status_lines = [_git(["status", "--porcelain"])]
+        diff_lines = [_git(["diff", "--stat"])]
+        for wt in _nested_worktrees():
+            wt_status = _git(["-C", str(wt), "status", "--porcelain"])
+            wt_diff = _git(["-C", str(wt), "diff", "--stat"])
+            if wt_status:
+                status_lines.append(f"[{wt.name}]\n{wt_status}")
+            if wt_diff:
+                diff_lines.append(f"[{wt.name}]\n{wt_diff}")
+        status_text = "\n".join(s for s in status_lines if s) or "(none)"
+        diff_text = "\n".join(d for d in diff_lines if d) or "(none)"
         evidence = "\n".join(
             [
                 f"Task: {task}",
                 "",
                 "Uncommitted changes (git status --porcelain):",
-                _git(["status", "--porcelain"]) or "(none)",
+                status_text,
                 "",
                 "Diff stat (git diff --stat):",
-                _git(["diff", "--stat"]) or "(none)",
+                diff_text,
                 "",
                 "Recent commits:",
                 _git(["log", "--oneline", "-3"]) or "(none)",
@@ -1541,6 +1678,7 @@ class LocalControlPlane:
         self.last_tool_calls = 0
         self.last_cost = 0.0
         self.budget_stopped = False
+        self.stderr_failure_subtype = None
         self.stream_turns = 0
         # A fresh session must not inherit the previous one's id. Measured on the
         # Codex trial: Claude's result events carry the id and overwrite a stale
@@ -1562,6 +1700,7 @@ class LocalControlPlane:
                 # Some engines wait for stdin to close before starting at all.
                 stdin=subprocess.DEVNULL if self.engine.close_stdin else None,
                 stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
                 env=child_env,
@@ -1575,7 +1714,11 @@ class LocalControlPlane:
         reader = threading.Thread(
             target=self._stream_progress, args=(self.orch_proc.stdout,), daemon=True
         )
+        stderr_reader = threading.Thread(
+            target=self._stream_stderr, args=(self.orch_proc.stderr,), daemon=True
+        )
         reader.start()
+        stderr_reader.start()
 
         try:
             while True:
@@ -1597,6 +1740,7 @@ class LocalControlPlane:
             # looks like a clean finish. Bounded so a wedged reader can't hang the
             # plane — the progress feed is never allowed to block the run.
             reader.join(timeout=10)
+            stderr_reader.join(timeout=10)
             self.orch_proc = None
             self._settle_session()
             self._warn_if_the_session_did_nothing()

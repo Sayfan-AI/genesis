@@ -111,6 +111,8 @@ jobs:
           settings: |
             {
               "env": {
+                "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+                "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0",
                 "GENESIS_LOKI_URL": "${{ secrets.GENESIS_LOKI_URL }}",
                 "GENESIS_LOKI_USER": "${{ secrets.GENESIS_LOKI_USER }}",
                 "GENESIS_LOKI_TOKEN": "${{ secrets.GENESIS_LOKI_TOKEN }}"

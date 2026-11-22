@@ -146,6 +146,9 @@ class Engine:
     # Whether the session must be started with stdin closed. Some CLIs wait for
     # stdin to reach EOF before starting, even with the prompt as an argument.
     close_stdin: bool = False
+    # Environment variables every unattended session under this engine needs,
+    # merged into the child process's environment by `server._session_env`.
+    session_env: dict[str, str] = {}
     # Spending bounds in this engine's unit, and the env vars that override them.
     task_ceiling_default: float = 0.0
     task_ceiling_env: tuple[str, ...] = ()
@@ -155,6 +158,17 @@ class Engine:
     def settle_cost(self, session_id: str | None) -> float | None:
         """Cost of the process that just ended, for engines that can't report it
         in the stream. None means the stream's `SessionResult`s already carried it."""
+        return None
+
+    def stderr_failure(self, line: str) -> str | None:
+        """Abnormal `SessionResult.subtype` implied by one stderr line, or None.
+
+        Some CLIs flush a `success` result on stdout at the end of a turn and
+        only later report on stderr that background work they stayed alive for
+        was killed at an internal ceiling. Returning a subtype here lets the
+        plane override that premature `success` without putting CLI-specific
+        text matching in `server.py`.
+        """
         return None
 
 
@@ -207,11 +221,35 @@ class ClaudeStreamParser(StreamParser):
         return out
 
 
+# Environment variables every unattended Claude session runs with.
+#
+# Measured on sweatless issue #103 (Claude Code 2.1.330): the orchestrator
+# spawned its implementation worker via `Agent` without setting
+# `run_in_background`, and Claude Code launched it asynchronously by default.
+# The parent received `status: async_launched`, ended its own turn five seconds
+# later, and emitted `subtype: "success"` on stdout; `claude -p` then parked on
+# its internal 10-minute post-turn ceiling and killed the worker mid-task on
+# stderr (`Background tasks still running 10m after the last turn ...; stopping
+# them.`).
+#
+# - `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` removes `run_in_background` from
+#   `Agent` and `Bash` and forces local/worktree subagents to run synchronously
+#   in the foreground, so the parent turn can't finish ahead of its worker.
+# - `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` disables `claude -p`'s 10-minute
+#   post-turn kill ceiling as belt-and-suspenders if anything still detaches,
+#   leaving the control plane's own `--session-timeout` as the single bound.
+CLAUDE_UNATTENDED_ENV = {
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0",
+}
+
+
 class ClaudeEngine(Engine):
     name = "claude"
     binary = "claude"
     cost_unit = "$"
     settings_path = Path(".claude/settings.json")
+    session_env = CLAUDE_UNATTENDED_ENV
     # Cost bounds in dollars. The reasoning behind both numbers lives with their
     # constants in server.py (TASK_COST_CEILING_USD, RUN_COST_BUDGET_USD).
     task_ceiling_default = 50.0
@@ -305,6 +343,12 @@ class ClaudeEngine(Engine):
             "`claude -p` either could not authenticate (check ANTHROPIC_API_KEY) or, "
             "on a resume, failed to load the session it was given"
         )
+
+    def stderr_failure(self, line: str) -> str | None:
+        lower = line.lower()
+        if "background task" in lower and "stopping them" in lower:
+            return "error_background_tasks_stopped"
+        return None
 
 
 # ---------------------------------------------------------------------------
