@@ -1916,6 +1916,41 @@ class LocalControlPlane:
         if result.etag:
             self.etag = result.etag
 
+    def _reprime_stale_high_water(self, token: str) -> None:
+        """Move a persisted high-water mark that has fallen off the events page.
+
+        A plane stopped long enough for its mark to drop off the first page
+        would otherwise replay that whole page, because `filter_relevant_events`
+        stops only at the mark. That's arbitrary depth, not "what happened while
+        the plane was down": a restart after a 40-day stop replayed 42 human
+        events back to the oldest one on the page, one full session each, with
+        the merge sweep starved until the batch finished (issue #180).
+
+        Called only when the initial run is about to launch. That run assesses
+        the board, so anything older is its to notice, the rule the CI-failure
+        cursor follows (issue #107). A mark still on the page is left alone, so
+        a short restart still replays the events it missed.
+        """
+        if self.last_event_id is None:
+            return
+        try:
+            result = fetch_events(self.repo, etag=None, token=token)
+        except (urllib.error.HTTPError, *TRANSIENT_FETCH_ERRORS) as e:
+            log(f"Failed to check the high-water mark ({type(e).__name__}: {e}); keeping it")
+            return
+        if not result.events or any(e.get("id") == self.last_event_id for e in result.events):
+            return
+        stale = self.last_event_id
+        self.last_event_id = result.events[0].get("id")
+        if result.etag:
+            self.etag = result.etag
+        log(
+            f"High-water mark id={stale} is no longer on the events page; re-primed at "
+            f"id={self.last_event_id} instead of replaying the page. The initial run "
+            "assesses what happened while the plane was down."
+        )
+        self.save_state()
+
     def _prime_ci_failure_cursor_if_needed(self) -> None:
         """Start CI-failure triage from now rather than from the repo's history.
 
@@ -2035,6 +2070,8 @@ class LocalControlPlane:
         # skipping it - a person answering the gate while the plane was down is
         # replayed from the high-water mark, and that event is the real wake.
         if not self._gated("initial run", token):
+            # Only when the run launches: behind a gate, the replay is the wake.
+            self._reprime_stale_high_water(token)
             # If it fails because the engine is broken (rc=127), abort rather than
             # entering the poll loop with workflows off.
             rc = self.run_orchestrator(None)
