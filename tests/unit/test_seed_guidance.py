@@ -442,3 +442,66 @@ def test_an_escalation_closes_on_a_passing_run_not_on_a_hand_off(orchestrator: s
     assert re.search(r"leave this one open", bullet), (
         "nothing tells the agent to keep an escalation open when its cause moves"
     )
+
+
+@pytest.fixture(scope="module")
+def evolver() -> str:
+    return (TEMPLATES / "agents" / "evolver.md").read_text()
+
+
+class TestRecoveredFrictionBecomesASignal:
+    """Genesis issue #139. On sagrin/sweatless a session spent most of ten
+    minutes on a stale build and a missing `pnpm`, recovered, finished green, and
+    recorded it only in the PR body. Neither seed agent had a rule that kept it.
+
+    The mechanism is the label and the title prefix: `needs:evolver` is what
+    `issues.sh next` skips (so the orchestrator doesn't pick its own finding up
+    as work) and what the evolver collects, and `Friction:` is what tells the
+    evolver not to escalate a project-rooted trap upstream by default.
+    """
+
+    PREFIX = "`Friction:`"
+
+    def _rule(self, orchestrator: str) -> str:
+        return _bullet(_section(orchestrator, "Hard Rules (MUST follow)"), self.PREFIX)
+
+    def test_the_orchestrator_files_it_under_a_label_the_selector_skips(
+        self, orchestrator: str
+    ) -> None:
+        rule = self._rule(orchestrator)
+        assert "`needs:evolver`" in rule
+        assert "needs:evolver" in _labels_the_selector_skips(), (
+            "the friction issue would be handed back to the orchestrator as work"
+        )
+
+    def test_a_note_in_the_pr_body_does_not_count(self, orchestrator: str) -> None:
+        rule = self._rule(orchestrator)
+        assert re.search(r"PR body[^.]*doesn't count", rule), (
+            "the rule no longer says where the lesson got lost last time"
+        )
+        assert re.search(r"finished green", rule), (
+            "the rule has to cover the run that succeeded, which is the case "
+            "nothing else records"
+        )
+
+    def test_the_evolver_collects_friction_and_keys_on_the_same_prefix(
+        self, evolver: str
+    ) -> None:
+        signals = _section(evolver, "Review Cycle").split("2. **Classify")[0]
+        assert self.PREFIX in signals, (
+            "the orchestrator files Friction: issues the evolver never looks for"
+        )
+
+    def test_the_evolver_does_not_escalate_friction_by_default(self, evolver: str) -> None:
+        signals = _section(evolver, "Review Cycle").split("2. **Classify")[0]
+        generic = _bullet(signals, "pre-diagnosed")
+        assert self.PREFIX in generic, (
+            "the generic needs:evolver rule says escalate everything, so a "
+            "project-rooted friction issue would go upstream"
+        )
+        friction = [ln for ln in signals.splitlines() if ln.lstrip().startswith(f"- {self.PREFIX}")]
+        assert len(friction) == 1, "no signal bullet of its own for Friction: issues"
+        assert re.search(r"[Dd]on't escalate one by default", friction[0])
+        assert re.search(r"deterministically", friction[0]), (
+            "a reminder in AGENTS.md is what the session that hit the trap already had"
+        )
