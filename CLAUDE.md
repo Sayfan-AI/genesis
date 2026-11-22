@@ -298,6 +298,7 @@ went unchecked has drifted at least once:
 | `.github/workflows/` and `templates/workflows/` | `tests/e2e/test_workflows.py` |
 | `.gitignore` and `templates/gitignore` | `tests/e2e/test_gitignore.py` |
 | `.genesis/scripts/` guards and `templates/scripts/` | `tests/e2e/test_seeded_pairs.py` |
+| `.gitattributes` and `templates/gitattributes` | `tests/e2e/test_line_endings.py` |
 
 The last one is parameterized over `SEEDED_GUARDS` rather than written per guard,
 and it checks the list itself against what `templates/settings.json` declares - so
