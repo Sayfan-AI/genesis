@@ -821,7 +821,10 @@ finishing, so \`in-progress\` means work is under way right now. <!-- $CLAIM_MAR
         # age is the entire point, because age can't tell a dead session from a
         # slow one. `--id N` releases a single issue, for an agent or a human
         # handing work back deliberately.
-        ID="" SESSION="" REASON="the claiming session ended without finishing"
+        # The default reason states only what the script can observe. "Without
+        # finishing" asserted a failure: a session that landed part of an issue
+        # and left the rest on a gate read as one that gave up (genesis issue #136).
+        ID="" SESSION="" REASON="the claiming session ended without closing this issue"
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --id) ID="$2"; shift 2 ;;

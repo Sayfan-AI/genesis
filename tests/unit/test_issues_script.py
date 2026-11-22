@@ -1104,6 +1104,23 @@ class TestReleaseHandsClaimsBack:
         proc, _ = run("release", "--id", "40", GH_EDIT_FAILS="1")
         assert proc.returncode == 1
 
+    def test_the_default_reason_claims_only_what_it_can_see(self, run) -> None:
+        """The script can see the issue is still open, not whether the work
+        failed. "Without finishing" contradicted a session that had landed part
+        of the issue and left the rest on a gate (genesis issue #136)."""
+        _, calls = run("release", "--id", "40")
+        comment = next(c for c in calls if c.startswith("issue comment 40"))
+        assert "ended without closing this issue" in comment
+        assert "without finishing" not in comment
+
+    def test_the_orchestrator_releases_a_partial_delivery_itself(self) -> None:
+        """Only the session knows its pull request delivered part of the issue,
+        so it has to write the release note, and mark the rest `blocked`."""
+        text = " ".join((TEMPLATES / "agents/orchestrator.md").read_text().split())
+        assert "delivers only part of an issue" in text
+        assert "release the claim yourself with a `--reason`" in text
+        assert "add `blocked`" in text
+
 
 class TestSweepIsABackstop:
     """Age releases a claim only where nothing else can (#48).
