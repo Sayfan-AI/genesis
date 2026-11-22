@@ -223,6 +223,9 @@ def loop(plane, monkeypatch):
         # Open needs:human issues, which gate the startup run and the cron. None
         # by default, so the startup run launches and no scenario asks GitHub.
         monkeypatch.setattr(triggers, "open_human_gates", lambda *a, **k: list(gates or []))
+        # Nothing selectable, so a narrow gate skips like a stop gate (issue
+        # #143) and no scenario asks GitHub for the board.
+        monkeypatch.setattr(triggers, "selectable_work", lambda *a, **k: [])
 
         monkeypatch.setattr(
             server, "disable_workflows",

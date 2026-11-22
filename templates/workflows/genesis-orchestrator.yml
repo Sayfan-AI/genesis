@@ -75,6 +75,18 @@ jobs:
       # alone means a person must decide something and no amount of retrying
       # helps, while `automation:failure` means a run died and the next one may
       # not. Only the first is a reason to stay home.
+      #
+      # Not every gate is a reason either (issue #143). Onboarding and a
+      # "Milestone N plan" / "Milestone N complete" issue stop the loop, because
+      # the orchestrator's rules say wait behind them. Any other gate is narrow,
+      # a credential or a decision that blocks only the work depending on it, so
+      # it skips the run only when nothing on the active milestone is selectable
+      # by `issues.sh next`'s rules. The active milestone is the lowest one with
+      # no closed "Milestone N complete" issue. On sagrin/sweatless a secrets
+      # gate blocking two tasks held a ready bug fix idle with nothing reporting
+      # it. The plane's twin is `_gated` in genesis's `server.py`. If the
+      # selectable-work queries fail, the run goes ahead: one idle session beats
+      # a cron silenced by a gh hiccup.
       - name: Skip the run if a human gate is open
         id: gate
         env:
@@ -83,12 +95,40 @@ jobs:
           gates=$(gh issue list --label "needs:human" --state open --json number,title,labels \
             --jq '[.[] | select(([.labels[].name] | index("automation:failure")) == null)]')
           count=$(printf '%s' "$gates" | jq length)
-          if [ "${count:-0}" -gt 0 ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Skipping the LLM run: $count open needs:human issue(s) are waiting on a person."
-            printf '%s' "$gates" | jq -r '.[] | "  #\(.number) \(.title)"'
-          else
+          if [ "${count:-0}" -eq 0 ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          stops=$(printf '%s' "$gates" | jq '[.[] | select(
+            (([.labels[].name] | index("genesis:onboarding")) != null)
+            or (.title | test("^\\s*milestone\\s+[0-9]+\\s+(plan|complete)\\b"; "i")))]')
+          if [ "$(printf '%s' "$stops" | jq length)" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping the LLM run: an open gate stops the loop until a person acts."
+            printf '%s' "$stops" | jq -r '.[] | "  #\(.number) \(.title)"'
+            exit 0
+          fi
+          if ! closed=$(gh issue list --state closed --limit 200 --json title) \
+            || ! open=$(gh issue list --state open --limit 100 --json number,labels); then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Running: $count narrow needs:human issue(s) are open, and selectable work could not be read."
+            exit 0
+          fi
+          active=$(printf '%s' "$closed" | jq '[.[].title
+            | capture("^\\s*milestone\\s+(?<n>[0-9]+)\\s+complete\\b"; "i")? | .n | tonumber] as $done
+            | first(range(1; 100000) | select(. as $n | $done | index($n) | not))')
+          selectable=$(printf '%s' "$open" | jq --arg m "milestone:$active" '[.[]
+            | [.labels[].name] as $l
+            | select(($l | index($m)) != null)
+            | select(all("blocked", "in-progress", "needs:human", "needs:evolver"; . as $x | $l | index($x) | not))]
+            | length')
+          if [ "${selectable:-0}" -gt 0 ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Running: $count narrow needs:human issue(s) are open, but $selectable issue(s) on milestone $active are selectable."
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping the LLM run: $count open needs:human issue(s) are waiting on a person and nothing on milestone $active is selectable."
+            printf '%s' "$gates" | jq -r '.[] | "  #\(.number) \(.title)"'
           fi
 
       # The backstop for claims nobody released. `in-progress` is applied by

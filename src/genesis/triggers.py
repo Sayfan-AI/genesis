@@ -24,6 +24,7 @@ can be tested without waiting six hours.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -238,6 +239,91 @@ def open_human_gates(repo: str, token: str | None = None) -> list[dict] | None:
         i for i in issues
         if isinstance(i, dict)
         and "automation:failure" not in {l.get("name") for l in i.get("labels") or []}
+    ]
+
+
+# The gates a seeded orchestrator's own rules say to wait on with nothing else
+# to do: onboarding, and the plan and completion gates of a milestone. Any other
+# `needs:human` issue is narrow - a credential, a decision - and blocks only the
+# work that depends on it (issue #143).
+_STOP_GATE_TITLE = re.compile(r"^milestone\s+\d+\s+(plan|complete)\b", re.IGNORECASE)
+_SIGNED_OFF_TITLE = re.compile(r"^milestone\s+(\d+)\s+complete\b", re.IGNORECASE)
+# `issues.sh next`'s exclusions, which is what "selectable" has to mean here.
+_UNSELECTABLE = frozenset({"blocked", "in-progress", "needs:human", "needs:evolver"})
+
+
+def _label_names(issue: dict) -> set[str]:
+    return {str(l.get("name")) for l in issue.get("labels") or [] if isinstance(l, dict)}
+
+
+def stop_gates(gates: list[dict]) -> list[dict]:
+    """The gates in `gates` that stop the loop whatever else is open.
+
+    Onboarding (issue #1, labelled `genesis:onboarding`) and a "Milestone N
+    plan" or "Milestone N complete" issue. The orchestrator's hard rules say
+    "do nothing - wait" behind each, so a session launched past one could only
+    confirm it.
+    """
+    return [
+        g for g in gates
+        if "genesis:onboarding" in _label_names(g)
+        or _STOP_GATE_TITLE.match(str(g.get("title") or "").strip())
+    ]
+
+
+def selectable_work(repo: str, token: str | None = None) -> list[dict] | None:
+    """Open issues `issues.sh next` would hand out on the active milestone.
+
+    The active milestone is the lowest one without a closed "Milestone N
+    complete" issue, the sign-off the orchestrator's rules mandate. An issue
+    qualifies when it carries that `milestone:N` label and none of `next`'s
+    exclusions. Issue #143: a narrow `needs:human` gate used to skip every
+    scheduled run, and a ready bug fix on sagrin/sweatless sat idle behind an
+    unrelated secrets gate with nothing reporting it.
+
+    Returns None when either query fails; the caller launches on it, the same
+    fail-open direction as `open_human_gates`.
+    """
+    import os
+
+    env = dict(os.environ)
+    if token:
+        env["GH_TOKEN"] = token
+        env["GITHUB_TOKEN"] = token
+
+    def issues(state: str, limit: int) -> list[dict] | None:
+        try:
+            result = subprocess.run(
+                [
+                    "gh", "issue", "list", "--repo", repo, "--state", state,
+                    "--limit", str(limit), "--json", "number,title,labels,createdAt",
+                ],
+                capture_output=True, text=True, timeout=45, env=env, check=False,
+            )
+            if result.returncode != 0:
+                return None
+            data = json.loads(result.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        return [i for i in data if isinstance(i, dict)] if isinstance(data, list) else None
+
+    open_issues = issues("open", 100)
+    # Deeper than the open page: sign-offs are as old as the project.
+    closed_issues = issues("closed", 200)
+    if open_issues is None or closed_issues is None:
+        return None
+    signed_off = {
+        int(m.group(1))
+        for i in closed_issues
+        if (m := _SIGNED_OFF_TITLE.match(str(i.get("title") or "").strip()))
+    }
+    active = 1
+    while active in signed_off:
+        active += 1
+    return [
+        i for i in open_issues
+        if f"milestone:{active}" in _label_names(i)
+        and not (_label_names(i) & _UNSELECTABLE)
     ]
 
 

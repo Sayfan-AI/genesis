@@ -377,7 +377,7 @@ def test_a_gated_restart_waits_for_the_person_and_then_wakes(
     """
     script([{"tools": 2, "subtype": "success", "turns": 3, "cost": 0.2}] * 2)
 
-    run = loop([[], ["a-human"]], gates=[{"number": 25, "title": "Sign-off"}])
+    run = loop([[], ["a-human"]], gates=[{"number": 25, "title": "Milestone 2 complete"}])
 
     assert run["polls"] == 2
     assert sessions_run() == 1, (

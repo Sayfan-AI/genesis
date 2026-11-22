@@ -1340,12 +1340,33 @@ class LocalControlPlane:
         """Whether an open `needs:human` gate means `run` should be skipped.
 
         Shared by the cron and the startup run, the two launches that no event
-        asked for. Fails open: a `None` from the query means launch.
+        asked for. Onboarding and a milestone's plan or completion gate always
+        skip, because the orchestrator's rules say wait behind them. Any other
+        gate is narrow and skips only when nothing on the active milestone is
+        selectable (issue #143). Fails open: a `None` from either query means
+        launch.
         """
         gates = triggers.open_human_gates(self.repo, token)
         if not gates:
             return False
-        log(f"Skipping the {run}: {len(gates)} open needs:human issue(s) are waiting on a person.")
+        stops = triggers.stop_gates(gates)
+        if stops:
+            log(f"Skipping the {run}: {len(stops)} open needs:human gate(s) stop the loop until a person acts.")
+            for gate in stops:
+                log(f"  issue #{gate.get('number')} {gate.get('title', '')}")
+            return True
+        work = triggers.selectable_work(self.repo, token)
+        if work is None or work:
+            if work:
+                log(
+                    f"Not skipping the {run}: {len(gates)} needs:human issue(s) are open, "
+                    f"but {len(work)} issue(s) are still selectable."
+                )
+            return False
+        log(
+            f"Skipping the {run}: {len(gates)} open needs:human issue(s) are waiting on a "
+            "person and nothing else on the active milestone is selectable."
+        )
         for gate in gates:
             log(f"  issue #{gate.get('number')} {gate.get('title', '')}")
         return True
