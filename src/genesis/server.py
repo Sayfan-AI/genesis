@@ -54,6 +54,13 @@ from genesis.automerge import _gh, is_bot_author, merge_ready
 from genesis.claims import unbacked_claimed_issues
 from genesis import triggers
 from genesis.engines import ClaudeEngine, Engine, SessionResult, SessionStarted, ToolCall, brief, get_engine
+from genesis.plane_state import (
+    clear_stopped,
+    consume_nudge,
+    read_stopped,
+    write_plane_state,
+    write_stopped,
+)
 from genesis.workflows import (
     DISABLED_LIST_PATH,
     disable_workflows,
@@ -655,6 +662,14 @@ class LocalControlPlane:
     followup_chain: int = 0
     identity_logged: bool = False
     all_workflows: bool = False
+    supervised: bool = False
+    lock_acquired: bool = False
+    started_at: float | None = None
+    session_started_at: float | None = None
+    last_turn_at: float | None = None
+    last_poll_at: float | None = None
+    last_heartbeat_write: float = 0.0
+    stopped_reason: str | None = None
     shutdown: bool = False
     last_event_id: str | None = None
     etag: str | None = None
@@ -674,10 +689,50 @@ class LocalControlPlane:
                 log(f"Stale lock file (pid {existing!r}), removing")
                 LOCK_PATH.unlink(missing_ok=True)
         LOCK_PATH.write_text(str(os.getpid()))
+        self.lock_acquired = True
+        if self.started_at is None:
+            self.started_at = time.time()
         return True
 
     def release_lock(self) -> None:
+        if self.lock_acquired:
+            self._publish_state("stopped", alive=False)
+            self.lock_acquired = False
         LOCK_PATH.unlink(missing_ok=True)
+
+    def _publish_state(self, state: str, *, alive: bool = True) -> None:
+        if not self.lock_acquired:
+            return
+        child_pid = self.orch_proc.pid if (alive and self.orch_proc is not None) else None
+        write_plane_state(
+            repo=self.repo,
+            pid=os.getpid() if alive else None,
+            engine=self.engine.name,
+            agent=self.agent,
+            state=state,
+            started_at=self.started_at,
+            child_pid=child_pid,
+            session_token=self.session_token,
+            session_started_at=self.session_started_at if state == "running_session" else None,
+            last_turn_at=self.last_turn_at,
+            last_poll_at=self.last_poll_at,
+            turns=self.stream_turns if state == "running_session" else 0,
+            run_spent=self.run_spent,
+            run_budget=_run_cost_budget(self.engine),
+            cost_unit=self.engine.cost_unit,
+            pending_followup=self.pending_followup,
+            stopped_reason=self.stopped_reason,
+        )
+
+    def _mark_terminal_stop(self, reason: str, detail: str = "") -> None:
+        self.stopped_reason = reason
+        write_stopped(
+            reason,
+            detail=detail,
+            run_spent=self.run_spent,
+            run_budget=_run_cost_budget(self.engine),
+            cost_unit=self.engine.cost_unit,
+        )
 
     # ----- state persistence -----
 
@@ -745,6 +800,11 @@ class LocalControlPlane:
                     elif isinstance(ev, ToolCall):
                         turns += 1
                         self.stream_turns = turns
+                        now = time.time()
+                        self.last_turn_at = now
+                        if now - self.last_heartbeat_write >= 5.0:
+                            self.last_heartbeat_write = now
+                            self._publish_state("running_session")
                         if ISSUES_CLAIM_CALL_RE.search(ev.summary):
                             self.chain_claimed_work = True
                         log(f"  {turns:>3}. {ev.summary}")
@@ -929,6 +989,10 @@ class LocalControlPlane:
                     "run_spent_usd": round(self.run_spent, 4),
                     "budget_usd": budget,
                 },
+            )
+            self._mark_terminal_stop(
+                "run_budget",
+                f"{self._spend(self.run_spent)} >= {self.engine.format_cost(budget)}",
             )
             self.shutdown = True
             return 0
@@ -1132,6 +1196,7 @@ class LocalControlPlane:
         # names a finished chain would exempt that chain's claims from the
         # backstop it no longer has any business protecting.
         self.session_token = ""
+        self._publish_state("idle")
         return rc
 
     def prs_awaiting_checks(self) -> list[int]:
@@ -1709,6 +1774,12 @@ class LocalControlPlane:
             log(self.engine.missing_binary_message())
             return 127
 
+        now = time.time()
+        self.session_started_at = now
+        self.last_turn_at = now
+        self.last_heartbeat_write = now
+        self._publish_state("running_session")
+
         # A piped stdout MUST be drained or the child blocks once the pipe fills.
         # Daemon thread so a wedged reader can never hold up shutdown.
         reader = threading.Thread(
@@ -1742,6 +1813,7 @@ class LocalControlPlane:
             reader.join(timeout=10)
             stderr_reader.join(timeout=10)
             self.orch_proc = None
+            self.session_started_at = None
             self._settle_session()
             self._warn_if_the_session_did_nothing()
 
@@ -1841,6 +1913,13 @@ class LocalControlPlane:
         self.save_state()
 
     def serve(self) -> int:
+        if self.supervised:
+            stopped = read_stopped()
+            if stopped is not None:
+                reason = stopped.get("reason") or "manual_stop"
+                log(f"Plane is marked stopped ({reason}); run `genesis fleet resume` to clear.")
+                return 0
+
         log(f"Genesis local control plane starting (repo: {self.repo})")
         log(
             f"  poll_interval={self.poll_interval}s session_timeout={self.session_timeout}s"
@@ -1850,10 +1929,15 @@ class LocalControlPlane:
             log("Another local control plane instance is running. Exiting.")
             return 1
 
+        if not self.supervised:
+            clear_stopped()
+        self._publish_state("starting")
+
         # Verify the engine's binary is on PATH before disabling workflows.
         # Otherwise we'd leave GHA off with no working orchestrator running.
         if shutil.which(self.engine.binary) is None:
             log(self.engine.missing_binary_message())
+            self._mark_terminal_stop("missing_binary", self.engine.binary)
             self.release_lock()
             return 127
 
@@ -1908,6 +1992,7 @@ class LocalControlPlane:
             token = _gh_token()
         except subprocess.CalledProcessError:
             log("Failed to read gh auth token. Run `gh auth login` first.")
+            self._mark_terminal_stop("gh_auth_401", "gh auth token failed")
             self._reenable_workflows_safe()
             self.release_lock()
             return 1
@@ -1935,20 +2020,27 @@ class LocalControlPlane:
             self.save_state()
             if rc == 127:
                 log(f"Initial orchestrator run failed ({self.engine.binary} not callable). Aborting.")
+                self._mark_terminal_stop("missing_binary", self.engine.binary)
                 return self._shutdown(token_ok=True)
         if self.shutdown:
             return self._shutdown(token_ok=True)
 
+        self._publish_state("idle")
         log(f"Polling {self.repo} for events...")
         while not self.shutdown:
             self._interruptible_sleep(self.poll_interval)
             if self.shutdown:
                 break
+            nudge = consume_nudge()
+            if nudge:
+                log(f"External nudge: {nudge}")
+                self._queue_followup(nudge)
             try:
                 new_events = self.poll_once(token)
             except urllib.error.HTTPError as e:
                 if e.code == 401:
                     log("GitHub auth failed (401). Re-run `gh auth login`.")
+                    self._mark_terminal_stop("gh_auth_401", "HTTP 401")
                     break
                 log(f"GitHub API error: HTTP {e.code} {e.reason}")
                 continue
@@ -1956,6 +2048,8 @@ class LocalControlPlane:
             except TRANSIENT_FETCH_ERRORS as e:
                 log(f"Network error polling events: {type(e).__name__}: {e}")
                 continue
+            self.last_poll_at = time.time()
+            self._publish_state("idle")
 
             # genesis-merge.yml's job. A pull request going green is not an event
             # this poller can see, and the agent's own pull requests are bot-
@@ -2091,6 +2185,7 @@ def serve() -> int:
     session_timeout = int(os.environ.get("GENESIS_SESSION_TIMEOUT", "3600"))
     agent = os.environ.get("GENESIS_AGENT", DEFAULT_AGENT)
     all_workflows = os.environ.get("GENESIS_ALL_WORKFLOWS") == "1"
+    supervised = os.environ.get("GENESIS_SUPERVISED") == "1"
 
     try:
         engine = get_engine(configured_engine())
@@ -2123,6 +2218,7 @@ def serve() -> int:
         session_timeout=session_timeout,
         agent=agent,
         all_workflows=all_workflows,
+        supervised=supervised,
         engine=engine,
     )
     log(f"  engine: {engine.name}")

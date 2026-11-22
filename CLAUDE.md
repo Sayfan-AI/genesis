@@ -432,14 +432,17 @@ keep the loop from rewriting the code it's running on:
 | Directory | What it is | Who changes it |
 | --- | --- | --- |
 | `~/git/genesis-serve` | clone the served evolver works in | the evolver |
-| `~/git/genesis-plane` | pinned runtime every `genesis serve` on the machine runs from | `scripts/update-plane.sh`, deliberately |
+| `~/git/genesis-plane` | detached-HEAD (`origin/main`) runtime every `genesis serve` on the machine runs from | `scripts/update-plane.sh`, deliberately |
 | `~/git/genesis` | interactive checkout for a human | a human |
 
-Start it with `cd ~/git/genesis-serve && ~/git/genesis-plane/.venv/bin/genesis serve --agent .claude/agents/evolver.md`.
-Every trigger runs that agent. The scheduled and CI-failure triggers used to
-hardcode an orchestrator genesis doesn't have. Merged changes reach the plane only
-when someone runs `scripts/update-plane.sh` and restarts. That's the rollback point
-too: check out an older commit in `genesis-plane`, then restart.
+`~/git/genesis-plane` stays on a **detached HEAD** on purpose: `scripts/update-plane.sh` runs `git fetch origin && git checkout --detach origin/main && uv sync --locked`, so nothing in `genesis-plane` ever tracks a local branch or merges uncommitted edits. Merged changes reach running planes only when someone runs `scripts/update-plane.sh` and restarts them (`genesis fleet restart all`). That's the rollback point too: `git -C ~/git/genesis-plane checkout --detach <good-sha> && (cd ~/git/genesis-plane && uv sync --locked)` and restart.
+
+Start one plane directly with `cd ~/git/genesis-serve && ~/git/genesis-plane/.venv/bin/genesis serve --agent .claude/agents/evolver.md`, or supervise the whole machine's fleet under `launchd` via `~/.config/genesis/fleet.toml` and `genesis fleet`:
+
+- **`genesis fleet sync` / `status` / `resume` / `stop` / `restart` / `logs`** (`src/genesis/fleet.py`) renders `~/Library/LaunchAgents/ai.sayfan.genesis.serve.<name>.plist` per enabled repo plus `ai.sayfan.genesis.watch.plist`. Each serve plist passes `--supervised` and sets `KeepAlive.PathState` on `<repo>/.genesis/.stopped` (`false`). Crashes, reboots, and `SIGTERM` restarts don't write `.stopped`, so `launchd` brings the plane straight back; terminal stops (`run_budget`, `gh_auth_401`, `missing_binary`, or `genesis fleet stop`) write `.genesis/.stopped` so `launchd` holds off until `genesis fleet resume <name>` clears it.
+- **`genesis watch`** (`src/genesis/watch.py`, scheduled every 180s) reads `.genesis/.plane-state.json` and cross-checks each repo's live execution against its GitHub board to catch silent stalls: `daemon_down` / `stopped:<reason>`, `phantom_in_progress` (an open `in-progress` issue with no running session, active workflow run, or backing pull request — auto-released and nudged via `.genesis/.nudge`), `hung_session` (20+ minutes without tool calls), and `starving_work` (nudged once via `.genesis/.nudge`, alerted if still starved). Alerts consolidate into a single aggregate notification per fleet check rather than one per repo.
+
+Every trigger in `genesis-serve` runs the evolver agent. The scheduled and CI-failure triggers used to hardcode an orchestrator genesis doesn't have.
 
 Green CI is the evolver's only reviewer, so the rules it runs under can't be
 reviewed by it. `.genesis/protected-paths` lists them: `.claude/`, `.genesis/`,

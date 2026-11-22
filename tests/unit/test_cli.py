@@ -12,7 +12,12 @@ from genesis import cli
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    for var in ("GENESIS_REPO", "GENESIS_POLL_INTERVAL", "GENESIS_SESSION_TIMEOUT"):
+    for var in (
+        "GENESIS_REPO",
+        "GENESIS_POLL_INTERVAL",
+        "GENESIS_SESSION_TIMEOUT",
+        "GENESIS_SUPERVISED",
+    ):
         monkeypatch.delenv(var, raising=False)
     yield
 
@@ -98,3 +103,29 @@ def test_unknown_command_exits_with_error() -> None:
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["bogus"])
     assert excinfo.value.code != 0
+
+
+def test_serve_propagates_supervised_to_env() -> None:
+    with patch("genesis.cli.serve", return_value=0):
+        cli.main(["serve", "--supervised"])
+    assert os.environ["GENESIS_SUPERVISED"] == "1"
+
+
+def test_fleet_status_dispatches() -> None:
+    sentinel = object()
+    with patch("genesis.cli.load_fleet_config", return_value=sentinel) as load_cfg, patch(
+        "genesis.cli.fleet_status", return_value=0
+    ) as status_fn:
+        assert cli.main(["fleet", "--config", "/tmp/fleet.toml", "status"]) == 0
+    load_cfg.assert_called_once_with("/tmp/fleet.toml")
+    status_fn.assert_called_once_with(sentinel)
+
+
+def test_watch_dispatches_flags() -> None:
+    with patch("genesis.cli.run_watch", return_value=0) as watch_fn:
+        assert cli.main(["watch", "--no-notify", "--no-remediate", "--json"]) == 0
+    watch_fn.assert_called_once()
+    assert watch_fn.call_args.kwargs["notify"] is False
+    assert watch_fn.call_args.kwargs["remediate"] is False
+    assert watch_fn.call_args.kwargs["as_json"] is True
+
