@@ -941,6 +941,19 @@ class TestReleaseHandsClaimsBack:
         comment = next(c for c in calls if c.startswith("issue comment 40"))
         assert "the session deadline was reached" in comment
 
+    def test_a_reason_ending_in_a_full_stop_is_not_doubled(self, run) -> None:
+        """Callers write --reason as a sentence. The note used to read "...and
+        passes.. `in-progress` is off" (genesis issue #142)."""
+        board = _board((40, "serve-dead", 0.5))
+        _, calls = run(
+            "release", "--session", "serve-dead",
+            "--reason", "the work landed and CI passes.",
+            GH_LIST_JSON=board,
+        )
+        comment = next(c for c in calls if c.startswith("issue comment 40"))
+        assert "CI passes. `in-progress` is off" in comment
+        assert ".." not in comment
+
     def test_the_release_note_is_marked_and_is_not_a_claim(self, run) -> None:
         """The marker is what lets `unanswered-comments` skip the note, and it must
         not match the prefix `claim_rows` parses, or a release would read as a hold."""

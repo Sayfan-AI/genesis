@@ -347,8 +347,11 @@ release_one() {
     # The marker lets `unanswered-comments` recognise this note as the script's
     # own when a session posted it under a human token. It must not start with
     # `<!-- $CLAIM_MARKER `, which `claim_rows` parses as a live claim.
+    # Callers write --reason as a sentence and usually end it with a full stop,
+    # so drop one before adding ours, or the note reads "...passes.. `in-progress`".
+    local reason="${2%.}"
     gh issue comment "$1" --body \
-        "Claim released: $2. \`in-progress\` is off, so this issue is selectable again. <!-- $RELEASE_MARKER -->" \
+        "Claim released: $reason. \`in-progress\` is off, so this issue is selectable again. <!-- $RELEASE_MARKER -->" \
         >/dev/null || true
     echo "released #$1"
 }
