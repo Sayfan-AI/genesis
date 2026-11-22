@@ -71,6 +71,7 @@ SEED_WORKFLOWS = [
     "genesis-merge.yml",
     "genesis-ci-failure.yml",
     "genesis-push-trigger.yml",
+    "genesis-guards.yml",
 ]
 
 SEED_SCRIPTS = [
@@ -84,6 +85,7 @@ SEED_SCRIPTS = [
     "stranded-work.sh",
     "escalate.sh",
     "upstream.sh",
+    "check-turn-budgets.py",
 ]
 
 # The dev repo's `.gitignore`, carried in the template tree WITHOUT the leading
@@ -112,6 +114,7 @@ GITATTRIBUTES_RULE = "*.sh text eol=lf"
 #
 # Every Claude-invoking template must be classified here and must declare an
 # explicit `--max-turns`. Enforced by tests/e2e/test_workflows.py, which also
+# holds the seeded `check-turn-budgets.py` to the same classes and floor, and
 # fails if a template listed here stopped invoking Claude - a stale entry is how
 # a budget rule outlives the thing it governed.
 #

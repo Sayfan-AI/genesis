@@ -1,0 +1,31 @@
+name: Genesis Guards
+
+# Deterministic checks on the dev system's own wiring, run on every pull request.
+# No model and no secrets, so it's free and runs before the App is installed.
+#
+# The turn-budget check is here because AGENTS.md used to ask every dev system to
+# write it, and every one did, from scratch, after its workflows had already gone
+# unguarded (genesis issue #184). genesis-merge.yml lands a pull request only when
+# every check passed, so a red guard blocks the merge. genesis-ci-failure.yml
+# deliberately doesn't watch it: reacting to a genesis-* workflow's failure from
+# another workflow is the skipped-run design genesis moved away from.
+#
+# It has no escalation step on purpose: a failure here strands nothing. It's a red
+# check on a pull request, which is the signal.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check turn budgets
+        run: python3 .genesis/scripts/check-turn-budgets.py .github/workflows

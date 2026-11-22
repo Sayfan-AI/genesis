@@ -814,7 +814,9 @@ def test_a_same_named_workflow_serializes_in_both_places() -> None:
 # than an absence so a new workflow has to say which side of the line it's on.
 # Everything genesis-push-trigger.yml can fail at is a dispatch that three other
 # paths re-derive within hours; the template says so at the step.
-WORKFLOWS_WITHOUT_ESCALATION = {"genesis-push-trigger.yml"}
+# genesis-guards.yml is a red check on a pull request when it fails, which is
+# the signal itself, and it strands nothing.
+WORKFLOWS_WITHOUT_ESCALATION = {"genesis-push-trigger.yml", "genesis-guards.yml"}
 
 ESCALATION_STEP = "Escalate to a human if this run failed"
 

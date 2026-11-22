@@ -131,6 +131,12 @@ after it stopped invoking Claude. Two separate dev-system workflows died at 20 t
 three weeks apart before this floor existed — when a run dies at max-turns, raise the
 whole class and record why.
 
+Dev systems get the same rule as code, not prose: `templates/scripts/check-turn-budgets.py`,
+run on every pull request by the seeded `genesis-guards.yml` (issue #184). Two dev
+systems each wrote that check by hand when the seed only asked for it.
+`tests/e2e/test_turn_budget_check.py` pins the script's `ORCHESTRATOR_CLASS` and
+floor to `WORKFLOW_TURN_CLASSES` and `ORCHESTRATOR_TURN_FLOOR`, so the two can't drift.
+
 ## Claims
 
 `in-progress` is the dev system's concurrency protocol — `issues.sh next` skips any
