@@ -36,3 +36,24 @@ def isolate_genesis_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     otherwise load the developer's real App key.
     """
     monkeypatch.setenv("GENESIS_CONFIG_DIR", str(tmp_path / "genesis-config"))
+
+
+@pytest.fixture(autouse=True)
+def isolate_session_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the variables the plane exports into every session it launches.
+
+    `genesis serve` sets each engine's `session_env` in its child's
+    environment, and the evolver runs this suite from inside such a session
+    before it pushes. `LocalControlPlane._session_env()` starts from
+    `os.environ`, so those inherited values leaked into its tests: a Codex
+    plane's env came back holding `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, and
+    `main` was red in every served session while green on CI (issue #166).
+
+    Derived from `engines.ENGINES` so a new engine's variables are cleared
+    without anyone remembering to list them here.
+    """
+    from genesis import engines
+
+    for engine in engines.ENGINES.values():
+        for var in engine.session_env:
+            monkeypatch.delenv(var, raising=False)
