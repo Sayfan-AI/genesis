@@ -748,6 +748,21 @@ json.dump(filtered, sys.stdout)
             echo "Usage: issues.sh claim --id ID" >&2
             exit 1
         fi
+        # Refuse a closed issue, reading the issue itself rather than a listing.
+        # `gh issue list --state open` answers from GitHub's search index, which
+        # lags a close by seconds: on sweatless issue #92 an orchestrator closed a
+        # task, ran `next` moments later, and claimed the issue it had just closed.
+        # `gh issue view` reads the issue, so it sees the close immediately. Exit 4
+        # means "not open", distinct from an error, so `next` can move on to the
+        # next candidate instead of failing the run.
+        STATE="$(gh issue view "$ID" --json state --jq .state)" || {
+            echo "issues.sh claim: could not read the state of #$ID" >&2
+            exit 1
+        }
+        if [ "$STATE" != "OPEN" ]; then
+            echo "issues.sh claim: #$ID is ${STATE:-in an unknown state}, not open; not claiming it" >&2
+            exit 4
+        fi
         gh issue edit "$ID" --add-label in-progress >/dev/null || {
             echo "issues.sh claim: could not add in-progress to #$ID" >&2
             exit 1
@@ -905,22 +920,32 @@ EOF
             echo "Usage: issues.sh next --milestone N" >&2
             exit 1
         fi
-        CANDIDATE="$(gh issue list --state open --label "milestone:$MILESTONE" \
+        # Every eligible candidate, oldest first, not just the first one. The
+        # listing comes from the search index, which can still show an issue
+        # closed seconds ago as open, so the head of the list may be one `claim`
+        # refuses. Walking the list means a stale entry costs one extra read
+        # instead of the run.
+        CANDIDATES="$(gh issue list --state open --label "milestone:$MILESTONE" \
             --json number,createdAt,labels --limit 100 \
             --jq '[.[] | select(([.labels[].name] | index("blocked")) == null)
                        | select(([.labels[].name] | index("in-progress")) == null)
                        | select(([.labels[].name] | index("needs:human")) == null)
                        | select(([.labels[].name] | index("needs:evolver")) == null)]
-                  | sort_by(.createdAt) | .[0].number // empty')"
-        if [ -z "$CANDIDATE" ]; then
-            exit 3
-        fi
-        # Claim it through the same verified path rather than a bare label call.
-        # `bash "$0"` rather than `"$0"`: callers invoke this as
-        # `bash .genesis/scripts/issues.sh`, so relying on the exec bit would make
-        # `next` fail in exactly the environments where `claim` still works.
-        bash "$0" claim --id "$CANDIDATE" >/dev/null || exit 1
-        echo "$CANDIDATE"
+                  | sort_by(.createdAt) | .[].number')"
+        for CANDIDATE in $CANDIDATES; do
+            # Claim it through the same verified path rather than a bare label
+            # call. `bash "$0"` rather than `"$0"`: callers invoke this as
+            # `bash .genesis/scripts/issues.sh`, so relying on the exec bit would
+            # make `next` fail in exactly the environments where `claim` works.
+            rc=0
+            bash "$0" claim --id "$CANDIDATE" >/dev/null || rc=$?
+            case "$rc" in
+                0) echo "$CANDIDATE"; exit 0 ;;
+                4) continue ;;  # closed since the index last saw it
+                *) exit 1 ;;
+            esac
+        done
+        exit 3
         ;;
 
     comment)
@@ -973,7 +998,8 @@ Commands:
   close     Close an issue
   assign    Assign an issue
   label     Add/remove labels
-  claim     Mark an issue in-progress, recording which session claimed it
+  claim     Mark an open issue in-progress, recording which session claimed it
+            (exit 4 when the issue is not open)
   next      Pick and claim this run's unit of work (--milestone N)
   release   Hand a claim back (--id N | --session SESSION)
   sweep-claims  Release claims older than --older-than HOURS (default 2)
