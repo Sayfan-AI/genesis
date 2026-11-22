@@ -128,11 +128,57 @@ def push_to_github(repo_path: Path, repo_url: str) -> None:
     _run_git(repo_path, "push", "-u", "origin", "main")
 
 
+# Every label a seeded script or agent rule applies, as (name, color, description).
+# `gh issue create --label` and `gh issue edit --add-label` fail outright on a
+# label the repo doesn't have, and GitHub's defaults include none of these. A
+# model that hits the error creates the label and retries, but `issues.sh claim`
+# can't, and it's the only selection path the orchestrator has: on a fresh repo
+# the first `issues.sh next` failed. Found by genesis-codex-trial issue #6, whose
+# session had to create `blocked`, `in-progress` and `needs:evolver` by hand.
+# `tests/e2e/test_github.py` fails if a template applies a label missing here.
+# `milestone:N` labels are created per milestone by the orchestrator, so they're
+# not seeded. Colors match what escalate.sh and genesis-merge.yml create.
+SEED_LABELS: tuple[tuple[str, str, str], ...] = (
+    ("genesis:onboarding", "0E8A16", "Genesis onboarding issue"),
+    ("in-progress", "FBCA04", "Claimed by a running session"),
+    ("blocked", "D4C5F9", "Waiting on another issue"),
+    ("needs:human", "B60205", "Waiting on a person"),
+    ("needs:evolver", "5319E7", "Framework-level finding for the evolver"),
+    ("automation:failure", "D93F0B", "An autonomous run failed"),
+)
+
+
+def seed_labels(repo_path: Path) -> None:
+    """Create every label in SEED_LABELS, leaving any that already exist alone.
+
+    No `--force`: a label a person has already recoloured or described stays as
+    they left it. Only "already exists" is tolerated, so an auth or network
+    failure still stops onboarding instead of leaving a repo half-seeded.
+    """
+    for name, color, description in SEED_LABELS:
+        try:
+            _run_gh(
+                ["label", "create", name, "--color", color,
+                 "--description", description],
+                cwd=repo_path,
+            )
+        except GitHubError as e:
+            if "already exists" not in str(e):
+                raise
+
+
 def open_onboarding_issue(repo_path: Path) -> str:
-    """Create the onboarding issue (#1) from .genesis/onboarding.md. Returns issue URL."""
+    """Seed the labels, then create the onboarding issue (#1) from
+    .genesis/onboarding.md. Returns issue URL.
+
+    Labels are seeded here, not in `publish_to_github`, because onboarding an
+    existing repo calls this directly and needs them just as much.
+    """
     onboarding_path = repo_path / ".genesis" / "onboarding.md"
     if not onboarding_path.exists():
         raise GitHubError(f"No onboarding file found at {onboarding_path}")
+
+    seed_labels(repo_path)
 
     content = onboarding_path.read_text()
 
@@ -215,17 +261,6 @@ def publish_to_github(
 
     # Disable the seed workflows until the human supplies credentials (see above).
     disable_seed_workflows(path)
-
-    # Create the onboarding label first (ignore if it already exists)
-    try:
-        _run_gh(
-            ["label", "create", "genesis:onboarding",
-             "--description", "Genesis onboarding issue",
-             "--color", "0E8A16"],
-            cwd=path,
-        )
-    except GitHubError:
-        pass
 
     issue_url = open_onboarding_issue(path)
     return repo_url
