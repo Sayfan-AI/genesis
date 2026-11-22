@@ -81,6 +81,7 @@ SEED_SCRIPTS = [
     "claude-dir-guard.sh",
     "tag-milestone.sh",
     "pre-session.sh",
+    "stranded-work.sh",
     "escalate.sh",
 ]
 
