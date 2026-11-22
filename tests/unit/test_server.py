@@ -315,6 +315,70 @@ def test_prime_high_water_survives_transport_errors(plane, capsys, err) -> None:
     assert "proceeding without" in capsys.readouterr().out
 
 
+# ---------- _reprime_stale_high_water ----------
+
+
+def _page(*ids: str) -> server.PollResult:
+    events = [{"id": i, "type": "IssuesEvent", "actor": {"login": "alice"}} for i in ids]
+    return server.PollResult(events=events, etag='"fresh"', not_modified=False)
+
+
+def test_a_mark_off_the_page_is_reprimed_to_the_newest_event(plane, capsys) -> None:
+    """Issue #180: a 40-day stop left the mark off the page, and the first poll
+    replayed all 42 human events on it, one session each, back to the oldest."""
+    plane.last_event_id = "5"
+    with patch.object(server, "fetch_events", return_value=_page("300", "299", "200")):
+        plane._reprime_stale_high_water("token")
+    assert plane.last_event_id == "300"
+    assert plane.etag == '"fresh"'
+    assert server.HIGHWATER_PATH.read_text().strip() == "300"
+    assert "re-primed at id=300" in capsys.readouterr().out
+    # And the poll that follows has nothing to replay.
+    assert server.filter_relevant_events(_page("300", "299", "200").events, plane.last_event_id) == []
+
+
+def test_a_mark_still_on_the_page_is_left_alone(plane) -> None:
+    """A short restart still replays what it missed."""
+    plane.last_event_id = "299"
+    plane.etag = '"old"'
+    with patch.object(server, "fetch_events", return_value=_page("300", "299", "200")):
+        plane._reprime_stale_high_water("token")
+    assert plane.last_event_id == "299"
+    assert plane.etag == '"old"'
+
+
+def test_no_mark_means_nothing_to_reprime(plane) -> None:
+    with patch.object(server, "fetch_events") as fetch:
+        plane._reprime_stale_high_water("token")
+    fetch.assert_not_called()
+    assert plane.last_event_id is None
+
+
+def test_an_empty_page_keeps_the_mark(plane) -> None:
+    plane.last_event_id = "5"
+    with patch.object(server, "fetch_events", return_value=_page()):
+        plane._reprime_stale_high_water("token")
+    assert plane.last_event_id == "5"
+
+
+@pytest.mark.parametrize(
+    "err",
+    [
+        urllib.error.HTTPError(url="x", code=500, msg="Internal", hdrs=None, fp=None),
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+        TimeoutError("The read operation timed out"),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+def test_a_failed_check_keeps_the_mark(plane, capsys, err) -> None:
+    """Same failure modes as the prime (issue #119): never stop the plane."""
+    plane.last_event_id = "5"
+    with patch.object(server, "fetch_events", side_effect=err):
+        plane._reprime_stale_high_water("token")
+    assert plane.last_event_id == "5"
+    assert "keeping it" in capsys.readouterr().out
+
+
 # ---------- poll_once: page-coverage warning ----------
 
 
@@ -1590,6 +1654,42 @@ def test_an_open_human_gate_skips_the_initial_run(plane, monkeypatch, capsys) ->
     assert launched == []
     out = capsys.readouterr().out
     assert "Skipping the initial run" in out and "issue #25" in out
+
+
+def test_a_restart_reprimes_a_stale_mark_before_the_initial_run(plane, monkeypatch) -> None:
+    """Issue #180: the initial run assesses the board, so the page behind a
+    stale mark is its to notice, not 42 more sessions'."""
+    plane.last_event_id = "5"
+    seen_at_launch: list[str | None] = []
+    monkeypatch.setattr(server, "fetch_events", lambda *a, **k: _page("300", "299"))
+    def run(*a, **k):
+        seen_at_launch.append(plane.last_event_id)
+        return 127  # aborts serve straight after the initial run
+
+    monkeypatch.setattr(server, "enable_workflows", MagicMock())
+    monkeypatch.setattr(server, "disable_workflows", MagicMock())
+    monkeypatch.setattr(server.shutil, "which", lambda _: "/usr/local/bin/claude")
+    monkeypatch.setattr(server, "_gh_token", lambda: "token")
+    monkeypatch.setattr(plane, "load_state", lambda: None)
+    monkeypatch.setattr(plane, "sweep_stale_claims", lambda force=False: None)
+    monkeypatch.setattr(server.triggers, "open_human_gates", lambda *a, **k: [])
+    monkeypatch.setattr(plane, "run_orchestrator", run)
+    plane.serve()
+
+    assert seen_at_launch == ["300"]
+
+
+def test_a_gated_restart_keeps_a_stale_mark(plane, monkeypatch) -> None:
+    """Behind a needs:human gate the initial run is skipped (issue #125), so a
+    person's answer while the plane was down is only reachable by the replay."""
+    plane.last_event_id = "5"
+    monkeypatch.setattr(server, "fetch_events", lambda *a, **k: _page("300", "299"))
+    monkeypatch.setattr(plane, "load_state", lambda: None)
+    launched = _serve_to_initial_run(plane, monkeypatch, [
+        {"number": 25, "title": "Milestone 1 sign-off", "labels": [{"name": "needs:human"}]},
+    ])
+    assert launched == []
+    assert plane.last_event_id == "5"
 
 
 def test_an_automation_failure_does_not_gate_the_initial_run(plane, monkeypatch) -> None:
