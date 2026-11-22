@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Genesis issue manager — abstraction over gh CLI
-# Supports: create, list, unanswered-comments, unselectable-work, red-prs, close,
+# Supports: create, list, unanswered-comments, comments-since, unselectable-work, red-prs, close,
 #           assign, comment, label, claim, next, release, sweep-claims, view
 set -euo pipefail
 
@@ -100,14 +100,18 @@ for i in issues:
 # Prints nothing when nothing is waiting. If the API can't be read it says so
 # instead of printing nothing, because silence here would read as all-clear.
 format_unanswered_comments() {
-    python3 - "$1" <<'PY'
+    python3 - "$@" <<'PY'
 import json
 import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 
-window_days = int(sys.argv[1])
+# `unanswered-comments` passes WINDOW_DAYS; `comments-since` passes
+# `--since ID TS`. One heredoc serves both so the two can never disagree about
+# who counts as a person.
+since_mode = len(sys.argv) > 1 and sys.argv[1] == '--since'
+window_days = 0 if since_mode else int(sys.argv[1])
 now = datetime.now(timezone.utc)
 
 
@@ -150,6 +154,46 @@ def ago(delta):
     if secs >= 3600:
         return '%dh' % (secs // 3600)
     return '%dm' % max(secs // 60, 0)
+
+
+# `comments-since`: the human comments one thread received after TS, oldest
+# first. See the `comments-since)` case for why it exists.
+if since_mode:
+    issue_id, after_raw = sys.argv[2], sys.argv[3]
+    try:
+        after = ts(after_raw)
+    except ValueError:
+        print('comments-since: --after must be an ISO 8601 timestamp, got %r' % after_raw,
+              file=sys.stderr)
+        sys.exit(1)
+    if after.tzinfo is None:
+        after = after.replace(tzinfo=timezone.utc)
+    # GitHub's `since` filters on updated_at, so it narrows the page but can't
+    # decide the answer: an old comment edited after TS comes back too. The
+    # created_at comparison below is the rule.
+    thread_comments = gh_json('repos/{owner}/{repo}/issues/%s/comments?since=%s&per_page=100'
+                              % (issue_id, after.strftime('%Y-%m-%dT%H:%M:%SZ')))
+    if not isinstance(thread_comments, list):
+        # Exit non-zero: this runs just before a reply goes out, and an empty
+        # answer would read as "nothing new", which is the failure it exists for.
+        print('comments-since: the comments API could not be read for #%s, so new '
+              'comments were NOT checked' % issue_id, file=sys.stderr)
+        sys.exit(1)
+    fresh = []
+    for c in thread_comments:
+        if not isinstance(c, dict) or not c.get('created_at'):
+            continue
+        if is_bot(c.get('user')) or is_script_note(c):
+            continue
+        if ts(c['created_at']) > after:
+            fresh.append(c)
+    fresh.sort(key=lambda c: ts(c['created_at']))
+    for c in fresh:
+        print('%s  %s  %s' % (c['created_at'], (c.get('user') or {}).get('login', '?'),
+                              c.get('html_url', '')))
+        for line in str(c.get('body') or '').splitlines():
+            print('    ' + line)
+    sys.exit(0)
 
 
 # One repo-wide call for the most recent comments, which is also the bound on the
@@ -589,6 +633,31 @@ json.dump(filtered, sys.stdout)
         format_unanswered_comments "$WINDOW_DAYS"
         ;;
 
+    comments-since)
+        # Human comments on one thread posted after --after TS (empty = nothing
+        # new). Run it with the createdAt of the newest comment you read, just
+        # before you post a reply or save a revised body on a thread a person is
+        # active on, and fold in anything it prints. `unanswered-comments` can't
+        # catch this: once the reply is posted the bot has the last word, so the
+        # thread reads as answered. Measured on a sibling dev system: a person
+        # commented at 21:50:13 and 21:54:39 while event sessions were writing,
+        # and both replies went out without those comments, so the person was
+        # shown an out-of-date plan twice in ten minutes.
+        ID="" AFTER=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --id) ID="$2"; shift 2 ;;
+                --after) AFTER="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        if [ -z "$ID" ] || [ -z "$AFTER" ]; then
+            echo "Usage: issues.sh comments-since --id ID --after TIMESTAMP" >&2
+            exit 1
+        fi
+        format_unanswered_comments --since "$ID" "$AFTER"
+        ;;
+
     unselectable-work)
         # Open issues the work-selection rules can never choose — no milestone:N
         # label, or every milestone on them already signed off (empty = every
@@ -963,19 +1032,37 @@ EOF
         ;;
 
     comment)
-        ID="" BODY=""
+        ID="" BODY="" SEEN=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --id) ID="$2"; shift 2 ;;
                 --body) BODY="$2"; shift 2 ;;
+                --seen) SEEN="$2"; shift 2 ;;
                 *) shift ;;
             esac
         done
         if [ -z "$ID" ] || [ -z "$BODY" ]; then
-            echo "Usage: issues.sh comment --id ID --body BODY" >&2
+            echo "Usage: issues.sh comment --id ID --body BODY [--seen TIMESTAMP]" >&2
             exit 1
         fi
         gh issue comment "$ID" --body "$BODY"
+        # --seen is the createdAt of the newest comment the reply was written
+        # against. After posting, name anything a person said since then on
+        # stderr, so a session that forgot to run `comments-since` first still
+        # sees the gap and can follow up. The post already succeeded, so a
+        # failed check doesn't fail the command.
+        if [ -n "$SEEN" ]; then
+            SEEN_RC=0
+            MISSED="$(format_unanswered_comments --since "$ID" "$SEEN" 2>&1)" || SEEN_RC=$?
+            if [ "$SEEN_RC" -ne 0 ]; then
+                echo "Posted, but new comments on #$ID were NOT checked: $MISSED" >&2
+            elif [ -n "$MISSED" ]; then
+                {
+                    echo "Posted, but a person commented on #$ID after $SEEN and this reply doesn't account for it. Follow up:"
+                    echo "$MISSED"
+                } >&2
+            fi
+        fi
         ;;
 
     view)
@@ -999,6 +1086,10 @@ Commands:
             loop has not answered, stalest first. Closed threads are reported
             only when the loop closed them AFTER the comment (empty = nothing
             waiting on a reply)
+  comments-since
+            List human comments on one thread posted after --after TIMESTAMP,
+            oldest first (empty = nothing new). Run it just before replying on
+            a thread a person is active on
   unselectable-work
             List open issues no run can select — no milestone:N label, or
             every milestone on them already signed off — stalest first
@@ -1017,7 +1108,8 @@ Commands:
   next      Pick and claim this run's unit of work (--milestone N)
   release   Hand a claim back (--id N | --session SESSION)
   sweep-claims  Release claims older than --older-than HOURS (default 2)
-  comment   Comment on an issue
+  comment   Comment on an issue (--seen TIMESTAMP warns on stderr about
+            human comments posted after the one the reply was written against)
   view      View issue details
 
 List filters:

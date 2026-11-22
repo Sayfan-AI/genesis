@@ -76,6 +76,10 @@ if [ "$1" = "api" ]; then
   [ -n "${GH_API_FAILS-}" ] && exit 1
   case "$2" in
     */issues/comments*) printf '%s' "${GH_COMMENTS_JSON-[]}" ;;
+    # `comments-since` reads one thread's comments. Real gh would apply the
+    # `since` query (on updated_at); the stub returns everything, so the
+    # created_at rule in the script is what the tests exercise.
+    */issues/*/comments*) printf '%s' "${GH_THREAD_COMMENTS_JSON-[]}" ;;
     *) printf '%s' "${GH_THREADS_JSON-null}" | jq -e --arg n "${2##*/}" '.[$n]' ;;
   esac
   exit $?
@@ -691,6 +695,148 @@ class TestUnansweredComments:
         assert proc.returncode == 0, proc.stderr
         assert "could not be read" in proc.stdout
         assert "do NOT read" in proc.stdout
+
+
+def _at(stamp: str, user: dict = HUMAN, body: str = "", num: int = 7) -> dict:
+    """A thread comment with a fixed timestamp, for `comments-since`."""
+    return {
+        "issue_url": f"https://api.github.com/repos/o/r/issues/{num}",
+        "created_at": stamp,
+        "user": user,
+        "body": body,
+        "html_url": f"https://github.com/o/r/issues/{num}#issuecomment-{stamp}",
+    }
+
+
+class TestCommentsSince:
+    """A reply can miss a comment a person posts while the session is writing it.
+
+    sagrin/sweatless, 2026-11-21: a person commented at 21:50:13 and 21:54:39
+    while event sessions were writing, and both replies went out without them.
+    `unanswered-comments` can't see that, because the bot's reply is newest.
+    """
+
+    SEEN = "2026-11-21T21:48:19Z"
+
+    def _since(self, run, comments: list[dict], *extra: str, **env: str):
+        return run(
+            "comments-since", "--id", "7", "--after", self.SEEN, *extra,
+            GH_THREAD_COMMENTS_JSON=json.dumps(comments), **env,
+        )
+
+    def test_reports_a_human_comment_after_the_one_read(self, run) -> None:
+        proc, calls = self._since(run, [
+            _at("2026-11-21T21:48:19Z", body="first ask"),
+            _at("2026-11-21T21:50:13Z", body="also cover the edge case"),
+        ])
+        assert proc.returncode == 0, proc.stderr
+        assert "2026-11-21T21:50:13Z" in proc.stdout
+        assert "also cover the edge case" in proc.stdout
+        # The comment the session already read is not news.
+        assert "first ask" not in proc.stdout
+        assert any("issues/7/comments" in c for c in calls)
+
+    def test_the_bots_own_reply_is_not_news(self, run) -> None:
+        proc, _ = self._since(run, [
+            _at("2026-11-21T21:52:20Z", user=APP_BOT, body="revised plan"),
+            _at("2026-11-21T21:52:30Z", user=SUFFIX_BOT, body="ci note"),
+        ])
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == ""
+
+    def test_the_scripts_own_notes_are_not_news(self, run) -> None:
+        proc, _ = self._since(run, [
+            _at("2026-11-21T21:52:20Z",
+                body="Claimed by session `s`. <!-- genesis-claim session=s -->"),
+        ])
+        assert proc.stdout.strip() == ""
+
+    def test_an_old_comment_edited_later_is_not_news(self, run) -> None:
+        """GitHub's `since` keys on updated_at, so an edited old comment comes
+        back from the API. Creation time is the rule."""
+        proc, _ = self._since(run, [_at("2026-11-21T21:40:00Z", body="edited")])
+        assert proc.stdout.strip() == ""
+
+    def test_oldest_first(self, run) -> None:
+        proc, _ = self._since(run, [
+            _at("2026-11-21T21:54:39Z", body="second"),
+            _at("2026-11-21T21:50:13Z", body="first"),
+        ])
+        assert proc.stdout.index("first") < proc.stdout.index("second")
+
+    def test_an_unreadable_api_fails_loudly(self, run) -> None:
+        """Empty output means "nothing new", so an API failure must not print it."""
+        proc, _ = self._since(run, [], GH_API_FAILS="1")
+        assert proc.returncode != 0
+        assert "NOT checked" in proc.stderr
+
+    def test_a_bad_timestamp_is_refused(self, run) -> None:
+        proc, _ = run("comments-since", "--id", "7", "--after", "yesterday")
+        assert proc.returncode != 0
+        assert "ISO 8601" in proc.stderr
+
+    @pytest.mark.parametrize("args", [("--id", "7"), ("--after", SEEN)])
+    def test_both_flags_are_required(self, run, args) -> None:
+        proc, _ = run("comments-since", *args)
+        assert proc.returncode != 0
+        assert "Usage" in proc.stderr
+
+    def test_help_documents_it(self, run) -> None:
+        proc, _ = run("help")
+        assert "comments-since" in proc.stderr
+        assert "--seen" in proc.stderr
+
+
+class TestCommentSeen:
+    """`comment --seen` catches the gap even when the session skipped the check."""
+
+    SEEN = "2026-11-21T21:48:19Z"
+
+    def test_names_a_comment_that_slipped_in(self, run) -> None:
+        proc, calls = run(
+            "comment", "--id", "7", "--body", "revised plan", "--seen", self.SEEN,
+            GH_THREAD_COMMENTS_JSON=json.dumps([_at("2026-11-21T21:54:39Z", body="one more thing")]),
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert any(c.startswith("issue comment 7") for c in calls)
+        assert "doesn't account for it" in proc.stderr
+        assert "one more thing" in proc.stderr
+
+    def test_quiet_when_nothing_slipped_in(self, run) -> None:
+        proc, _ = run(
+            "comment", "--id", "7", "--body", "revised plan", "--seen", self.SEEN,
+            GH_THREAD_COMMENTS_JSON="[]",
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stderr.strip() == ""
+
+    def test_a_failed_check_says_so_without_failing_the_post(self, run) -> None:
+        proc, calls = run(
+            "comment", "--id", "7", "--body", "revised plan", "--seen", self.SEEN,
+            GH_API_FAILS="1",
+        )
+        assert proc.returncode == 0
+        assert any(c.startswith("issue comment 7") for c in calls)
+        assert "NOT checked" in proc.stderr
+        assert "doesn't account for it" not in proc.stderr
+
+    def test_without_seen_it_makes_no_extra_call(self, run) -> None:
+        proc, calls = run("comment", "--id", "7", "--body", "hi")
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("api") for c in calls)
+
+
+class TestCommentsSinceIsSeeded:
+    """The rule has to reach the session that's about to reply, in both modes."""
+
+    @pytest.mark.parametrize(
+        "template",
+        ["agents/orchestrator.md", "agents/human_interaction.md", "agents_md.md.j2"],
+    )
+    def test_the_carrier_tells_the_session_to_check_before_replying(self, template: str) -> None:
+        text = (TEMPLATES / template).read_text()
+        assert "issues.sh comments-since --id N --after" in text
+        assert "--seen" in text
 
 
 class TestUnselectableWork:

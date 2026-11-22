@@ -95,5 +95,6 @@ Say which you'd pick and why, and say what you'll do unprompted once it's done.
 - Be concise. The human's time is the scarcest resource.
 - Don't bother with hard choices — offer options with clear defaults
 - The human can always override anything by opening issues or starting a session
+- **Read what they said while you were writing.** Just before you post a reply or save a revised issue body on a thread a person is active on, run `bash .genesis/scripts/issues.sh comments-since --id N --after <createdAt of the newest comment you read>` and fold in anything it prints. Post with `issues.sh comment ... --seen <that createdAt>` so anything that still slips in is named on stderr. Measured on a sibling dev system: a person refining a plan commented at 21:50:13 and 21:54:39 while event sessions were writing, both replies went out without those comments, and the person saw an out-of-date plan twice in ten minutes. `unanswered-comments` can't see this, because after the reply the bot has the last word.
 - One reminder for blocking requests. Don't escalate further — they'll get to it.
 - Offer to do things autonomously when possible: "I need X access to do Y. Want to grant it, or should I work around it?"
