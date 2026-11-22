@@ -9,8 +9,10 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 import json
+import re
 
 from genesis.github import (
+    SEED_LABELS,
     GitHubError,
     create_github_repo,
     disable_seed_workflows,
@@ -208,6 +210,72 @@ def test_open_onboarding_issue(mock_run: MagicMock, tmp_path: Path) -> None:
     assert "issue" in call_args
     assert "create" in call_args
     assert "--title" in call_args
+
+
+def _onboarding_repo(tmp_path: Path) -> Path:
+    genesis_dir = tmp_path / ".genesis"
+    genesis_dir.mkdir()
+    (genesis_dir / "onboarding.md").write_text("# Onboarding: p\n\nGoal\n")
+    return tmp_path
+
+
+@patch("genesis.github.subprocess.run")
+def test_open_onboarding_issue_seeds_every_label_first(
+    mock_run: MagicMock, tmp_path: Path
+) -> None:
+    """genesis-codex-trial issue #6: a fresh repo had none of the labels the
+    seeded scripts apply, so `issues.sh claim` and `--label blocked` failed.
+    Seeding lives in open_onboarding_issue because the existing-repo path calls
+    it directly, without publish_to_github."""
+    mock_run.return_value = MagicMock(returncode=0, stdout="url", stderr="")
+    open_onboarding_issue(_onboarding_repo(tmp_path))
+
+    cmds = [c[0][0] for c in mock_run.call_args_list]
+    created = [c[3] for c in cmds if c[1:3] == ["label", "create"]]
+    assert created == [name for name, _, _ in SEED_LABELS]
+    assert cmds[-1][1:3] == ["issue", "create"]
+    # No --force: a label a person already customised is left alone.
+    assert not any("--force" in c for c in cmds)
+
+
+@patch("genesis.github.subprocess.run")
+def test_seed_labels_tolerates_only_already_exists(
+    mock_run: MagicMock, tmp_path: Path
+) -> None:
+    repo = _onboarding_repo(tmp_path)
+
+    def exists(args: list[str], **kwargs: object) -> MagicMock:
+        if args[1:3] == ["label", "create"]:
+            return MagicMock(returncode=1, stdout="",
+                             stderr=f"label with name \"{args[3]}\" already exists")
+        return MagicMock(returncode=0, stdout="url", stderr="")
+
+    mock_run.side_effect = exists
+    assert open_onboarding_issue(repo) == "url"
+
+    mock_run.side_effect = None
+    mock_run.return_value = MagicMock(returncode=1, stdout="",
+                                      stderr="HTTP 401: Bad credentials")
+    with pytest.raises(GitHubError, match="401"):
+        open_onboarding_issue(repo)
+
+
+def test_every_label_a_template_applies_is_seeded() -> None:
+    """A label added to a seeded script and forgotten in SEED_LABELS would fail
+    on every fresh repo, so scan the templates for the literal names applied.
+    `milestone:N` is created per milestone by the orchestrator, not seeded."""
+    templates = Path(__file__).resolve().parents[2] / "templates"
+    applied: set[str] = set()
+    pattern = re.compile(r'--(?:add-)?label[ =]"?([a-z][a-z0-9:-]*)')
+    for path in templates.rglob("*"):
+        if path.is_file() and path.suffix in {".sh", ".yml", ".md", ".j2", ""}:
+            applied |= set(pattern.findall(path.read_text(errors="ignore")))
+    applied.discard("milestone:")
+    assert applied, "scan found no labels; the pattern no longer matches the templates"
+    seeded = {name for name, _, _ in SEED_LABELS}
+    assert applied <= seeded, f"applied but never seeded: {sorted(applied - seeded)}"
+    # Named in agent rules, or applied through a variable (escalate.sh).
+    assert {"in-progress", "blocked", "needs:evolver", "automation:failure"} <= seeded
 
 
 def test_open_onboarding_issue_missing_file(tmp_path: Path) -> None:
