@@ -83,6 +83,7 @@ SEED_SCRIPTS = [
     "pre-session.sh",
     "stranded-work.sh",
     "escalate.sh",
+    "upstream.sh",
 ]
 
 # The dev repo's `.gitignore`, carried in the template tree WITHOUT the leading

@@ -51,7 +51,7 @@ On each run:
    failure; a diff someone can paste is the fix arriving by a slower route.
 
 4. **Escalate framework-level improvements** to genesis:
-   - Open an issue on the genesis repo (`Sayfan-AI/genesis`) with label `needs:evolver`
+   - File it with `bash .genesis/scripts/upstream.sh --title "..." --body-file FILE --local N`, where N is the local issue the finding came from. Don't use a bare `gh issue create`. This project's App can usually open an issue on `Sayfan-AI/genesis` but can't label it, so a hand-filed escalation lands without `needs:evolver` and nothing tells you. The script asks for the label, reads it back, and reports on issue N if it's missing. A missing label still exits 0 because the issue exists, so don't file it again.
    - Include: what went wrong, which project hit it, proposed fix
    - Example: "Scaffolded workflows should include PAT env injection for repos that need elevated access"
    - Example: "settings.json template uses outdated hook format"

@@ -430,6 +430,29 @@ noting: **porting a mechanism means porting everything it depends on, and a labe
 a dependency.** Two of the three halves here were files, which is why the third went
 unnoticed.
 
+## Unlabelled Escalations
+
+Dev systems escalate framework findings here, and a project's App usually
+can't label an issue on this repo. It can open one, because genesis is public,
+but adding `needs:evolver` answers `Resource not accessible by integration`.
+sagrin/sweatless filed seven escalations that way, and all of them sat outside
+the queue until a person labelled them (issue #155).
+
+The seeded `.genesis/scripts/upstream.sh` now reads the label back and reports
+a miss on the project's own issue. It also ends every escalation with a footer
+line. So **the evolver's queue is `needs:evolver` plus every open, unlabelled
+issue carrying that footer**. List the second half with:
+
+```
+gh issue list --state open --search 'no:label "Escalated with .genesis/scripts/upstream.sh"'
+```
+
+Label each one `needs:evolver` (genesis's own App can) and work it like any
+other. Systems seeded before the script existed don't write the footer, so also
+check open unlabelled issues authored by an `app/*-dev-bot` account. The footer
+phrase is pinned between this file and the script by
+`tests/unit/test_upstream_script.py`.
+
 ## Genesis Serves Itself
 
 Genesis runs its own evolver under `genesis serve`, the same control plane it ships
