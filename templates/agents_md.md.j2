@@ -136,8 +136,13 @@ run starts over from scratch.
   you land where `genesis-merge` did: no seeded workflow is narrow-class, because
   a procedure with no fuzzy step left in it turned out to be shell, not an agent.
 
-Enforce this with a test, not a convention — a CI check that fails on any
-Claude-invoking workflow below its class floor, or with no `--max-turns` at all.
+This is enforced, not a convention: `.genesis/scripts/check-turn-budgets.py`
+fails on any step that invokes Claude with no `--max-turns`, or an
+orchestrator-class workflow below 30, and `genesis-guards.yml` runs it on every
+pull request. When you add a Claude-invoking workflow, add it to the script's
+`ORCHESTRATOR_CLASS` if it's open-ended; anything unlisted is narrow. Don't write
+a second budget test: two dev systems each built this one by hand before genesis
+seeded it.
 When a run does die at max-turns, raise the budget for that whole *class* and
 record why; don't patch the single workflow and let the next one rediscover it.
 
