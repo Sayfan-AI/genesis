@@ -1033,7 +1033,7 @@ def test_an_open_human_gate_skips_the_cron(plane, monkeypatch) -> None:
     monkeypatch.setattr(server.triggers, "failed_runs", lambda *a, **k: [])
     monkeypatch.setattr(
         server.triggers, "open_human_gates",
-        lambda *a, **k: [{"number": 1, "title": "Onboarding"}],
+        lambda *a, **k: [{"number": 1, "title": "Onboarding", "labels": [{"name": "genesis:onboarding"}]}],
     )
     launched: list[str] = []
     monkeypatch.setattr(
