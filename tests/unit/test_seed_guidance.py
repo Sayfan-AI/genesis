@@ -505,3 +505,48 @@ class TestRecoveredFrictionBecomesASignal:
         assert re.search(r"deterministically", friction[0]), (
             "a reminder in AGENTS.md is what the session that hit the trap already had"
         )
+
+
+class TestAFrameworkFindingAPersonMustFixReachesThePerson:
+    """Genesis issue #137. On sagrin/sweatless the App lacked `checks: read`, and
+    the orchestrator filed the finding with `needs:evolver` alone. That label
+    routes it upstream and out of `issues.sh next`, but the person reads
+    `needs:human`, so the one fix only they could make waited on them unseen.
+
+    Deferred until issue #143: before it, any open `needs:human` silenced the
+    whole schedule, so this rule would have turned every such finding into a
+    cron-wide stop.
+    """
+
+    NEEDLE = "Route framework-level findings to the evolver"
+
+    def _rule(self, orchestrator: str) -> str:
+        return _bullet(_section(orchestrator, "Hard Rules (MUST follow)"), self.NEEDLE)
+
+    def test_the_rule_names_both_labels(self, orchestrator: str) -> None:
+        rule = self._rule(orchestrator)
+        assert "`needs:evolver`" in rule
+        assert re.search(r"needs a person[^.]*\)[^.]*`needs:human` as well as `needs:evolver`", rule), (
+            "nothing tells the orchestrator to put a person-only fix in the person's queue"
+        )
+
+    def test_the_finding_is_a_narrow_gate_not_a_stop(self) -> None:
+        from genesis import triggers
+
+        finding = {
+            "number": 17,
+            "title": "App lacks checks: read, so check rollups 403",
+            "labels": [{"name": "needs:evolver"}, {"name": "needs:human"}],
+        }
+        assert triggers.stop_gates([finding]) == [], (
+            "a person-only framework finding would stop every scheduled run, "
+            "which is why issue #137 was deferred behind issue #143"
+        )
+
+    def test_the_evolver_escalates_it_without_closing_it(self, evolver: str) -> None:
+        signals = _section(evolver, "Review Cycle").split("2. **Classify")[0]
+        generic = _bullet(signals, "pre-diagnosed")
+        assert re.search(r"also carries `needs:human`, escalate it and leave it open", generic), (
+            "the evolver closes every needs:evolver issue after escalating, which "
+            "takes a person-only fix back out of the person's queue"
+        )
