@@ -82,6 +82,7 @@ SEED_SCRIPTS = [
     "tag-milestone.sh",
     "pre-session.sh",
     "escalate.sh",
+    "upstream.sh",
 ]
 
 # The dev repo's `.gitignore`, carried in the template tree WITHOUT the leading
