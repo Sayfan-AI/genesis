@@ -69,6 +69,13 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
+          settings: |
+            {
+              "env": {
+                "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+                "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"
+              }
+            }
           prompt: |
             Run the evolver agent defined in .claude/agents/evolver.md.
 

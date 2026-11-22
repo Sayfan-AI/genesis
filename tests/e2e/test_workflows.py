@@ -1170,3 +1170,28 @@ def test_ci_has_exactly_one_job_because_only_one_is_required() -> None:
         f"`{REQUIRED_CHECK_CONTEXT}`. The extra job's failures would not block a "
         "merge. Add it to the ruleset's required contexts, then list it here."
     )
+
+
+def test_every_claude_workflow_declares_the_unattended_session_env() -> None:
+    """`ClaudeEngine.session_env` and `settings.env` in the GitHub Actions
+    workflows must carry the same unattended-mode guards so switching a dev
+    system between `genesis serve` and Actions can't reintroduce background
+    subagent abandonment (sweatless issue #103)."""
+    from genesis.engines import ClaudeEngine
+
+    expected = ClaudeEngine().session_env
+    assert expected, "ClaudeEngine().session_env should not be empty"
+
+    all_workflows = [
+        *_claude_workflows(TEMPLATES_DIR / "workflows"),
+        *_claude_workflows(REPO_ROOT / ".github" / "workflows"),
+    ]
+    assert all_workflows
+    for wf in all_workflows:
+        content = wf.read_text()
+        for key, value in expected.items():
+            needle = f'"{key}": "{value}"'
+            assert needle in content, (
+                f"{wf.relative_to(REPO_ROOT)} is missing {needle} in its Claude settings.env"
+            )
+

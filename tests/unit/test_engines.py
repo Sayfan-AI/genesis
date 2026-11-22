@@ -365,3 +365,25 @@ def test_a_failing_settle_warns_instead_of_stopping_the_plane(tmp_path, monkeypa
     plane._settle_session()
     assert plane.cost_is_lower_bound is True
     assert any("could not settle" in line for line in lines)
+
+
+def test_claude_session_env_disables_background_tasks_while_codex_stays_empty() -> None:
+    """Claude Code's unattended `-p` mode spawns background `Agent` tasks by
+    default and kills them ten minutes after the parent flushes `success`
+    (sweatless issue #103). The env belongs on ClaudeEngine, not CodexEngine."""
+    assert ClaudeEngine().session_env == {
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0",
+    }
+    assert CodexEngine().session_env == {}
+
+
+def test_claude_stderr_failure_catches_stopped_background_tasks() -> None:
+    notice = (
+        "1 background task(s) still running after 600s ceiling — stopping them "
+        "and exiting (adjust via CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS)\n"
+    )
+    assert ClaudeEngine().stderr_failure(notice) == "error_background_tasks_stopped"
+    assert ClaudeEngine().stderr_failure("ordinary warning line\n") is None
+    assert CodexEngine().stderr_failure(notice) is None
+
