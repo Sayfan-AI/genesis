@@ -133,11 +133,48 @@ WORKFLOW_TURN_CLASSES = {
 ORCHESTRATOR_TURN_FLOOR = 30
 
 
+def toml_string(value: object, multiline: bool = False) -> str:
+    """Render `value` as a TOML basic string, quotes included.
+
+    `config.toml.j2` used to write `goal = "{{ goal }}"`, and goals are
+    multi-line and quote things, so every scaffolded config was invalid TOML
+    (issue #133). That stayed harmless until `configured_engine()` started
+    parsing the file: a parse failure falls back to the default engine, so a
+    Codex dev system with a multi-line goal ran on Claude without a word.
+
+    `multiline` keeps a long goal readable in the file: newlines and tabs stay
+    literal inside `\"\"\"...\"\"\"`, and everything TOML forbids raw is escaped.
+    A newline right after the opening delimiter is trimmed by TOML, so the
+    value starts on its own line and round-trips exactly.
+    """
+    out = []
+    for ch in str(value):
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif multiline and ch in "\n\t":
+            out.append(ch)
+        elif ch in _TOML_SHORT_ESCAPES:
+            out.append(_TOML_SHORT_ESCAPES[ch])
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04X}")
+        else:
+            out.append(ch)
+    body = "".join(out)
+    return f'"""\n{body}"""' if multiline else f'"{body}"'
+
+
+_TOML_SHORT_ESCAPES = {"\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r"}
+
+
 def _render_template(name: str, **kwargs: object) -> str:
     env = Environment(
         loader=FileSystemLoader(TEMPLATES_DIR),
         keep_trailing_newline=True,
     )
+    env.filters["toml_string"] = toml_string
     template = env.get_template(name)
     return template.render(**kwargs)
 

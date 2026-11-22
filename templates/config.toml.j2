@@ -1,6 +1,6 @@
 [project]
-name = "{{ project_name }}"
-goal = "{{ goal }}"
+name = {{ project_name | toml_string }}
+goal = {{ goal | toml_string(multiline=True) }}
 
 # Loki activity logging is configured entirely through the environment
 # (GENESIS_LOKI_URL / GENESIS_LOKI_USER / GENESIS_LOKI_TOKEN), not from this
@@ -10,7 +10,7 @@ goal = "{{ goal }}"
 # The coding agent that runs this dev system's sessions under `genesis serve`:
 # "claude" (Claude Code) or "codex" (OpenAI Codex). `genesis serve --engine`
 # overrides it for one run. GitHub Actions mode runs Claude Code either way.
-name = "{{ engine | default('claude') }}"
+name = {{ engine | default('claude') | toml_string }}
 
 [issues]
 # Backend: "github" or "linear"
@@ -25,7 +25,7 @@ gateway_url = ""
 [targets]
 repos = [
 {%- for repo in target_repos %}
-    "{{ repo }}",
+    {{ repo | toml_string }},
 {%- endfor %}
 ]
 {% endif %}
