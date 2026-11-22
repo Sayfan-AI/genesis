@@ -54,6 +54,7 @@ from genesis.automerge import _gh, is_bot_author, merge_ready
 from genesis.claims import unbacked_claimed_issues
 from genesis import triggers
 from genesis.engines import ClaudeEngine, Engine, SessionResult, SessionStarted, ToolCall, brief, get_engine
+from genesis.toolchain import missing_tool_warnings
 from genesis.plane_state import (
     clear_stopped,
     consume_nudge,
@@ -1996,6 +1997,13 @@ class LocalControlPlane:
             self._mark_terminal_stop("missing_binary", self.engine.binary)
             self.release_lock()
             return 127
+
+        # The project's own toolchain only warns (genesis issue #139): a session
+        # can still work without it, just slower, and that cost is otherwise
+        # silent because the sessions recover and finish green.
+        session_path = {**os.environ, **self.engine.session_env}.get("PATH")
+        for warning in missing_tool_warnings(Path("."), session_path):
+            log(warning)
 
         # Self-heal: if a prior serve session exited non-gracefully (SIGKILL,
         # crash, supervisor restart), `.disabled-by-genesis` is on disk and

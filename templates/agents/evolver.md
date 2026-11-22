@@ -16,7 +16,8 @@ You run on a daily schedule and can also be triggered manually. Each run is a re
 On each run:
 
 1. **Collect signals** — look for evidence of problems:
-   - Issues labeled `needs:evolver` — findings routed to you by other agents (the orchestrator files these when it diagnoses a root cause in the genesis scaffolding). These are pre-diagnosed; your job is to escalate them upstream per step 4, then close them.
+   - Issues labeled `needs:evolver` — findings routed to you by other agents (the orchestrator files these when it diagnoses a root cause in the genesis scaffolding). These are pre-diagnosed; your job is to escalate them upstream per step 4, then close them. **The exception is a title starting with `Friction:`**, covered next.
+   - `Friction:` issues (labeled `needs:evolver`) — time a session lost to the project's own tooling and recovered from: a stale build, a tool missing from PATH, a command it had to work around. The run still finished green, so this issue is the only trace it left. Don't escalate one by default. Classify it in step 2, and when the cause is in this project, remove it deterministically: a script, a build step, a toolchain fix, a check that fails loudly. A note in AGENTS.md that every future session has to remember isn't a fix, because the session that hit the trap had instructions too. Escalate only when the cause is in the genesis scaffolding. Close the issue with the fix linked.
    - Issues labeled `needs:human` — did the system ask for help it shouldn't have needed?
    - Failed workflow runs — what went wrong and why?
    - Issues that were stuck for multiple cycles before progressing
