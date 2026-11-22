@@ -435,6 +435,14 @@ def check_repo(
                             ),
                         )
                     )
+            # `session_token` spans the whole continuation chain: the plane sets
+            # it when a chain starts and clears it only after the ladder and its
+            # own claim release finish. Between a session ending and its resume
+            # (the judge runs here), the state still names the reaped child, so
+            # the pid check above misses a chain that's very much alive. Its
+            # claims are the ladder's to release, never the watchdog's (#173).
+            if str(state.get("session_token") or ""):
+                local_session_running = True
         elif _has_child_process(live_pid):
             local_session_running = True
 

@@ -127,6 +127,76 @@ def test_phantom_in_progress_auto_releases_and_nudges_idle_plane(tmp_path: Path)
     assert plane_state.consume_nudge(repo_dir) is not None
 
 
+def test_phantom_in_progress_spares_a_live_chain_between_session_and_resume(
+    tmp_path: Path,
+) -> None:
+    """The judge window: the session's child is gone, the chain isn't (issue #173).
+
+    After a session ends, `server.py` doesn't republish state until the
+    continuation ladder finishes, so the file still says `running_session`
+    with the reaped child's pid while the judge runs and the resume starts.
+    `session_token` is what spans the whole chain, and a claim made under it
+    belongs to the plane's own ladder to release.
+    """
+    repo_dir = tmp_path / "sweatless"
+    (repo_dir / ".genesis").mkdir(parents=True)
+    (repo_dir / ".genesis" / ".orchestrator.lock").write_text(str(os.getpid()))
+
+    reaped = subprocess.Popen(["true"])
+    reaped.wait()
+
+    now = 10_000.0
+    plane_state.write_plane_state(
+        repo="sagrin/sweatless",
+        pid=os.getpid(),
+        engine="claude",
+        agent=".claude/agents/orchestrator.md",
+        state="running_session",
+        started_at=9_000.0,
+        child_pid=reaped.pid,
+        session_token="serve-live",
+        session_started_at=now - 1_500,
+        last_turn_at=now - 60,
+        base_dir=repo_dir,
+    )
+    entry = FleetRepo(name="sweatless", path=repo_dir, repo="sagrin/sweatless")
+    claim_body = "Claimed\n<!-- genesis-claim session=serve-live -->"
+
+    def fake_gh(args, token):
+        if args[:2] == ["issue", "list"] and "in-progress" in args:
+            return 0, json.dumps(
+                [
+                    {
+                        "number": 103,
+                        "title": "Task 2",
+                        "updatedAt": _iso(now - 1_200),
+                        "comments": [{"body": claim_body, "createdAt": _iso(now - 1_200)}],
+                    }
+                ]
+            )
+        if args[:2] == ["run", "list"]:
+            return 0, json.dumps([{"status": "completed"}])
+        return 0, "[]"
+
+    release_calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        release_calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "released #103\n", "")
+
+    findings = watch.check_repo(
+        entry,
+        now=now,
+        gh=fake_gh,
+        run=fake_run,
+        env_loader=lambda _p: {},
+        token_minter=lambda _r, _e: "ghs_app",
+    )
+    assert [f.kind for f in findings] == []
+    assert release_calls == []
+    assert plane_state.consume_nudge(repo_dir) is None
+
+
 def test_phantom_in_progress_skips_when_pr_or_actions_run_exists(tmp_path: Path) -> None:
     repo_dir = tmp_path / "sweatless"
     (repo_dir / ".genesis").mkdir(parents=True)
