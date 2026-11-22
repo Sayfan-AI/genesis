@@ -1,0 +1,10 @@
+# Shell scripts stay LF in the repo and in every checkout, whatever the host.
+#
+# Bash reads a carriage return as part of the line, so a seeded script with CRLF
+# endings fails on its first line (`set: pipefail\r: invalid option name`), and
+# with it every hook, guard and control-plane call that runs it. A dev system
+# scaffolded from Windows hit exactly that, with every seeded script committed
+# as CRLF (genesis issue #158). `eol=lf` normalizes on commit and pins the
+# checkout, so a Windows clone with `core.autocrlf=true` still gets runnable
+# scripts.
+*.sh text eol=lf

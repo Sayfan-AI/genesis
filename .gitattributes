@@ -1,0 +1,7 @@
+# The same rule genesis seeds into every dev repo (`templates/gitattributes`,
+# which carries the reasoning). Genesis needs it too: the seeded scripts are
+# copied out of this checkout, and genesis runs its own `.genesis/scripts/`
+# under `genesis serve`, so a Windows clone with `core.autocrlf=true` would
+# otherwise hand CRLF to both (issue #158). `tests/e2e/test_line_endings.py`
+# holds the two copies to the same rule.
+*.sh text eol=lf
