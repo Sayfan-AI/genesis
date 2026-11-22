@@ -168,6 +168,18 @@ land in the minutes between the summary you read and the merge you make. A
 comment attaching conditions to work in flight is part of that work's done
 criteria: satisfy them, or say which ones you aren't satisfying and why.
 
+**Check for new comments just before you reply** on a thread a person is active
+on. Before posting a reply or saving a revised issue body, run
+`bash .genesis/scripts/issues.sh comments-since --id N --after <createdAt>` with
+the `createdAt` of the newest comment you read, and fold in anything it prints.
+Post with `issues.sh comment --id N --body ... --seen <createdAt>`, which names
+on stderr anything that slipped in after the check. `unanswered-comments` can't
+see this case: once the reply is posted, the bot has the last word and the
+thread reads as answered. Measured on a sibling dev system: a person refining a
+plan commented at 21:50:13 and 21:54:39 while event sessions were writing, both
+replies went out without those comments, and the person saw an out-of-date plan
+twice in ten minutes.
+
 That rule is for orchestrator-class sessions. A narrow-class runner is exempt **by
 its classification above**, not by a second list: "is this comment a condition?"
 is exactly the unbounded judgment its small budget exists to keep out. Two
