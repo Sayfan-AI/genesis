@@ -275,6 +275,19 @@ def _format_spend(state: dict[str, object] | None, stopped: dict[str, object] | 
     return f"${spent:.2f}"
 
 
+def _configured_engine(repo_dir: Path) -> str:
+    cfg_file = repo_dir / ".genesis" / "config.toml"
+    try:
+        with cfg_file.open("rb") as f:
+            raw = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return "claude"
+    eng = raw.get("engine")
+    if isinstance(eng, dict) and isinstance(eng.get("name"), str) and eng["name"].strip():
+        return eng["name"].strip()
+    return "claude"
+
+
 def inspect_repo_status(entry: FleetRepo) -> dict[str, object]:
     """Summarize one repo's local plane status without making network calls."""
     live_pid = read_lock_pid(entry.path)
@@ -282,11 +295,7 @@ def inspect_repo_status(entry: FleetRepo) -> dict[str, object]:
     stopped = read_stopped(entry.path)
     disabled_marker = (entry.path / ".genesis" / ".disabled-by-genesis").exists()
 
-    engine = (
-        str((state or {}).get("engine") or entry.engine or "claude")
-        if (state or entry.engine)
-        else "claude"
-    )
+    engine = str((state or {}).get("engine") or entry.engine or _configured_engine(entry.path))
     if not entry.enabled and live_pid is None:
         status = "disabled"
     elif live_pid is not None:

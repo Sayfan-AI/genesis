@@ -309,3 +309,13 @@ enabled = true
     assert fleet.fleet_resume(cfg, "sweatless", run=fake_run) == 0
     assert plane_state.read_stopped(repo_a) is None
     assert any("kickstart" in c for c in calls)
+
+
+def test_inspect_repo_status_reads_engine_from_genesis_config(tmp_path: Path) -> None:
+    repo_dir = tmp_path / "alpha"
+    (repo_dir / ".genesis").mkdir(parents=True)
+    (repo_dir / ".genesis" / "config.toml").write_text('[engine]\nname = "codex"\n')
+    entry = fleet.FleetRepo(name="alpha", path=repo_dir)
+    info = fleet.inspect_repo_status(entry)
+    assert info["engine"] == "codex"
+
