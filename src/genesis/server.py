@@ -54,6 +54,15 @@ from genesis.appauth import (
 )
 from genesis.automerge import _gh, is_bot_author, merge_ready
 from genesis.claims import unbacked_claimed_issues
+from genesis.comments import (
+    COMMENT_ETAG_PATH,
+    COMMENT_HIGHWATER_PATH,
+    comment_reached_highwater,
+    drop_already_polled_comment_events,
+    fetch_comments,
+    filter_relevant_comments,
+    seen_event_comment_ids,
+)
 from genesis import triggers
 from genesis.engines import ClaudeEngine, Engine, SessionResult, SessionStarted, ToolCall, brief, get_engine
 from genesis.toolchain import missing_tool_warnings
@@ -608,13 +617,26 @@ def _build_prompt(
             "This is a local control plane initial run - assess project state and advance work."
         )
     event_type = event.get("type", "UnknownEvent")
-    action = event.get("payload", {}).get("action", "unknown")
-    actor = event.get("actor", {}).get("login", "unknown")
+    payload = event.get("payload") or {}
+    action = payload.get("action", "unknown")
+    actor = (event.get("actor") or {}).get("login", "unknown")
+    details = [
+        f"- Event: {event_type} / {action}",
+        f"- Actor: {actor}",
+    ]
+    issue = payload.get("issue")
+    pr = payload.get("pull_request")
+    if isinstance(issue, dict) and issue.get("number") is not None:
+        details.append(f"- Issue: #{issue['number']}")
+    elif isinstance(pr, dict) and pr.get("number") is not None:
+        details.append(f"- Pull request: #{pr['number']}")
+    comment = payload.get("comment")
+    if isinstance(comment, dict) and comment.get("html_url"):
+        details.append(f"- Comment: {comment['html_url']}")
+    lines = "\n".join(details)
     return (
         f"Run the agent defined in {agent}.\n\n"
-        "An event triggered this run:\n"
-        f"- Event: {event_type} / {action}\n"
-        f"- Actor: {actor}\n\n"
+        f"An event triggered this run:\n{lines}\n\n"
         "Assess this event in context of the project state and take appropriate action."
     )
 
@@ -681,6 +703,8 @@ class LocalControlPlane:
     shutdown: bool = False
     last_event_id: str | None = None
     etag: str | None = None
+    last_comment_id: str | None = None
+    comment_etag: str | None = None
     orch_proc: subprocess.Popen | None = field(default=None, repr=False)
 
     # ----- lock -----
@@ -781,12 +805,18 @@ class LocalControlPlane:
     def load_state(self) -> None:
         self.etag = _read_text(ETAG_PATH)
         self.last_event_id = _read_text(HIGHWATER_PATH)
+        self.comment_etag = _read_text(COMMENT_ETAG_PATH)
+        self.last_comment_id = _read_text(COMMENT_HIGHWATER_PATH)
 
     def save_state(self) -> None:
         if self.etag is not None:
             _write_text(ETAG_PATH, self.etag)
         if self.last_event_id is not None:
             _write_text(HIGHWATER_PATH, self.last_event_id)
+        if self.comment_etag is not None:
+            _write_text(COMMENT_ETAG_PATH, self.comment_etag)
+        if self.last_comment_id is not None:
+            _write_text(COMMENT_HIGHWATER_PATH, self.last_comment_id)
 
     # ----- orchestrator -----
 
@@ -1914,30 +1944,57 @@ class LocalControlPlane:
             time.sleep(min(0.5, max(0.0, remaining)))
 
     def poll_once(self, token: str) -> list[dict]:
+        prev_comment_id = self.last_comment_id
         result = fetch_events(self.repo, self.etag, token)
-        if result.not_modified:
-            return []
-        if result.etag:
-            self.etag = result.etag
-        events = result.events
-        if not events:
-            return []
-        # If the previous high-water mark is set but isn't on this page, more
-        # than 100 events arrived since the last poll and older ones may have
-        # been pushed to page 2+. We don't paginate (ETag invariant), but warn.
-        if (
-            self.last_event_id is not None
-            and not any(e.get("id") == self.last_event_id for e in events)
-        ):
-            log(
-                f"Warning: previous high-water event id={self.last_event_id} "
-                "not found on returned page; some events may have been missed. "
-                "Consider lowering --poll-interval."
-            )
-        new_events = filter_relevant_events(events, self.last_event_id)
-        # Always advance high-water to newest event seen, even if filtered out
-        self.last_event_id = events[0].get("id")
-        return new_events
+        raw_events: list[dict] = []
+        new_events: list[dict] = []
+        if not result.not_modified:
+            if result.etag:
+                self.etag = result.etag
+            raw_events = result.events
+            if raw_events:
+                # If the previous high-water mark is set but isn't on this page, more
+                # than 100 events arrived since the last poll and older ones may have
+                # been pushed to page 2+. We don't paginate (ETag invariant), but warn.
+                if (
+                    self.last_event_id is not None
+                    and not any(e.get("id") == self.last_event_id for e in raw_events)
+                ):
+                    log(
+                        f"Warning: previous high-water event id={self.last_event_id} "
+                        "not found on returned page; some events may have been missed. "
+                        "Consider lowering --poll-interval."
+                    )
+                new_events = filter_relevant_events(raw_events, self.last_event_id)
+                # Always advance high-water to newest event seen, even if filtered out
+                self.last_event_id = raw_events[0].get("id")
+
+        new_events = drop_already_polled_comment_events(new_events, prev_comment_id)
+
+        comment_result = fetch_comments(self.repo, self.comment_etag, token)
+        new_comments: list[dict] = []
+        if not comment_result.not_modified:
+            if comment_result.etag:
+                self.comment_etag = comment_result.etag
+            comments = comment_result.comments
+            if comments:
+                if self.last_comment_id is not None and not any(
+                    comment_reached_highwater(str(c.get("id", "")), self.last_comment_id)
+                    for c in comments
+                ):
+                    log(
+                        f"Warning: previous comment high-water id={self.last_comment_id} "
+                        "not found on returned page; some comments may have been missed. "
+                        "Consider lowering --poll-interval."
+                    )
+                seen_ids = seen_event_comment_ids(raw_events) | seen_event_comment_ids(new_events)
+                new_comments = filter_relevant_comments(
+                    comments, self.last_comment_id, seen_comment_ids=seen_ids
+                )
+                if comments[0].get("id") is not None:
+                    self.last_comment_id = str(comments[0]["id"])
+
+        return [*new_events, *new_comments]
 
     def _prime_high_water_if_needed(self, token: str) -> None:
         """Record the current newest event id as the high-water mark.
@@ -1991,6 +2048,51 @@ class LocalControlPlane:
             f"High-water mark id={stale} is no longer on the events page; re-primed at "
             f"id={self.last_event_id} instead of replaying the page. The initial run "
             "assesses what happened while the plane was down."
+        )
+        self.save_state()
+
+    def _prime_comment_high_water_if_needed(self, token: str) -> None:
+        """Record the newest repository issue-comment ID on first start."""
+        if self.last_comment_id is not None:
+            return
+        try:
+            result = fetch_comments(self.repo, etag=None, token=token)
+        except (urllib.error.HTTPError, *TRANSIENT_FETCH_ERRORS) as e:
+            log(
+                f"Failed to prime comment high-water mark ({type(e).__name__}: {e}); "
+                "proceeding without"
+            )
+            return
+        if result.comments and result.comments[0].get("id") is not None:
+            self.last_comment_id = str(result.comments[0]["id"])
+            log(f"Primed comment high-water mark at comment id={self.last_comment_id}")
+        if result.etag:
+            self.comment_etag = result.etag
+        self.save_state()
+
+    def _reprime_stale_comment_high_water(self, token: str) -> None:
+        """Move a persisted comment high-water mark that fell off the first page."""
+        if self.last_comment_id is None:
+            return
+        try:
+            result = fetch_comments(self.repo, etag=None, token=token)
+        except (urllib.error.HTTPError, *TRANSIENT_FETCH_ERRORS) as e:
+            log(f"Failed to check comment high-water mark ({type(e).__name__}: {e}); keeping it")
+            return
+        if not result.comments or any(
+            comment_reached_highwater(str(c.get("id", "")), self.last_comment_id)
+            for c in result.comments
+        ):
+            return
+        if result.comments[0].get("id") is None:
+            return
+        stale = self.last_comment_id
+        self.last_comment_id = str(result.comments[0]["id"])
+        if result.etag:
+            self.comment_etag = result.etag
+        log(
+            f"Comment high-water mark id={stale} is no longer on the comments page; "
+            f"re-primed at id={self.last_comment_id} instead of replaying the page."
         )
         self.save_state()
 
@@ -2110,6 +2212,7 @@ class LocalControlPlane:
         # Prime high-water mark on first run so the post-initial poll doesn't
         # replay every relevant historical event on the events page.
         self._prime_high_water_if_needed(token)
+        self._prime_comment_high_water_if_needed(token)
         self._prime_ci_failure_cursor_if_needed()
 
         # Before the first session picks anything, not after. The plane most
@@ -2126,6 +2229,7 @@ class LocalControlPlane:
         if not self._gated("initial run", token):
             # Only when the run launches: behind a gate, the replay is the wake.
             self._reprime_stale_high_water(token)
+            self._reprime_stale_comment_high_water(token)
             # If it fails because the engine is broken (rc=127), abort rather than
             # entering the poll loop with workflows off.
             rc = self.run_orchestrator(None)
@@ -2160,6 +2264,8 @@ class LocalControlPlane:
             except TRANSIENT_FETCH_ERRORS as e:
                 log(f"Network error polling events: {type(e).__name__}: {e}")
                 continue
+            if not new_events:
+                self.save_state()
             self.last_poll_at = time.time()
             self._publish_state("idle")
 

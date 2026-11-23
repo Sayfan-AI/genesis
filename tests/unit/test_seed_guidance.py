@@ -550,3 +550,31 @@ class TestAFrameworkFindingAPersonMustFixReachesThePerson:
             "the evolver closes every needs:evolver issue after escalating, which "
             "takes a person-only fix back out of the person's queue"
         )
+
+
+class TestHumanGatesStillAnswerHumanComments:
+    """Alpha issue #24: a human commented on an open `needs:human` plan issue,
+    `issues.sh summary` surfaced it under Unanswered Human Comments, and the
+    orchestrator exited without replying because its Hard Rules ended with an
+    unconditional "If a needs:human plan issue is already open, do nothing — wait."
+    """
+
+    @pytest.mark.parametrize(
+        "gate_heading",
+        ["Human gate on milestone planning:", "Human gate on milestone completion:"],
+    )
+    def test_open_gate_answers_unanswered_comments_without_clearing_the_gate(
+        self, orchestrator: str, gate_heading: str
+    ) -> None:
+        rules = _section(orchestrator, "Hard Rules (MUST follow)")
+        rule = _bullet(rules, gate_heading)
+        assert "do nothing" not in rule.lower(), (
+            f"{gate_heading!r} still tells the orchestrator to do nothing behind an "
+            f"open gate even when a human commented on it: {rule}"
+        )
+        assert "issues.sh unanswered-comments" in rule
+        assert "issues.sh comment" in rule
+        assert re.search(r"leave `needs:human` open", rule), (
+            f"answering a gate comment must keep `needs:human` open: {rule}"
+        )
+

@@ -25,6 +25,18 @@ def isolate_cwd(tmp_path, monkeypatch):
     yield tmp_path
 
 
+@pytest.fixture(autouse=True)
+def stub_comment_poll(monkeypatch):
+    """Default `/issues/comments` to 304 so `/events` unit tests stay hermetic."""
+    from genesis.comments import CommentPollResult
+
+    monkeypatch.setattr(
+        server,
+        "fetch_comments",
+        lambda *a, **k: CommentPollResult(comments=[], etag=None, not_modified=True),
+    )
+
+
 @pytest.fixture
 def plane() -> server.LocalControlPlane:
     return server.LocalControlPlane(repo="alice/test", poll_interval=1, session_timeout=5)
