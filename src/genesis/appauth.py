@@ -28,6 +28,7 @@ import http.client
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -207,3 +208,138 @@ def mint_installation_token(repo: str, env: dict[str, str] | None = None) -> str
     if not minted or not minted.get("token"):
         return None
     return str(minted["token"])
+
+
+# Per-machine runtime directory (`templates/gitignore` matches `.genesis/.*`).
+# The file on disk is static shell; the token itself stays in the environment.
+GH_SHIM_DIR = Path(".genesis/.gh-shim")
+APP_TOKEN_ENV = "GENESIS_APP_TOKEN"
+REAL_GH_ENV = "GENESIS_REAL_GH"
+
+_GH_SHIM_SCRIPT = """#!/bin/sh
+# Genesis App-identity shim for `gh`.
+#
+# `_session_env` sets `GH_TOKEN` to a minted installation token, which holds
+# until an operator's personal agent instructions tell sessions to run
+# `GH_TOKEN=$(gh auth token --user <login>) gh ...`. That reaches into the
+# operator's keyring, replaces the App token for that command, and turns PRs,
+# issues, and comments back into the operator's own login (genesis issue #192).
+#
+# Keeping the minted token in `GENESIS_APP_TOKEN` and placing this shim ahead of
+# the real `gh` closes both paths without touching the keyring or writing a
+# secret to disk: `gh auth token` prints the App token, `gh auth` mutations are
+# refused, and every other `gh` call runs with `GH_TOKEN` / `GITHUB_TOKEN`
+# restored to `GENESIS_APP_TOKEN` regardless of any per-command override.
+set -eu
+
+resolve_real_gh() {
+    if [ -n "${GENESIS_REAL_GH:-}" ] && [ -x "${GENESIS_REAL_GH}" ]; then
+        printf '%s\\n' "${GENESIS_REAL_GH}"
+        return 0
+    fi
+    self_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+    old_ifs="$IFS"
+    IFS=":"
+    for entry in ${PATH:-}; do
+        [ -n "$entry" ] || continue
+        cand_dir="$(CDPATH= cd -- "$entry" 2>/dev/null && pwd -P)" || continue
+        [ "$cand_dir" = "$self_dir" ] && continue
+        if [ -x "$cand_dir/gh" ]; then
+            IFS="$old_ifs"
+            printf '%s\\n' "$cand_dir/gh"
+            return 0
+        fi
+    done
+    IFS="$old_ifs"
+    return 1
+}
+
+if [ -n "${GENESIS_APP_TOKEN:-}" ]; then
+    if [ "${1:-}" = "auth" ]; then
+        case "${2:-}" in
+            token)
+                printf '%s\\n' "$GENESIS_APP_TOKEN"
+                exit 0
+                ;;
+            login|logout|switch|refresh|setup-git)
+                printf '%s\\n' "gh auth $2 is disabled inside an App-authenticated genesis session" >&2
+                exit 2
+                ;;
+        esac
+    fi
+    export GH_TOKEN="$GENESIS_APP_TOKEN"
+    export GITHUB_TOKEN="$GENESIS_APP_TOKEN"
+fi
+
+real_gh="$(resolve_real_gh)" || {
+    printf '%s\\n' "genesis gh shim: real gh binary not found on PATH" >&2
+    exit 127
+}
+exec "$real_gh" "$@"
+"""
+
+
+def _path_without_dir(raw_path: str, excluded_real: str) -> list[str]:
+    kept: list[str] = []
+    for entry in raw_path.split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            if os.path.realpath(entry) == excluded_real:
+                continue
+        except OSError:
+            pass
+        kept.append(entry)
+    return kept
+
+
+def bind_app_token(
+    env: dict[str, str], token: str, *, shim_dir: Path = GH_SHIM_DIR
+) -> None:
+    """Bind `token` into `env` and shield `gh` from per-command keyring overrides."""
+    env["GH_TOKEN"] = token
+    env["GITHUB_TOKEN"] = token
+    env[APP_TOKEN_ENV] = token
+
+    try:
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        shim_real = os.path.realpath(shim_dir)
+    except OSError:
+        return
+
+    clean_entries = _path_without_dir(env.get("PATH") or os.defpath, shim_real)
+    real_gh = shutil.which("gh", path=os.pathsep.join(clean_entries))
+    if real_gh:
+        env[REAL_GH_ENV] = real_gh
+    else:
+        env.pop(REAL_GH_ENV, None)
+
+    shim_path = shim_dir / "gh"
+    try:
+        needs_write = not shim_path.is_file() or shim_path.read_text() != _GH_SHIM_SCRIPT
+        if needs_write:
+            tmp_path = shim_dir / f".gh.tmp.{os.getpid()}"
+            tmp_path.write_text(_GH_SHIM_SCRIPT)
+            os.chmod(tmp_path, 0o755)
+            os.replace(tmp_path, shim_path)
+        elif not os.access(shim_path, os.X_OK):
+            os.chmod(shim_path, 0o755)
+    except OSError:
+        return
+
+    env["PATH"] = os.pathsep.join([shim_real, *clean_entries])
+
+
+def clear_app_token_shim(
+    env: dict[str, str], *, shim_dir: Path = GH_SHIM_DIR
+) -> None:
+    """Drop App-shim env vars when falling back to the operator's credential."""
+    env.pop(APP_TOKEN_ENV, None)
+    env.pop(REAL_GH_ENV, None)
+    try:
+        shim_real = os.path.realpath(shim_dir)
+    except OSError:
+        return
+    if "PATH" in env:
+        env["PATH"] = os.pathsep.join(_path_without_dir(env["PATH"], shim_real))
+

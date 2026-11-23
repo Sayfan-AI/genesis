@@ -195,3 +195,144 @@ def test_the_seeded_placeholder_file_parses(tmp_path) -> None:
     assert environ["GENESIS_GITHUB_APP_ID"] == "42"
     assert environ["GENESIS_GITHUB_APP_SECRET"].startswith("-----BEGIN RSA PRIVATE KEY-----")
     assert environ["GENESIS_GITHUB_APP_SECRET"].endswith("-----END RSA PRIVATE KEY-----")
+
+
+# ---------- shielding `gh` from per-command keyring overrides (issue #192) ----------
+
+
+def _fake_real_gh(bin_dir) -> tuple:
+    """Install a stand-in `gh` that logs every invocation and its token env."""
+    log_file = bin_dir / "gh.calls.jsonl"
+    real_gh = bin_dir / "gh"
+    real_gh.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"with open({str(log_file)!r}, 'a') as f:\n"
+        "    f.write(json.dumps({\n"
+        "        'argv': sys.argv[1:],\n"
+        "        'GH_TOKEN': os.environ.get('GH_TOKEN'),\n"
+        "        'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN'),\n"
+        "    }) + '\\n')\n"
+        "if sys.argv[1:3] == ['auth', 'token']:\n"
+        "    print('gho_operator_keyring_secret')\n"
+        "else:\n"
+        "    print('ok')\n"
+    )
+    real_gh.chmod(0o755)
+    return real_gh, log_file
+
+
+def test_shim_preserves_app_identity_across_gh_auth_token_override(tmp_path) -> None:
+    """Measured failure (genesis issue #192): personal agent instructions told
+    child sessions to run `GH_TOKEN=$(gh auth token --user <login>) gh ...`,
+    pulling the operator's keyring token and opening PRs/comments as the human."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _, log_file = _fake_real_gh(bin_dir)
+    shim_dir = tmp_path / ".genesis" / ".gh-shim"
+
+    env = {"PATH": f"{bin_dir}:{os.defpath}"}
+    appauth.bind_app_token(env, "ghs_app_minted", shim_dir=shim_dir)
+
+    assert "ghs_app_minted" not in (shim_dir / "gh").read_text(), (
+        "the token belongs in the environment, never on disk"
+    )
+
+    proc = subprocess.run(
+        ["/bin/sh", "-c", 'GH_TOKEN="$(gh auth token --user operator)" gh pr create --fill'],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.strip() == "ok"
+    calls = [json.loads(line) for line in log_file.read_text().splitlines()]
+    assert calls == [
+        {
+            "argv": ["pr", "create", "--fill"],
+            "GH_TOKEN": "ghs_app_minted",
+            "GITHUB_TOKEN": "ghs_app_minted",
+        }
+    ], "real `gh auth token` must never be reached, and `gh pr create` must run as the App"
+
+
+def test_shim_restores_app_token_even_under_direct_inline_override(tmp_path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _, log_file = _fake_real_gh(bin_dir)
+    shim_dir = tmp_path / ".genesis" / ".gh-shim"
+
+    env = {"PATH": f"{bin_dir}:{os.defpath}"}
+    appauth.bind_app_token(env, "ghs_app_minted", shim_dir=shim_dir)
+
+    subprocess.run(
+        ["/bin/sh", "-c", "GH_TOKEN=gho_manual GITHUB_TOKEN=gho_manual gh issue comment 1 --body hi"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    calls = [json.loads(line) for line in log_file.read_text().splitlines()]
+    assert calls[0]["GH_TOKEN"] == "ghs_app_minted"
+    assert calls[0]["GITHUB_TOKEN"] == "ghs_app_minted"
+
+
+@pytest.mark.parametrize("subcmd", ["login", "logout", "switch", "refresh", "setup-git"])
+def test_shim_refuses_gh_auth_mutations_inside_app_sessions(tmp_path, subcmd) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _, log_file = _fake_real_gh(bin_dir)
+    shim_dir = tmp_path / ".genesis" / ".gh-shim"
+
+    env = {"PATH": f"{bin_dir}:{os.defpath}"}
+    appauth.bind_app_token(env, "ghs_app_minted", shim_dir=shim_dir)
+
+    proc = subprocess.run(
+        ["/bin/sh", "-c", f"gh auth {subcmd}"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 2
+    assert "disabled inside an App-authenticated genesis session" in proc.stderr
+    assert not log_file.exists()
+
+
+def test_shim_falls_back_to_path_walk_and_never_recurses_into_itself(tmp_path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _, log_file = _fake_real_gh(bin_dir)
+    shim_dir = tmp_path / ".genesis" / ".gh-shim"
+
+    env = {"PATH": f"{bin_dir}:{os.defpath}"}
+    appauth.bind_app_token(env, "ghs_first", shim_dir=shim_dir)
+    appauth.bind_app_token(env, "ghs_second", shim_dir=shim_dir)
+    assert env["PATH"].split(os.pathsep).count(os.path.realpath(shim_dir)) == 1
+
+    # Drop the pre-resolved hint so the shell PATH walk has to skip self_dir.
+    env.pop(appauth.REAL_GH_ENV, None)
+    subprocess.run(
+        ["/bin/sh", "-c", "gh issue list"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    calls = [json.loads(line) for line in log_file.read_text().splitlines()]
+    assert calls[0]["GH_TOKEN"] == "ghs_second"
+
+
+def test_clear_app_token_shim_restores_personal_credential_mode(tmp_path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _fake_real_gh(bin_dir)
+    shim_dir = tmp_path / ".genesis" / ".gh-shim"
+
+    env = {"PATH": f"{bin_dir}:{os.defpath}"}
+    appauth.bind_app_token(env, "ghs_app_minted", shim_dir=shim_dir)
+    appauth.clear_app_token_shim(env, shim_dir=shim_dir)
+
+    assert appauth.APP_TOKEN_ENV not in env
+    assert appauth.REAL_GH_ENV not in env
+    assert os.path.realpath(shim_dir) not in env["PATH"].split(os.pathsep)
+

@@ -371,10 +371,14 @@ class ClaudeEngine(Engine):
 #   unattended session couldn't commit, push or run `gh`. Sessions run with it
 #   off, the same machine reach a Claude session has in local mode, and
 #   host-guard.sh still guards through the hook.
-# - Project hooks in `.codex/hooks.json` only load headless with
-#   `--dangerously-bypass-hook-trust`. Their PreToolUse payload matches Claude
-#   Code's (`tool_name: "Bash"`, `tool_input.command`), so the seeded guards
-#   work unchanged, and exit 2 blocks the command before it runs.
+# - Project hooks in `.codex/hooks.json` only load headless when BOTH
+#   `--trust` and `--dangerously-bypass-hook-trust` are passed: without
+#   `--trust`, a repository not already marked trusted in `~/.codex/config.toml`
+#   logs "Untrusted project-local configuration is disabled" and skips
+#   `.codex/hooks.json` completely (measured on codex-cli 0.171.0; the #146
+#   spike directories happened to be trusted already). Their PreToolUse payload
+#   matches Claude Code's (`tool_name: "Bash"`, `tool_input.command`), so the
+#   seeded guards work unchanged, and exit 2 blocks the command before it runs.
 # - Usage is tokens, never dollars, and `turn.completed.usage` is the running
 #   total for the whole session, not the turn: a resumed turn reported 142,552
 #   input tokens, of which its own share was 33,307. A session the plane kills
@@ -388,6 +392,7 @@ class ClaudeEngine(Engine):
 # The flags every unattended session runs with. See the notes above.
 CODEX_UNATTENDED_FLAGS = (
     "--json",
+    "--trust",
     "--dangerously-bypass-approvals-and-sandbox",
     "--dangerously-bypass-hook-trust",
 )
