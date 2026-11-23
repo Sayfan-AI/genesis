@@ -136,9 +136,16 @@ def script(repo, timeline, monkeypatch):
 @pytest.fixture
 def plane(repo, monkeypatch):
     """A control plane with GitHub stubbed out, ready to run sessions."""
+    from genesis.comments import CommentPollResult
+
     monkeypatch.setattr(server, "_gh_token", lambda: "fake-token")
     monkeypatch.setattr(server, "mint_installation_token", lambda *a, **k: None)
     monkeypatch.setattr(server, "loki_push", lambda *a, **k: True)
+    monkeypatch.setattr(
+        server,
+        "fetch_comments",
+        lambda *a, **k: CommentPollResult(comments=[], etag=None, not_modified=True),
+    )
     return server.LocalControlPlane(
         repo="chaos/repo", poll_interval=1, session_timeout=60,
         agent=".claude/agents/orchestrator.md",
