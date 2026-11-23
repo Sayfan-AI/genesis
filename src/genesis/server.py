@@ -46,6 +46,8 @@ from typing import Iterable
 
 from genesis.appauth import (
     TRANSIENT_HTTP_ERRORS,
+    bind_app_token,
+    clear_app_token_shim,
     load_app_credentials,
     local_env_path,
     mint_installation_token,
@@ -1390,14 +1392,15 @@ class LocalControlPlane:
             env.pop(secret, None)
 
         if app_token:
-            env["GH_TOKEN"] = app_token
-            env["GITHUB_TOKEN"] = app_token
+            bind_app_token(env, app_token)
             if not self.identity_logged:
                 log("  agent authenticates as the Genesis App, not your account")
                 self.identity_logged = True
-        elif not self.identity_logged:
-            log("  agent uses your personal gh credential - its commits will look like yours")
-            self.identity_logged = True
+        else:
+            clear_app_token_shim(env)
+            if not self.identity_logged:
+                log("  agent uses your personal gh credential - its commits will look like yours")
+                self.identity_logged = True
 
         # What the session claims work under. `issues.sh claim` writes it into a
         # marker comment on the issue, which is the only reason a claim can later

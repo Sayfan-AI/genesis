@@ -120,6 +120,7 @@ def test_every_known_runtime_file_is_ignored(scaffolded: Path) -> None:
         ".genesis/.poll-etag",  # event-poll cursor
         ".genesis/.poll-highwater",  # event-poll cursor
         ".genesis/.trigger-state",  # the one the enumeration missed
+        ".genesis/.gh-shim/gh",  # App-identity `gh` wrapper written by _session_env
     ):
         assert _ignored(scaffolded, name), f"{name} is written by every local-mode run"
 

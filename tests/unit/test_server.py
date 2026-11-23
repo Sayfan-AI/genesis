@@ -800,8 +800,18 @@ def test_app_private_key_never_reaches_the_agent(plane, monkeypatch) -> None:
         plane.run_orchestrator(None)
     env = popen.call_args[1]["env"]
     assert env["GH_TOKEN"] == "ghs_minted"
+    assert env["GENESIS_APP_TOKEN"] == "ghs_minted"
+    assert env["PATH"].split(os.pathsep)[0].endswith("/.genesis/.gh-shim")
     assert "GENESIS_GITHUB_APP_SECRET" not in env
     assert "GENESIS_GITHUB_APP_ID" not in env
+
+
+def test_personal_fallback_clears_any_inherited_app_shim(plane, monkeypatch) -> None:
+    monkeypatch.setattr(server, "mint_installation_token", lambda repo, env: None)
+    monkeypatch.setenv("GENESIS_APP_TOKEN", "ghs_stale")
+    env = plane._session_env()
+    assert "GENESIS_APP_TOKEN" not in env
+    assert not env.get("PATH", "").split(os.pathsep)[0].endswith("/.genesis/.gh-shim")
 
 
 def test_any_abnormal_ending_resumes_not_just_max_turns(plane) -> None:

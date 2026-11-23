@@ -113,7 +113,12 @@ def test_codex_runs_unattended_with_stdin_closed_and_no_turn_flag() -> None:
     eng = CodexEngine()
     cmd = eng.session_command("do it", resume=None, max_turns=40, tools="Read")
     assert cmd[:2] == ["codex", "exec"] and cmd[-1] == "do it"
-    for flag in ("--json", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"):
+    for flag in (
+        "--json",
+        "--trust",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+    ):
         assert flag in cmd
     assert "--max-turns" not in cmd, "codex has no such flag; the plane enforces the budget"
     assert eng.close_stdin is True and eng.enforces_turn_budget is False
@@ -124,6 +129,7 @@ def test_codex_resume_continues_the_session_with_the_continuation_prompt() -> No
     eng = CodexEngine()
     cmd = eng.session_command("do it", resume="t-1", max_turns=40, tools="Read")
     assert cmd[:4] == ["codex", "exec", "resume", "t-1"]
+    assert "--trust" in cmd and "--dangerously-bypass-hook-trust" in cmd
     assert cmd[-1] == eng.resume_prompt and "do it" not in cmd
 
 
@@ -132,6 +138,7 @@ def test_the_codex_judge_is_read_only_and_leaves_no_session() -> None:
     assert cmd[cmd.index("--sandbox") + 1] == "read-only"
     assert "--ephemeral" in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+    assert "--trust" not in cmd
 
 
 def test_the_codex_parser_maps_measured_events() -> None:
