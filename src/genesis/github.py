@@ -100,6 +100,46 @@ def create_github_repo(
     return f"https://github.com/{owner}/{project_name}"
 
 
+def ensure_actions_enabled(repo_url: str) -> None:
+    """Make sure GitHub Actions is on for the repo, and turn it on if it isn't.
+
+    A dev system's whole loop runs on Actions, and with Actions off the repo has
+    no Actions tab, so the seeded workflows can't even be seen, let alone enabled
+    by `activate.sh`. A new repo usually starts with Actions on, but not always:
+    sagrin/alpha, created by genesis-new on 2026-11-20, came up with it off, and
+    the human had to switch it on in the repo's settings. Its earlier siblings
+    didn't need that. So check, enable if needed, and check again.
+
+    Runs before the first push, so the workflow files register against a repo
+    where Actions is already on. An organization policy can forbid what the repo
+    setting asks for; then the PUT fails or the setting stays off, and that's an
+    error with the fix in it, rather than a repo that looks published but whose
+    automation can never start.
+    """
+    path = repo_url.removeprefix("https://github.com/").removesuffix(".git").strip("/")
+    endpoint = f"repos/{path}/actions/permissions"
+
+    def enabled() -> bool:
+        return json.loads(_run_gh(["api", endpoint])).get("enabled") is True
+
+    if enabled():
+        return
+    try:
+        _run_gh(["api", "-X", "PUT", endpoint, "-F", "enabled=true", "-f", "allowed_actions=all"])
+    except GitHubError as e:
+        raise GitHubError(
+            f"GitHub Actions is off for {path} and couldn't be turned on ({e}). "
+            "An organization policy may be blocking it: an org owner can allow Actions "
+            "under the organization's Settings > Actions > General, then rerun."
+        ) from e
+    if not enabled():
+        raise GitHubError(
+            f"GitHub Actions is still off for {path} after enabling it. Check the "
+            "organization's Settings > Actions > General policy, then enable Actions "
+            "under the repo's Settings > Actions > General."
+        )
+
+
 def push_to_github(repo_path: Path, repo_url: str) -> None:
     """Point `origin` at the repo over SSH and push main. See [ssh_remote_url]."""
     ssh_url = ssh_remote_url(repo_url)
@@ -246,7 +286,7 @@ def publish_to_github(
     org: str | None = None,
     private: bool = True,
 ) -> str:
-    """Full publish flow: create repo, push, disable workflows, open issue #1.
+    """Full publish flow: create repo, make sure Actions is on, push, disable workflows, open issue #1.
 
     Returns the repo URL.
     """
@@ -257,6 +297,7 @@ def publish_to_github(
         pass  # Already on main
 
     repo_url = create_github_repo(project_name, org=org, private=private)
+    ensure_actions_enabled(repo_url)
     push_to_github(path, repo_url)
 
     # Disable the seed workflows until the human supplies credentials (see above).
