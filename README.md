@@ -2,7 +2,7 @@
 
 A minimal meta-factory that bootstraps autonomous, self-improving AI dev systems.
 
-You give genesis a goal. Genesis creates an AI system — built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and GitHub — that works toward that goal autonomously. The system designs its own agents, tools, and workflows. It monitors its own progress. It improves how it improves.
+You give genesis a goal. Genesis creates an AI system — built on GitHub and a coding agent, [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [OpenAI Codex](https://github.com/openai/codex) — that works toward that goal autonomously. The system designs its own agents, tools, and workflows. It monitors its own progress. It improves how it improves.
 
 Genesis is a bootstrapper, not a supervisor. Once it creates and seeds the dev system, its job is done.
 
@@ -52,7 +52,7 @@ Genesis uses **one GitHub App per user/org, shared by every project you bootstra
 
 ### Bootstrap a project
 
-1. **Scaffold + publish.** In a Claude Code or Codex session in this repo, run the `genesis-new` skill with your goal. Genesis picks a topology, scaffolds the dev system, creates the GitHub repo, opens issue #1, and **publishes the workflows disabled** so they don't fail before credentials exist.
+1. **Scaffold + publish.** In a Claude Code or Codex session in this repo, run the `genesis-new` skill with your goal. Genesis asks which engine the system should run on, picks a topology, scaffolds the dev system, creates the GitHub repo, opens issue #1, and **publishes the workflows disabled** so they don't fail before credentials exist.
 
 2. **Activate.** From a clone of the new dev repo, run one command:
 
@@ -70,6 +70,7 @@ Every dev system gets a scaffold that it can evolve:
 
 - **Seed agents** — three to start: orchestrator, human interaction, and evolver. The orchestrator also plays project manager, onboarder, and health-checker until the system earns the evidence to split those into their own agents.
 - **Orchestrator workflows** — GitHub Actions (cron + event-triggered) launching Claude Agent SDK sessions
+- **Either engine** — the rules live in `AGENTS.md`, which both Claude Code and Codex read, and `CLAUDE.md` imports it. The system gets hooks for both (`.claude/settings.json` and `.codex/hooks.json`), and `.genesis/config.toml` names the engine `genesis serve` runs, so switching is one line. `genesis-new` asks which one you want. GitHub Actions mode runs Claude Code either way.
 - **Observability** — Claude Code hooks that log all agent activity to Grafana Loki (opt-in — without the Loki secrets, Actions runs leave no activity trail)
 - **Scripts** — shell scripts for issue management and structured logging (zero binary distribution overhead)
 - **Meta-concepts** — principles the dev system operates by (see below)
@@ -159,10 +160,13 @@ genesis workflows enable   # Re-enable manually-disabled workflows
 ```
 
 `genesis serve`:
-- Preflight-checks that `claude` is on PATH before touching workflows, so the repo never ends up with GHA disabled and no working local orchestrator.
-- Disables all active GHA workflows on start (re-enables on graceful shutdown — Ctrl+C). Prevents the "two cooks in the kitchen" problem. Tracks the set it disabled in `.genesis/.disabled-by-genesis` and only re-enables that set, so workflows the user had paused before `genesis serve` stay paused.
+- Runs its sessions on the dev system's engine: `--engine`, then `GENESIS_ENGINE`, then `[engine] name` in `.genesis/config.toml`, then `claude`. A Codex system runs only in local mode.
+- Preflight-checks that the engine's binary (`claude` or `codex`) is on PATH before touching workflows, so the repo never ends up with GHA disabled and no working local orchestrator.
+- Disables the active `genesis-*` GHA workflows on start (re-enables on graceful shutdown — Ctrl+C), leaving CI and other gates running. `--all-workflows` disables every workflow instead. Prevents the "two cooks in the kitchen" problem. Tracks the set it disabled in `.genesis/.disabled-by-genesis` and only re-enables that set, so workflows the user had paused before `genesis serve` stay paused.
 - Polls the GitHub repo events API (`/repos/{owner}/{repo}/events`) with ETags. One call covers issues, comments, PRs, pushes — no rate-limit cost when nothing changed. The events endpoint returns at most 100 events per page; if a poll sees more activity than that, genesis logs a warning suggesting a shorter `--poll-interval`.
-- Launches `claude -p` against the orchestrator agent on each relevant event. Same agent definition as GHA mode.
+- Launches a session against the orchestrator agent on each relevant event: `claude -p` for Claude Code, `codex exec --json` for Codex. Same agent definition as GHA mode.
+- Keeps each session within its budget. Claude Code enforces its own `--max-turns`; Codex has none, so the plane counts a Codex session's tool calls and stops it at the budget. A session that reaches its budget is resumed where it stopped, up to six times.
+- Bounds what a task and a whole run may spend, in the engine's own unit: dollars for Claude Code, tokens for Codex, settled from Codex's session log after each session. The Codex defaults come from the first dev system run on Codex, whose whole first milestone took about 640,000 tokens.
 - PID lock at `.genesis/.orchestrator.lock` prevents concurrent local instances. State (ETag, high-water event id) persists in `.genesis/`.
 
 Config (env vars or CLI flags):
@@ -172,8 +176,15 @@ Config (env vars or CLI flags):
 | `GENESIS_REPO` | `--repo` | detected from git remote |
 | `GENESIS_POLL_INTERVAL` | `--poll-interval` | 60 (seconds) |
 | `GENESIS_SESSION_TIMEOUT` | `--session-timeout` | 3600 (seconds) |
+| `GENESIS_ENGINE` | `--engine` | `[engine] name` in `.genesis/config.toml`, else `claude` |
+| `GENESIS_AGENT` | `--agent` | `.claude/agents/orchestrator.md` |
+| | `--all-workflows` | off: only `genesis-*` workflows are disabled |
+| `GENESIS_TASK_COST_CEILING` | | $50 per task (Claude Code) |
+| `GENESIS_RUN_COST_BUDGET` | | $150 per run (Claude Code) |
+| `GENESIS_TASK_TOKEN_CEILING` | | 1,000,000 tokens per task (Codex) |
+| `GENESIS_RUN_TOKEN_BUDGET` | | 3,000,000 tokens per run (Codex) |
 
-Auth uses the user's existing `gh` CLI (`gh auth token`) and `ANTHROPIC_API_KEY` from the environment.
+Auth uses the user's existing `gh` CLI (`gh auth token`), plus `ANTHROPIC_API_KEY` from the environment for Claude Code, or a Codex login (`codex login`, or `CODEX_API_KEY`) for Codex.
 
 If `genesis serve` exits non-gracefully, GHA workflows stay disabled. Recover with `genesis workflows enable` or by re-running `genesis serve`.
 
@@ -210,6 +221,7 @@ genesis/
 ├── src/genesis/          # Core Python package
 │   ├── cli.py            # `genesis` CLI entry point (serve, workflows)
 │   ├── server.py         # Local control plane (poll loop, orchestrator launch)
+│   ├── engines.py        # Claude Code and Codex: session commands, output parsing, budgets
 │   ├── workflows.py      # Enable/disable GHA workflows via `gh`
 │   ├── scaffold.py       # Create/augment repos with dev system scaffolding
 │   └── github.py         # GitHub integration (repo creation, issue #1)
@@ -217,10 +229,12 @@ genesis/
 │   ├── agents/           # Seed agent definitions
 │   ├── scripts/          # log.sh, issues.sh, activate.sh
 │   ├── workflows/        # GitHub Actions orchestrator workflows
-│   ├── claude_md.md.j2   # CLAUDE.md template
+│   ├── agents_md.md.j2   # AGENTS.md template: the rules both engines read
+│   ├── config.toml.j2    # .genesis/config.toml, including the [engine] name
+│   ├── codex_hooks.json  # Codex hooks (.codex/hooks.json)
 │   ├── gitignore         # Dev repo .gitignore (dotted on the way out; a
 │   │                     #   dotted name here would ignore templates/ itself)
-│   └── settings.json     # CC hooks configuration
+│   └── settings.json     # Claude Code hooks (.claude/settings.json)
 ├── tests/
 │   ├── unit/             # Unit tests for cli/server/workflows
 │   └── e2e/              # End-to-end tests for all topologies
@@ -230,7 +244,7 @@ genesis/
 
 ## Status
 
-Early development. Scaffolding engine, `genesis-new` skill, and local control plane (`genesis serve`) are functional with passing unit and e2e tests. See [docs/design.md](docs/design.md) for architecture and [docs/evaluations.md](docs/evaluations.md) for technology decisions.
+Early development. Scaffolding engine, `genesis-new` skill, and local control plane (`genesis serve`) are functional with passing unit and e2e tests, on Claude Code and on Codex. The first dev system run on Codex, [genesis-codex-trial](https://github.com/Sayfan-AI/genesis-codex-trial), finished its milestone end to end. See [docs/design.md](docs/design.md) for architecture and [docs/evaluations.md](docs/evaluations.md) for technology decisions.
 
 ## Related Work
 
