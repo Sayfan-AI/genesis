@@ -32,7 +32,7 @@ BASH = "/bin/bash"
 
 COMPLETE = (
     '{"permissions":{"contents":"write","issues":"write","pull_requests":"write",'
-    '"workflows":"write","actions":"write","metadata":"read"}}'
+    '"workflows":"write","actions":"write","checks":"read","metadata":"read"}}'
 )
 
 
@@ -64,7 +64,7 @@ def test_a_complete_grant_passes() -> None:
 
 @pytest.mark.parametrize(
     "missing",
-    ["contents", "issues", "pull_requests", "workflows", "actions"],
+    ["contents", "issues", "pull_requests", "workflows", "actions", "checks"],
 )
 def test_each_required_grant_is_actually_required(missing) -> None:
     """One case per permission, because a check that only ever ran against the

@@ -53,6 +53,10 @@ jobs:
           # primary inputs - and leaves it reviewing a system it cannot see
           # failing (genesis issue #14, hit on the-gigi/butterfly). Read-only.
           permission-actions: read
+          # Red checks on pull requests are evolver signal too, and without this
+          # `gh pr checks` and every `statusCheckRollup` read fail with 403
+          # Resource not accessible by integration (genesis issue #134). Read-only.
+          permission-checks: read
 
       - uses: anthropics/claude-code-action@v1
         with:

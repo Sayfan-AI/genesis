@@ -85,6 +85,10 @@ jobs:
           # dispatching runs, so every re-trigger below 403'd and the loop went
           # quiet after each otherwise-successful merge.
           permission-actions: write
+          # The candidate query below asks `gh pr list` for `statusCheckRollup`,
+          # and without this the whole query fails with Resource not accessible
+          # by integration, so nothing is ever merged (genesis issue #134).
+          permission-checks: read
 
       # This job had no checkout for most of its life, on the grounds that no
       # step read a file from the repo and a checkout is pure latency on a job

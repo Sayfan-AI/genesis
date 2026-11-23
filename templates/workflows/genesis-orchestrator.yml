@@ -51,6 +51,11 @@ jobs:
           # primary inputs - and leaves it reviewing a system it cannot see
           # failing (genesis issue #14, hit on the-gigi/butterfly). Read-only.
           permission-actions: read
+          # `issues.sh summary` lists stalled pull requests from each one's
+          # `statusCheckRollup`, and `gh pr checks` reads the same thing. Without
+          # this both fail with 403 Resource not accessible by integration and
+          # the stalled-PR section comes up empty (genesis issue #134). Read-only.
+          permission-checks: read
 
       # A scheduled run while a `needs:human` gate is open reads the state,
       # confirms the gate, and exits - about $0.13 to learn nothing. Measured on
